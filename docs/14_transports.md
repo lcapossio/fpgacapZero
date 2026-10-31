@@ -19,6 +19,7 @@ operations the controllers care about:
 | `select_chain(chain)` | Switch to a BSCANE2 USER chain (`1`..`4`) — internally this picks an IR opcode from the `ir_table` |
 | `read_reg(addr)` / `write_reg(addr, value)` | 49-bit DR scan against the chain's register interface |
 | `raw_dr_scan(bits, width)` / `raw_dr_scan_batch(...)` | Raw DR shift for the burst engines (32-, 72-, 256-bit) |
+| `raw_dr_capture(width, tdi=0)` | One long DR scan shifting a constant TDI, returning TDO (the EJTAG-AXI streaming read). The default builds the word and calls `raw_dr_scan()` |
 
 For EJTAG-AXI on Arty / `hw_server`, the batched form matters in
 practice: isolated USER4 raw scans were observed to return zeros on
@@ -240,6 +241,23 @@ bugs (BUG-004).
 # Called internally by Analyzer.capture() — you don't call this directly
 timestamps = transport.read_timestamp_block(0x1100, capture_len, 32)
 ```
+
+#### Long scans and the chain lock
+
+Two methods serve the EJTAG-AXI [streaming read](07_ejtag_axi_bridge.md#streaming-read):
+
+- `raw_dr_capture(width, tdi=0)` shifts one DR scan of a constant TDI
+  with `drshift -tdi`, so no per-bit Tcl string goes in, and reads TDO
+  back with `run -hex`.  A 270 kbit scan costs about its TCK time.
+- `jtag_lock(timeout_ms=5000)` / `jtag_unlock()` wrap xsdb's
+  `jtag lock` / `jtag unlock`.  One `jtag sequence` always runs
+  uninterrupted, but between two sequences other hw_server clients (a
+  soft-CPU debugger, the Vivado hardware manager, hw_server's own
+  polls) can scan the chain.  A protocol that keeps state across
+  sequences holds the lock for its whole length.  `jtag_lock()` raises
+  `RuntimeError` when the lock is not granted; `jtag_unlock()` is best
+  effort.  Only `XilinxHwServerTransport` has them; `stream_read()`
+  looks them up with `getattr` and runs unprotected without them.
 
 ### `OpenOcdTransport`
 
@@ -665,6 +683,12 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
   (CLI `--no-burst`) reads through the pipelined register window instead.
 - **Clock.** `tck_hz` (default 6 MHz) becomes 30 MHz divided by an integer,
   so 30 MHz at most.  `actual_tck_hz` reports the clock you got.
+- **TDO sample edge.** Up to 15 MHz TDO is sampled on the rising TCK edge,
+  above it on the falling edge (`sample_falling` says which), a full period
+  after the target drove it.  At 30 MHz the Arty A7's onboard cable takes
+  longer than half a period to return TDO: sampled on the rising edge, every
+  bit lands one late (IDCODE `0x27c72027`, IR length 7).
+  `tdo_sample_edge="rising"` or `"falling"` overrides the choice.
 - **Driver.** On Windows, FTDI-based cables (FlashPro5, Digilent) already run
   on FTDI's D2XX driver, which installs `ftd2xx.dll`, so you swap no
   drivers.  Each channel opens for one program at a time.  Close Libero's
@@ -674,7 +698,8 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
   library explicitly.
 - **Sharing in one process.** Transports on the same channel in one Python
   process share one handle: for example the ELA, EIO and bridge sessions of
-  the RPC server or the GUI.  The first transport's clock and layout apply,
+  the RPC server or the GUI.  The first transport's clock, layout and sample
+  edge apply,
   and the channel closes with the last transport.
 - **Validated** on the PolarFire SoC Discovery Kit's embedded FlashPro5: all
   11 hardware tests of
@@ -690,9 +715,12 @@ Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
 | 1024-sample burst | 3 ms |
 | 1024 samples through the register window | 22 ms |
 
-All 11 board hardware tests pass on it.  On an Arty A7, the Digilent channel
-identifies the xc7a100t, but no fcapz core answered on the bitstream loaded
-at the time, so register and burst access on AMD/Xilinx remain unverified.
+All 11 board hardware tests pass on it.
+
+On the Arty A7 (`arty_a7_vex_top`, onboard Digilent channel A) at 6 and
+30 MHz: `probe`, an ELA capture through the burst path, and EJTAG-AXI
+reads.  At 30 MHz `read_block` reads about 190 KB/s and the streaming read
+about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
 
 ## IR table presets
 

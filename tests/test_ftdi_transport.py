@@ -117,6 +117,7 @@ class _FakeD2xx:
         self.tms = 1
         self.divisor = None
         self.pins = None  # last ADBUS value set with 0x80
+        self.falling_reads = 0  # read commands that sample TDO on the falling edge
 
     # enumeration
     def FT_CreateDeviceInfoList(self, count):
@@ -167,6 +168,9 @@ class _FakeD2xx:
         i = 0
         while i < len(cmd):
             op = cmd[i]
+            if op in (0x3D, 0x3F, 0x6F):  # falling-edge TDO sample: same bits here
+                self.falling_reads += 1
+                op &= ~0x04
             if op in (0x8A, 0x97, 0x8D, 0x85, 0x87):
                 i += 1
             elif op == 0x86:
@@ -353,6 +357,37 @@ class SharedChannelTests(_FtdiTestCase):
         self._transport()
         self._transport(device="Embedded FlashPro5 A")
         self.assertEqual(self.lib.opens, 1)
+
+    def test_second_transport_takes_the_channel_sample_edge(self):
+        self._transport(tck_hz=30e6)
+        b = self._transport(tck_hz=6e6)
+        self.assertTrue(b.sample_falling)
+
+
+class SampleEdgeTests(_FtdiTestCase):
+    def test_rising_edge_up_to_15_mhz(self):
+        t = self._transport(tck_hz=15e6)
+        self.assertFalse(t.sample_falling)
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+        self.assertEqual(self.lib.falling_reads, 0)
+
+    def test_falling_edge_above_15_mhz(self):
+        t = self._transport(tck_hz=30e6)
+        self.assertTrue(t.sample_falling)
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+        self.assertGreater(self.lib.falling_reads, 0)
+
+    def test_explicit_rising_at_30_mhz(self):
+        self.assertFalse(self._transport(tck_hz=30e6, tdo_sample_edge="rising").sample_falling)
+
+    def test_explicit_falling_at_6_mhz(self):
+        t = self._transport(tck_hz=6e6, tdo_sample_edge="falling")
+        self.assertTrue(t.sample_falling)
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+
+    def test_rejects_unknown_edge(self):
+        with self.assertRaises(ValueError):
+            FtdiMpsseTransport(tdo_sample_edge="both")
 
 
 class BatchTests(unittest.TestCase):

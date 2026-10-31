@@ -21,11 +21,31 @@
 //   CMD_FIFO_DEPTH  - async command FIFO depth (default 2*FIFO_DEPTH)
 //   RESP_FIFO_DEPTH - async response FIFO depth (default 2*FIFO_DEPTH)
 //   TIMEOUT    - AXI ready timeout in axi_clk cycles   (default 4096)
+//   STREAM_EN  - streaming read mode (default 0; needs DATA_W = 32)
 //   *_FIFO_MEMORY_TYPE - XPM storage selectors ("auto", "block", "distributed")
 //
 // 72-bit DR format (LSB first):
 //   Shift-in:  [31:0] addr, [63:32] payload, [67:64] wstrb, [71:68] cmd
 //   Shift-out: [31:0] rdata, [63:32] info, [65:64] resp, [67:66] rsvd, [71:68] status
+//
+// Streaming read (STREAM_EN, FEATURES[24]):
+//   CMD_STREAM_RSTART (addr = start, payload = word count) puts the DR in
+//   stream mode.  The AXI side reads the range in INCR bursts that never
+//   cross 4 KB and only start when the burst FIFO has room for the whole
+//   burst, so the slave is never back-pressured.  Every DR scan in stream
+//   mode, of any length, shifts out 33-bit slots (LSB first):
+//     slot = {data[31:0], valid}
+//   Slot 0 of every scan is a header, valid = 0, data = words not yet
+//   delivered (lets the host detect a scan it did not issue).  A word
+//   slot has valid = 1; valid = 0 means the FIFO was empty and nothing
+//   was consumed.  A word counts as delivered only once all 33 bits have
+//   been shifted out; a scan that ends inside a slot re-sends that word
+//   in the next scan.  TDI must be 0: a scan that shifts in any 1 aborts
+//   the stream exactly like CMD_RESET.  Stream mode ends at the UPDATE of
+//   the first scan whose header reads 0, so the host confirms the count
+//   of the last words it took with one more (header-only, 33-bit) scan;
+//   the next normal scan returns the stream's AXI response (first non-OKAY
+//   resp of the range) with prev_valid.
 
 module fcapz_ejtagaxi #(
     parameter ADDR_W     = 32,
@@ -35,6 +55,7 @@ module fcapz_ejtagaxi #(
     parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
+    parameter STREAM_EN  = 0,
     parameter USE_BEHAV_ASYNC_FIFO    = 1,
     parameter ASYNC_FIFO_IMPL = (USE_BEHAV_ASYNC_FIFO ? 0 : 1),
     parameter CMD_FIFO_MEMORY_TYPE   = "auto",
@@ -107,6 +128,7 @@ module fcapz_ejtagaxi #(
     localparam CMD_BURST_WDATA = 4'h7;
     localparam CMD_BURST_RDATA = 4'h8;
     localparam CMD_BURST_RSTART= 4'h9;
+    localparam CMD_STREAM_RSTART = 4'hA;
     localparam CMD_CONFIG      = 4'hE;
     localparam CMD_RESET       = 4'hF;
 
@@ -125,7 +147,8 @@ module fcapz_ejtagaxi #(
                      ST_CMD_FETCH    = 4'd11,
                      ST_CMD_DISPATCH = 4'd12,
                      ST_BURST_W_FETCH= 4'd13,
-                     ST_BURST_W_LOAD = 4'd14;
+                     ST_BURST_W_LOAD = 4'd14,
+                     ST_STREAM_ISSUE = 4'd15;
 
     // Config register addresses
     localparam CFG_VERSION   = 16'h0000;
@@ -194,12 +217,23 @@ module fcapz_ejtagaxi #(
 
     // ---- Async FIFO pointer widths -------------------------------------------
     localparam FIFO_AW = $clog2(FIFO_DEPTH);
+    // Wide enough to count to TIMEOUT - 1 (12 bits at the default 4096).
+    localparam TO_W = (TIMEOUT > 1) ? $clog2(TIMEOUT) : 1;
     localparam CMD_FIFO_AW = $clog2(CMD_FIFO_DEPTH);
     localparam RESP_FIFO_AW = $clog2(RESP_FIFO_DEPTH);
     // Encoded into FEATURES[23:16] as (FIFO_DEPTH-1) so 256 fits in 8 bits.
     localparam [7:0] FIFO_DEPTH_ENC = FIFO_DEPTH - 1;
     localparam CMDQ_W  = 4 + ADDR_W + DATA_W + (DATA_W/8) + 8 + 3 + 2;
     localparam RESPQ_W = DATA_W + 2;
+
+    // Streaming read: one 33-bit slot per word; bursts of a quarter of the
+    // burst FIFO, started only while the FIFO has room for all of them plus
+    // a small margin for the FIFO's own count latency.
+    localparam [0:0] STREAM_ON = (STREAM_EN != 0) && (DATA_W == 32);
+    localparam SLOT_W        = 33;
+    localparam STREAM_BURST  = (FIFO_DEPTH >= 4) ? FIFO_DEPTH / 4 : 1;
+    localparam STREAM_MARGIN = (FIFO_DEPTH >= 16) ? 4 : 0;
+    localparam STREAM_LIMIT  = FIFO_DEPTH - STREAM_BURST - STREAM_MARGIN;
 
     // ---- Parameter assertions ------------------------------------------------
     // FIFO_DEPTH bounds: must be >=1, <=256 (AXI4 burst max), and power of 2
@@ -247,7 +281,9 @@ module fcapz_ejtagaxi #(
     // -- AXI FSM state --------------------------------------------------------
     reg [3:0]  axi_state;
     reg        rready_q;   // R-channel ready for single reads
-    reg [11:0] timeout_cnt;
+    reg        r_drain;    // discard the rest of a read cut off by RESET or an R timeout
+    reg [TO_W-1:0] drain_cnt;  // cycles without a beat while draining (saturates)
+    reg [TO_W-1:0] timeout_cnt;
     reg [7:0]  beat_count;
     reg        reset_req_sync1_axi;
     reg        reset_req_sync2_axi;
@@ -262,6 +298,14 @@ module fcapz_ejtagaxi #(
     reg                 dbg_axi_deq_fire;
     reg [15:0]          dbg_axi_cycle_count;
     reg [15:0]          dbg_axi_deq_count;
+
+    // -- Streaming read (axi_clk domain) --------------------------------------
+    reg                 strm_active;   // ST_BURST_AR/R_FILL serve the stream
+    reg [ADDR_W-1:0]    strm_addr;     // next burst address
+    reg [31:0]          strm_left;     // words not yet requested
+    reg [7:0]           strm_len;      // beats of the next burst
+    reg                 strm_len_ok;   // strm_len computed for strm_addr/left
+    reg [1:0]           strm_err;      // first non-OKAY rresp of the stream
 
     // ========================================================================
     //  TCK domain registers
@@ -324,6 +368,18 @@ module fcapz_ejtagaxi #(
     reg        reset_req_toggle;
     reg        reset_ack_sync1_tck;
     reg        reset_ack_sync2_tck;
+
+    // Streaming read (tck domain)
+    reg              stream_mode;
+    reg [31:0]       stream_left;      // words not yet delivered
+    reg              stream_hold_full; // word in the slot, or re-sent next scan
+    reg [31:0]       stream_hold;
+    reg              stream_nxt_valid; // look-ahead word popped from the FIFO
+    reg [31:0]       stream_nxt;
+    reg              stream_slot_valid;
+    reg [5:0]        stream_bitpos;    // shift edges into the current slot
+    reg              stream_tdi_one;   // any TDI 1 this scan: abort
+    reg              stream_hdr_zero;  // this scan's header read 0: last scan
     wire       reset_busy_tck = (reset_req_toggle != reset_ack_sync2_tck);
 
     // TCK -> AXI command FIFO.  This replaces the old req_toggle/shadow_*
@@ -374,6 +430,7 @@ module fcapz_ejtagaxi #(
     wire [DATA_W-1:0]     fifo_rdata;
     wire                  fifo_empty;
     wire [FIFO_AW:0]      fifo_rd_count;
+    wire [FIFO_AW:0]      fifo_wr_count;
     wire                  fifo_notempty = !fifo_empty;
     wire [7:0]            fifo_count   = fifo_rd_count[FIFO_AW:0];
 
@@ -451,12 +508,30 @@ module fcapz_ejtagaxi #(
         .rd_empty (fifo_empty),
         .rd_rst_busy (),
         .rd_count (fifo_rd_count),
-        .wr_count ()
+        .wr_count (fifo_wr_count)
     );
 
+    // In stream mode the DR holds slot data, not a command: UPDATE decodes
+    // nothing, except that a scan with a TDI 1 in it acts as CMD_RESET.
+    wire       stream_on_now = STREAM_ON && stream_mode;
+    wire [3:0] upd_cmd       = stream_on_now ? CMD_RESET : sr_cmd;
+
+    // Stream look-ahead: pop the FIFO head into stream_nxt whenever it is free
+    // (any TCK edge; the slot logic consumes it at a slot boundary).
+    wire stream_pop = stream_on_now && !stream_nxt_valid && fifo_notempty;
+
     // FIFO read: pop on UPDATE when BURST_RDATA and previous scan also read
-    assign fifo_rd_en = sel && update && (sr_cmd == CMD_BURST_RDATA) &&
-                        fifo_notempty && (last_cmd == CMD_BURST_RDATA);
+    assign fifo_rd_en = (sel && update && !stream_on_now &&
+                         (sr_cmd == CMD_BURST_RDATA) &&
+                         fifo_notempty && (last_cmd == CMD_BURST_RDATA)) ||
+                        stream_pop;
+
+    // Next slot at a slot boundary.  A valid slot is always stream_hold; once
+    // its last bit is out it is delivered and stream_hold frees up.
+    wire        stream_hold_busy = stream_hold_full && !stream_slot_valid;
+    wire [31:0] stream_left_after = stream_left - {31'd0, stream_slot_valid};
+    wire        stream_take_nxt  = !stream_hold_busy && stream_nxt_valid &&
+                                   (stream_left_after != 32'd0);
 
     // Config read value (latched at update time when cmd=CONFIG)
     reg [31:0] config_rdata;
@@ -575,9 +650,55 @@ module fcapz_ejtagaxi #(
         end else if (cmdq_wr_en) begin
             cmdq_stage_valid <= 1'b0;
         end
+        if (stream_pop) begin
+            stream_nxt       <= fifo_rdata;
+            stream_nxt_valid <= 1'b1;
+        end
         if (sel) begin
             respq_head_seen <= respq_rd_ready && !respq_empty;
-            if (capture) begin
+            if (capture && stream_on_now) begin
+                // Header slot: words still to deliver.  Leaves the response
+                // queue alone; the stream's response is read after it ends.
+                sr <= {{(DR_W-SLOT_W){1'b0}}, stream_left, 1'b0};
+                stream_slot_valid <= 1'b0;
+                stream_bitpos     <= 6'd0;
+                stream_tdi_one    <= 1'b0;
+                stream_hdr_zero   <= (stream_left == 32'd0);
+
+            end else if (shift_en && stream_on_now) begin
+                stream_tdi_one <= stream_tdi_one | tdi;
+                if (stream_bitpos == SLOT_W - 1) begin
+                    // Last bit of the slot is out: deliver it, load the next.
+                    stream_bitpos <= 6'd0;
+                    stream_left   <= stream_left_after;
+                    if (stream_hold_busy) begin
+                        // Re-send the word a previous scan cut short.
+                        sr <= {{(DR_W-SLOT_W){1'b0}}, stream_hold, 1'b1};
+                        stream_slot_valid <= 1'b1;
+                    end else if (stream_take_nxt) begin
+                        sr <= {{(DR_W-SLOT_W){1'b0}}, stream_nxt, 1'b1};
+                        stream_hold       <= stream_nxt;
+                        stream_hold_full  <= 1'b1;
+                        stream_nxt_valid  <= 1'b0;
+                        stream_slot_valid <= 1'b1;
+                    end else begin
+                        sr <= {DR_W{1'b0}};
+                        stream_hold_full  <= 1'b0;
+                        stream_slot_valid <= 1'b0;
+                    end
+                end else begin
+                    sr <= {tdi, sr[DR_W-1:1]};
+                    stream_bitpos <= stream_bitpos + 6'd1;
+                end
+
+            end else if (update && stream_on_now && !stream_tdi_one) begin
+                // A word cut short stays in stream_hold for the next scan.
+                prev_valid       <= 1'b0;
+                resp_pop_pending <= 1'b0;
+                if (stream_hdr_zero)
+                    stream_mode <= 1'b0;
+
+            end else if (capture) begin
                 resp_pop_pending <= capture_resp_data;
                 // Assemble shift-out register from computed mux outputs
                 if (capture_prev_valid) begin
@@ -639,7 +760,7 @@ module fcapz_ejtagaxi #(
                     dbg_tck_update_count    <= dbg_tck_update_count + 1'b1;
                 end
 
-                case (sr_cmd)
+                case (upd_cmd)
                     CMD_NOP: begin
                         // No operation
                     end
@@ -867,6 +988,34 @@ module fcapz_ejtagaxi #(
                         // FIFO pop is handled by fifo_rd_en (combinational)
                     end
 
+                    CMD_STREAM_RSTART: begin
+                        if (!STREAM_ON) begin
+                            // Streaming not built in: NOP.
+                        end else if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
+                            cmdq_stage_valid <= 1'b1;
+                            cmdq_stage_data  <= {CMD_STREAM_RSTART, sr_addr[ADDR_W-1:0],
+                                                 sr_payload[DATA_W-1:0],
+                                                 {(DATA_W/8){1'b0}},
+                                                 burst_awlen, burst_awsize, burst_awburst};
+                            pending_count <= pending_count + 1'b1;
+                            burst_cfg_valid <= 1'b0;
+                            burst_w_beats_left <= 9'd0;
+                            // The burst FIFO must be empty here (host sends
+                            // CMD_RESET first); every word it then receives
+                            // belongs to this stream.
+                            stream_mode       <= (sr_payload != 32'd0);
+                            stream_left       <= sr_payload;
+                            stream_hold_full  <= 1'b0;
+                            stream_nxt_valid  <= 1'b0;
+                            stream_slot_valid <= 1'b0;
+                            stream_bitpos     <= 6'd0;
+                            stream_tdi_one    <= 1'b0;
+                            stream_hdr_zero   <= 1'b0;
+                        end else begin
+                            error_sticky <= 1'b1;
+                        end
+                    end
+
                     CMD_CONFIG: begin
                         // Latch config value now (sr_addr is valid at update)
                         case (sr_addr[15:0])
@@ -874,8 +1023,10 @@ module fcapz_ejtagaxi #(
                             CFG_VERSION_ALIAS: config_rdata <= `FCAPZ_EJTAGAXI_VERSION_REG;
                             // FEATURES: [7:0]=ADDR_W, [15:8]=DATA_W,
                             // [23:16]=(FIFO_DEPTH-1)  (AXI4 awlen convention,
-                            // so FIFO_DEPTH=256 fits as 0xFF; host adds 1)
-                            CFG_FEATURES:  config_rdata <= {8'd0,
+                            // so FIFO_DEPTH=256 fits as 0xFF; host adds 1),
+                            // [24]=streaming read
+                            CFG_FEATURES:  config_rdata <= {7'd0,
+                                                            STREAM_ON,
                                                             FIFO_DEPTH_ENC,
                                                             DATA_W[7:0],
                                                             ADDR_W[7:0]};
@@ -962,6 +1113,14 @@ module fcapz_ejtagaxi #(
                         last_cmd      <= CMD_NOP;
                         dbg_rec_count <= 3'd0;
                         dbg_resp_cap_rec_count <= 3'd0;
+                        stream_mode       <= 1'b0;
+                        stream_left       <= 32'd0;
+                        stream_hold_full  <= 1'b0;
+                        stream_nxt_valid  <= 1'b0;
+                        stream_slot_valid <= 1'b0;
+                        stream_bitpos     <= 6'd0;
+                        stream_tdi_one    <= 1'b0;
+                        stream_hdr_zero   <= 1'b0;
                         reset_req_toggle <= ~reset_req_toggle;
                     end
 
@@ -972,7 +1131,7 @@ module fcapz_ejtagaxi #(
 
                 // Track last command for capture-time data source selection.
                 // AXI commands update only when successfully enqueued.
-                case (sr_cmd)
+                case (upd_cmd)
                     CMD_NOP, CMD_SET_ADDR, CMD_CONFIG, CMD_BURST_SETUP,
                     CMD_BURST_RDATA:
                         // These are always handled (no CDC needed), safe to update
@@ -984,7 +1143,7 @@ module fcapz_ejtagaxi #(
                     default:
                         // AXI commands update only if queued.
                         if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
-                            case (sr_cmd)
+                            case (upd_cmd)
                                 CMD_WRITE, CMD_WRITE_INC:
                                     if (sr_wstrb != {(DATA_W/8){1'b0}})
                                         last_cmd <= sr_cmd;
@@ -1057,6 +1216,16 @@ module fcapz_ejtagaxi #(
         dbg_tck_update_full = 1'b0;
         dbg_tck_update_count = 16'd0;
         dbg_tck_enqueue_count = 16'd0;
+        stream_mode       = 1'b0;
+        stream_left       = 32'd0;
+        stream_hold_full  = 1'b0;
+        stream_hold       = 32'd0;
+        stream_nxt_valid  = 1'b0;
+        stream_nxt        = 32'd0;
+        stream_slot_valid = 1'b0;
+        stream_bitpos     = 6'd0;
+        stream_tdi_one    = 1'b0;
+        stream_hdr_zero   = 1'b0;
     end
 
     // ========================================================================
@@ -1086,7 +1255,13 @@ module fcapz_ejtagaxi #(
         resp_rdata          = {DATA_W{1'b0}};
         resp_code           = 2'b00;
         axi_state           = ST_IDLE;
-        timeout_cnt         = 12'd0;
+        strm_active         = 1'b0;
+        strm_addr           = {ADDR_W{1'b0}};
+        strm_left           = 32'd0;
+        strm_len            = 8'd0;
+        strm_len_ok         = 1'b0;
+        strm_err            = 2'b00;
+        timeout_cnt         = {TO_W{1'b0}};
         beat_count          = 8'd0;
         reset_req_sync1_axi = 1'b0;
         reset_req_sync2_axi = 1'b0;
@@ -1117,16 +1292,30 @@ module fcapz_ejtagaxi #(
         m_axi_arburst       = 2'b01;
         m_axi_arvalid       = 1'b0;
         rready_q            = 1'b0;
+        r_drain             = 1'b0;
+        drain_cnt           = {TO_W{1'b0}};
         cmdq_rst_axi        = 1'b0;
         fifo_rst_axi        = 1'b0;
         respq_rst_axi       = 1'b0;
     end
 
+    // A read the slave has accepted and not finished (see r_drain).
+    wire r_inflight = (axi_state == ST_WAIT_R) || (axi_state == ST_BURST_R_FILL) ||
+                      (((axi_state == ST_AR) || (axi_state == ST_BURST_AR)) &&
+                       m_axi_arvalid && m_axi_arready);
+
+    // Stream bursts: STREAM_BURST beats, cut at the stream end and at 4 KB.
+    wire [10:0] strm_to_4k   = 11'd1024 - {1'b0, strm_addr[11:2]};
+    wire [10:0] strm_len_a   = (strm_left < STREAM_BURST) ? strm_left[10:0]
+                                                          : STREAM_BURST[10:0];
+    wire [10:0] strm_len_nxt = (strm_to_4k < strm_len_a) ? strm_to_4k : strm_len_a;
+    wire        strm_room    = ({1'b0, fifo_wr_count} <= STREAM_LIMIT);
+
     // ---- AXI master FSM -----------------------------------------------------
     always @(posedge axi_clk or posedge axi_rst) begin
         if (axi_rst) begin
             axi_state         <= ST_IDLE;
-            timeout_cnt       <= 12'd0;
+            timeout_cnt       <= {TO_W{1'b0}};
             beat_count        <= 8'd0;
             reset_req_sync1_axi <= 1'b0;
             reset_req_sync2_axi <= 1'b0;
@@ -1168,11 +1357,31 @@ module fcapz_ejtagaxi #(
             m_axi_arburst     <= 2'b01;
             m_axi_arvalid     <= 1'b0;
             rready_q          <= 1'b0;
+            r_drain           <= 1'b0;
+            drain_cnt         <= {TO_W{1'b0}};
             cmdq_rst_axi      <= 1'b0;
             fifo_rst_axi      <= 1'b0;
             respq_rst_axi     <= 1'b0;
+            strm_active       <= 1'b0;
+            strm_addr         <= {ADDR_W{1'b0}};
+            strm_left         <= 32'd0;
+            strm_len          <= 8'd0;
+            strm_len_ok       <= 1'b0;
+            strm_err          <= 2'b00;
         end else begin
             reset_req_sync1_axi <= reset_req_toggle;
+            // The drain only ends at RLAST: a beat that arrives however late
+            // is still discarded.  Commands wait for it at most TIMEOUT
+            // cycles without a beat (drain_cnt); after that they run, but
+            // reads answer SLVERR without issuing an AR (ST_CMD_DISPATCH), so
+            // a slave that never answers cannot wedge the bridge.
+            if (!r_drain || m_axi_rvalid) begin
+                drain_cnt <= {TO_W{1'b0}};
+                if (r_drain && m_axi_rvalid && m_axi_rlast)
+                    r_drain <= 1'b0;
+            end else if (drain_cnt < TIMEOUT - 1) begin
+                drain_cnt <= drain_cnt + 1;
+            end
             reset_req_sync2_axi <= reset_req_sync1_axi;
             if (DEBUG_EN) begin
                 dbg_axi_deq_fire <= 1'b0;
@@ -1218,7 +1427,7 @@ module fcapz_ejtagaxi #(
                 reset_req_seen_axi     <= reset_req_sync2_axi;
                 dut_reset_ack_toggle_axi <= reset_req_sync2_axi;
                 axi_state              <= ST_IDLE;
-                timeout_cnt            <= 12'd0;
+                timeout_cnt            <= {TO_W{1'b0}};
                 beat_count             <= 8'd0;
                 launch_cmd             <= 4'h0;
                 launch_addr            <= {ADDR_W{1'b0}};
@@ -1238,6 +1447,13 @@ module fcapz_ejtagaxi #(
                 cmdq_rst_axi           <= 1'b1;
                 respq_rst_axi          <= 1'b1;
                 fifo_rst_axi           <= 1'b1;
+                strm_active            <= 1'b0;
+                strm_len_ok            <= 1'b0;
+                // A read already accepted by the slave is drained, so its
+                // beats cannot land in the next command (an aborted stream
+                // usually has a burst in flight).
+                if (r_inflight && !(m_axi_rvalid && m_axi_rready && m_axi_rlast))
+                    r_drain <= 1'b1;
                 if (DEBUG_EN) begin
                     dbg_resp_wr_rec_count  <= 3'd0;
                     dbg_axi_deq_rec_count  <= 3'd0;
@@ -1252,10 +1468,10 @@ module fcapz_ejtagaxi #(
                     m_axi_bready  <= 1'b0;
                     m_axi_arvalid <= 1'b0;
                     rready_q      <= 1'b0;
-                    timeout_cnt   <= 12'd0;
+                    timeout_cnt   <= {TO_W{1'b0}};
                     beat_count    <= 8'd0;
 
-                    if (!cmdq_empty) begin
+                    if (!cmdq_empty && (!r_drain || drain_cnt >= TIMEOUT - 1)) begin
                         // Give FWFT async FIFO one full rd_clk cycle with
                         // empty=0 before sampling/popping the head word.
                         axi_state <= ST_CMD_FETCH;
@@ -1289,12 +1505,17 @@ module fcapz_ejtagaxi #(
                         end
 
                         CMD_READ: begin
-                            m_axi_araddr  <= launch_addr;
-                            m_axi_arlen   <= 8'd0;
-                            m_axi_arsize  <= 3'b010;
-                            m_axi_arburst <= 2'b01;
-                            m_axi_arvalid <= 1'b1;
-                            axi_state     <= ST_AR;
+                            if (r_drain) begin
+                                // Earlier beats still owed: no AR until they are in.
+                                axi_state     <= ST_TIMEOUT_ERR;
+                            end else begin
+                                m_axi_araddr  <= launch_addr;
+                                m_axi_arlen   <= 8'd0;
+                                m_axi_arsize  <= 3'b010;
+                                m_axi_arburst <= 2'b01;
+                                m_axi_arvalid <= 1'b1;
+                                axi_state     <= ST_AR;
+                            end
                         end
 
                         CMD_BURST_WDATA: begin
@@ -1312,12 +1533,31 @@ module fcapz_ejtagaxi #(
                         end
 
                         CMD_BURST_RSTART: begin
-                            m_axi_araddr  <= launch_addr;
-                            m_axi_arlen   <= launch_burst_len;
-                            m_axi_arsize  <= launch_burst_size;
-                            m_axi_arburst <= launch_burst_type;
-                            m_axi_arvalid <= 1'b1;
-                            axi_state     <= ST_BURST_AR;
+                            if (r_drain) begin
+                                axi_state     <= ST_TIMEOUT_ERR;
+                            end else begin
+                                m_axi_araddr  <= launch_addr;
+                                m_axi_arlen   <= launch_burst_len;
+                                m_axi_arsize  <= launch_burst_size;
+                                m_axi_arburst <= launch_burst_type;
+                                m_axi_arvalid <= 1'b1;
+                                axi_state     <= ST_BURST_AR;
+                            end
+                        end
+
+                        CMD_STREAM_RSTART: begin
+                            if (STREAM_ON) begin
+                                strm_addr   <= {launch_addr[ADDR_W-1:2], 2'b00};
+                                strm_left   <= launch_wdata;
+                                strm_err    <= 2'b00;
+                                strm_len_ok <= 1'b0;
+                                strm_active <= 1'b1;
+                                axi_state   <= ST_STREAM_ISSUE;
+                            end else begin
+                                resp_code  <= 2'b00;
+                                resp_rdata <= {DATA_W{1'b0}};
+                                axi_state  <= ST_DONE;
+                            end
                         end
 
                         default: begin
@@ -1344,7 +1584,7 @@ module fcapz_ejtagaxi #(
                         m_axi_wlast   <= 1'b0;
                         m_axi_bready  <= 1'b1;
                         axi_state     <= ST_WAIT_B;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1372,7 +1612,7 @@ module fcapz_ejtagaxi #(
                         m_axi_arvalid <= 1'b0;
                         rready_q      <= 1'b1;
                         axi_state     <= ST_WAIT_R;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1389,8 +1629,12 @@ module fcapz_ejtagaxi #(
                         axi_state    <= ST_DONE;
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
+                        if (timeout_cnt >= TIMEOUT - 1) begin
+                            // The slave accepted the AR: drain the late
+                            // beat so it cannot land in a later read.
+                            r_drain   <= 1'b1;
                             axi_state <= ST_TIMEOUT_ERR;
+                        end
                     end
                 end
 
@@ -1419,7 +1663,7 @@ module fcapz_ejtagaxi #(
                                 axi_state  <= ST_BURST_W;
                             end
                         end
-                        timeout_cnt <= 12'd0;
+                        timeout_cnt <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1436,7 +1680,7 @@ module fcapz_ejtagaxi #(
                             m_axi_wlast  <= 1'b0;
                             m_axi_bready <= 1'b1;
                             axi_state    <= ST_WAIT_B;
-                            timeout_cnt  <= 12'd0;
+                            timeout_cnt  <= {TO_W{1'b0}};
                         end
                     end
                     // New data from host via command FIFO
@@ -1465,7 +1709,7 @@ module fcapz_ejtagaxi #(
                         m_axi_wvalid <= 1'b1;
                         m_axi_wlast  <= (beat_count == launch_burst_len);
                         beat_count   <= beat_count + 1;
-                        timeout_cnt  <= 12'd0;
+                        timeout_cnt  <= {TO_W{1'b0}};
                         axi_state <= ST_BURST_W;
                     end else begin
                         m_axi_wvalid <= 1'b0;
@@ -1481,7 +1725,7 @@ module fcapz_ejtagaxi #(
                     if (m_axi_arready) begin
                         m_axi_arvalid <= 1'b0;
                         axi_state     <= ST_BURST_R_FILL;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1494,17 +1738,54 @@ module fcapz_ejtagaxi #(
                     // m_axi_rready is !fifo_full here (assigned below), so
                     // a beat is accepted exactly when fifo_wr_en writes it.
                     if (m_axi_rvalid && !fifo_full) begin
-                        timeout_cnt    <= 12'd0;
-                        if (m_axi_rlast) begin
+                        timeout_cnt    <= {TO_W{1'b0}};
+                        if (strm_active && m_axi_rresp != 2'b00 && strm_err == 2'b00)
+                            strm_err <= m_axi_rresp;
+                        if (m_axi_rlast && strm_active) begin
+                            strm_addr <= strm_addr + {{(ADDR_W-10){1'b0}}, strm_len, 2'b00};
+                            strm_left <= strm_left - {24'd0, strm_len};
+                            axi_state <= ST_STREAM_ISSUE;
+                        end else if (m_axi_rlast) begin
                             resp_code    <= m_axi_rresp;
                             resp_rdata   <= m_axi_rdata;
                             axi_state    <= ST_DONE;
                         end
                     end else if (!m_axi_rvalid) begin
                         timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
+                        if (timeout_cnt >= TIMEOUT - 1) begin
+                            // Drain the rest of the burst: left on the R
+                            // channel it would become the first beats of
+                            // the next read (or stream) with resp OKAY.
+                            r_drain   <= 1'b1;
                             axi_state <= ST_TIMEOUT_ERR;
+                        end
                     end
+                end
+
+                // ---- Stream: next burst, or the stream's one response ----
+                ST_STREAM_ISSUE: begin
+                    if (strm_left == 32'd0) begin
+                        resp_code   <= strm_err;
+                        resp_rdata  <= {DATA_W{1'b0}};
+                        strm_active <= 1'b0;
+                        axi_state   <= ST_DONE;
+                    end else if (!strm_len_ok) begin
+                        strm_len    <= strm_len_nxt[7:0];
+                        strm_len_ok <= 1'b1;
+                    end else if (strm_room && !r_drain) begin
+                        // While earlier beats are still owed the stream
+                        // stalls; the host sees no words and aborts.
+                        m_axi_araddr  <= strm_addr;
+                        m_axi_arlen   <= strm_len - 8'd1;
+                        m_axi_arsize  <= 3'b010;
+                        m_axi_arburst <= 2'b01;
+                        m_axi_arvalid <= 1'b1;
+                        strm_len_ok   <= 1'b0;
+                        timeout_cnt   <= {TO_W{1'b0}};
+                        axi_state     <= ST_BURST_AR;
+                    end
+                    // No timeout while waiting for room: the host drains the
+                    // FIFO at JTAG pace.
                 end
 
                 // ---- Transaction complete: toggle ack ----
@@ -1522,6 +1803,7 @@ module fcapz_ejtagaxi #(
 
                 // ---- Timeout error: signal error and ack ----
                 ST_TIMEOUT_ERR: begin
+                    strm_active   <= 1'b0;
                     m_axi_awvalid <= 1'b0;
                     m_axi_wvalid  <= 1'b0;
                     m_axi_wlast   <= 1'b0;
@@ -1550,7 +1832,8 @@ module fcapz_ejtagaxi #(
     // Burst fill: ready is the FIFO's own !full, not a registered copy.  A
     // registered copy stayed high in the cycle the FIFO filled, so the slave
     // handed over a beat that fifo_wr_en did not write.
-    assign m_axi_rready = (axi_state == ST_BURST_R_FILL) ? !fifo_full : rready_q;
+    assign m_axi_rready = r_drain                        ? 1'b1       :
+                          (axi_state == ST_BURST_R_FILL) ? !fifo_full : rready_q;
 
     assign debug_axi = DEBUG_EN ? {
         cmdq_rd_data,

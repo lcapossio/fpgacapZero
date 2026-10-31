@@ -339,6 +339,22 @@ TARGETS: tuple[Target, ...] = (
         ),
     ),
     Target(
+        "fcapz_ejtagaxi_r_drain",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        "fcapz_ejtagaxi_r_drain",
+        {"FIFO_DEPTH": 16, "TIMEOUT": 64},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
         "fcapz_ejtaguart",
         "fcapz_ejtaguart",
         (RTL / "fcapz_async_fifo.v", RTL / "fcapz_ejtaguart.v"),
@@ -395,6 +411,11 @@ COVERAGE_TARGETS = {
         "EJTAG_AXI_COCOTB_RUN",
     ),
     "fcapz_ejtagaxi_reset_regression": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_r_drain": (
         "fcapz_ejtagaxi",
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",

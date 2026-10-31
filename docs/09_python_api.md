@@ -530,6 +530,7 @@ info = bridge.connect()
 #   "addr_w": 32,
 #   "data_w": 32,
 #   "fifo_depth": 16,
+#   "stream": False,
 # }
 
 # Single transactions
@@ -544,12 +545,19 @@ bridge.write_block(0x40000000, [0xAA, 0xBB, 0xCC])
 words = bridge.burst_read(0x40000000, count=16)    # count <= fifo_depth
 bridge.burst_write(0x40000000, [0xAA, 0xBB, 0xCC, 0xDD])
 
+# Streaming read (bitstreams built with STREAM_EN=1)
+if bridge.has_stream():
+    words = bridge.stream_read(0x40000000, count=65536)
+
 bridge.close()
 ```
 
 `axi_read` / `axi_write` raise `AXIError` on a non-OKAY response.
 `burst_read` / `burst_write` raise `ValueError` if the count
 exceeds `fifo_depth` or AXI4's max burst (256).
+`stream_read` raises `RuntimeError` on a bitstream without the
+streaming read and `AXIError` when the range's AXI response is not OKAY
+or every retry failed.
 Old EJTAG-AXI bitstreams that still report `"EJAX"` are accepted with a
 `RuntimeWarning`; their `connect()` info includes `legacy_id=True` and
 `legacy_raw_id=0x454A4158`. `bridge_id` and `core_id` stay normalized to
