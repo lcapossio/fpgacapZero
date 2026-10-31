@@ -77,6 +77,11 @@ class EjtagAxiStreamRtlTests(unittest.TestCase):
         self._run_tb("drain-timeout", {"STALL_CYCLES": 4300},
                      tb=DRAIN_TB, expect="PASS: drain")
 
+    def test_r_timeout_past_12_bits_is_drained(self):
+        # TIMEOUT > 4096: the timeout and drain counters must still reach it.
+        self._run_tb("drain-timeout-8192", {"TIMEOUT": 8192, "STALL_CYCLES": 8600},
+                     tb=DRAIN_TB, expect="PASS: drain")
+
     def test_burst_in_flight_at_the_abort_is_drained(self):
         self._run_tb("drain-abort",
                      {"STALL_CYCLES": 3000, "PRE_SCANS": 2, "PRE_SLOTS": 1},

@@ -81,6 +81,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Write-channel timeouts and a RESET during an unaccepted address phase are
   not covered yet.
 
+- **EJTAG-AXI (Verilog): `TIMEOUT` above 4096 never fired.** The AXI timeout
+  counter was 12 bits wide, so it could not reach a larger `TIMEOUT` and a
+  slave that never answered hung the bridge. The counters are now sized from
+  `TIMEOUT` (still 12 bits at the default 4096); the VHDL core was not
+  affected.
+
 - **Manual corrections.** A full review of the manual against the code fixed
   wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;
   EJTAG-AXI reaches 32-bit addresses only; `WIDE_TRIG` is not a parameter of

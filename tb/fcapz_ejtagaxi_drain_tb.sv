@@ -77,6 +77,10 @@ module fcapz_ejtagaxi_drain_tb;
     endfunction
 
     integer fail_count = 0;
+
+    // The R timeout must fire for any TIMEOUT, not only those that fit 12 bits.
+    bit saw_r_timeout = 0;
+    always @(posedge axi_clk) if (dut.axi_state == 4'd10) saw_r_timeout <= 1;  // ST_TIMEOUT_ERR
     task automatic check(input string name, input bit ok);
         if (!ok) begin
             $display("FAIL: %s", name);
@@ -139,6 +143,8 @@ module fcapz_ejtagaxi_drain_tb;
         scan72(make_cmd(CMD_RESET, 0, 0), dout);   // TDI ones: abort
         idle(400);
         check("not in stream mode after the abort", dut.stream_mode == 1'b0);
+        check($sformatf("R timeout fired=%0d, want %0d", saw_r_timeout, STALL_CYCLES > TIMEOUT),
+              saw_r_timeout == (STALL_CYCLES > TIMEOUT));
 
         // Stream 2 must carry 0x400's words only.
         scan72(make_cmd(CMD_STREAM_RSTART, 32'h400, WORDS), dout);

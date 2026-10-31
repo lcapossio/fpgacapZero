@@ -217,6 +217,8 @@ module fcapz_ejtagaxi #(
 
     // ---- Async FIFO pointer widths -------------------------------------------
     localparam FIFO_AW = $clog2(FIFO_DEPTH);
+    // Wide enough to count to TIMEOUT - 1 (12 bits at the default 4096).
+    localparam TO_W = (TIMEOUT > 1) ? $clog2(TIMEOUT) : 1;
     localparam CMD_FIFO_AW = $clog2(CMD_FIFO_DEPTH);
     localparam RESP_FIFO_AW = $clog2(RESP_FIFO_DEPTH);
     // Encoded into FEATURES[23:16] as (FIFO_DEPTH-1) so 256 fits in 8 bits.
@@ -280,8 +282,8 @@ module fcapz_ejtagaxi #(
     reg [3:0]  axi_state;
     reg        rready_q;   // R-channel ready for single reads
     reg        r_drain;    // discard the rest of a read cut off by RESET or an R timeout
-    reg [11:0] drain_cnt;  // cycles without a beat while draining (saturates)
-    reg [11:0] timeout_cnt;
+    reg [TO_W-1:0] drain_cnt;  // cycles without a beat while draining (saturates)
+    reg [TO_W-1:0] timeout_cnt;
     reg [7:0]  beat_count;
     reg        reset_req_sync1_axi;
     reg        reset_req_sync2_axi;
@@ -1259,7 +1261,7 @@ module fcapz_ejtagaxi #(
         strm_len            = 8'd0;
         strm_len_ok         = 1'b0;
         strm_err            = 2'b00;
-        timeout_cnt         = 12'd0;
+        timeout_cnt         = {TO_W{1'b0}};
         beat_count          = 8'd0;
         reset_req_sync1_axi = 1'b0;
         reset_req_sync2_axi = 1'b0;
@@ -1291,7 +1293,7 @@ module fcapz_ejtagaxi #(
         m_axi_arvalid       = 1'b0;
         rready_q            = 1'b0;
         r_drain             = 1'b0;
-        drain_cnt           = 12'd0;
+        drain_cnt           = {TO_W{1'b0}};
         cmdq_rst_axi        = 1'b0;
         fifo_rst_axi        = 1'b0;
         respq_rst_axi       = 1'b0;
@@ -1313,7 +1315,7 @@ module fcapz_ejtagaxi #(
     always @(posedge axi_clk or posedge axi_rst) begin
         if (axi_rst) begin
             axi_state         <= ST_IDLE;
-            timeout_cnt       <= 12'd0;
+            timeout_cnt       <= {TO_W{1'b0}};
             beat_count        <= 8'd0;
             reset_req_sync1_axi <= 1'b0;
             reset_req_sync2_axi <= 1'b0;
@@ -1356,7 +1358,7 @@ module fcapz_ejtagaxi #(
             m_axi_arvalid     <= 1'b0;
             rready_q          <= 1'b0;
             r_drain           <= 1'b0;
-            drain_cnt         <= 12'd0;
+            drain_cnt         <= {TO_W{1'b0}};
             cmdq_rst_axi      <= 1'b0;
             fifo_rst_axi      <= 1'b0;
             respq_rst_axi     <= 1'b0;
@@ -1374,7 +1376,7 @@ module fcapz_ejtagaxi #(
             // reads answer SLVERR without issuing an AR (ST_CMD_DISPATCH), so
             // a slave that never answers cannot wedge the bridge.
             if (!r_drain || m_axi_rvalid) begin
-                drain_cnt <= 12'd0;
+                drain_cnt <= {TO_W{1'b0}};
                 if (r_drain && m_axi_rvalid && m_axi_rlast)
                     r_drain <= 1'b0;
             end else if (drain_cnt < TIMEOUT - 1) begin
@@ -1425,7 +1427,7 @@ module fcapz_ejtagaxi #(
                 reset_req_seen_axi     <= reset_req_sync2_axi;
                 dut_reset_ack_toggle_axi <= reset_req_sync2_axi;
                 axi_state              <= ST_IDLE;
-                timeout_cnt            <= 12'd0;
+                timeout_cnt            <= {TO_W{1'b0}};
                 beat_count             <= 8'd0;
                 launch_cmd             <= 4'h0;
                 launch_addr            <= {ADDR_W{1'b0}};
@@ -1466,7 +1468,7 @@ module fcapz_ejtagaxi #(
                     m_axi_bready  <= 1'b0;
                     m_axi_arvalid <= 1'b0;
                     rready_q      <= 1'b0;
-                    timeout_cnt   <= 12'd0;
+                    timeout_cnt   <= {TO_W{1'b0}};
                     beat_count    <= 8'd0;
 
                     if (!cmdq_empty && (!r_drain || drain_cnt >= TIMEOUT - 1)) begin
@@ -1582,7 +1584,7 @@ module fcapz_ejtagaxi #(
                         m_axi_wlast   <= 1'b0;
                         m_axi_bready  <= 1'b1;
                         axi_state     <= ST_WAIT_B;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1610,7 +1612,7 @@ module fcapz_ejtagaxi #(
                         m_axi_arvalid <= 1'b0;
                         rready_q      <= 1'b1;
                         axi_state     <= ST_WAIT_R;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1661,7 +1663,7 @@ module fcapz_ejtagaxi #(
                                 axi_state  <= ST_BURST_W;
                             end
                         end
-                        timeout_cnt <= 12'd0;
+                        timeout_cnt <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1678,7 +1680,7 @@ module fcapz_ejtagaxi #(
                             m_axi_wlast  <= 1'b0;
                             m_axi_bready <= 1'b1;
                             axi_state    <= ST_WAIT_B;
-                            timeout_cnt  <= 12'd0;
+                            timeout_cnt  <= {TO_W{1'b0}};
                         end
                     end
                     // New data from host via command FIFO
@@ -1707,7 +1709,7 @@ module fcapz_ejtagaxi #(
                         m_axi_wvalid <= 1'b1;
                         m_axi_wlast  <= (beat_count == launch_burst_len);
                         beat_count   <= beat_count + 1;
-                        timeout_cnt  <= 12'd0;
+                        timeout_cnt  <= {TO_W{1'b0}};
                         axi_state <= ST_BURST_W;
                     end else begin
                         m_axi_wvalid <= 1'b0;
@@ -1723,7 +1725,7 @@ module fcapz_ejtagaxi #(
                     if (m_axi_arready) begin
                         m_axi_arvalid <= 1'b0;
                         axi_state     <= ST_BURST_R_FILL;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
                         if (timeout_cnt >= TIMEOUT - 1)
@@ -1736,7 +1738,7 @@ module fcapz_ejtagaxi #(
                     // m_axi_rready is !fifo_full here (assigned below), so
                     // a beat is accepted exactly when fifo_wr_en writes it.
                     if (m_axi_rvalid && !fifo_full) begin
-                        timeout_cnt    <= 12'd0;
+                        timeout_cnt    <= {TO_W{1'b0}};
                         if (strm_active && m_axi_rresp != 2'b00 && strm_err == 2'b00)
                             strm_err <= m_axi_rresp;
                         if (m_axi_rlast && strm_active) begin
@@ -1779,7 +1781,7 @@ module fcapz_ejtagaxi #(
                         m_axi_arburst <= 2'b01;
                         m_axi_arvalid <= 1'b1;
                         strm_len_ok   <= 1'b0;
-                        timeout_cnt   <= 12'd0;
+                        timeout_cnt   <= {TO_W{1'b0}};
                         axi_state     <= ST_BURST_AR;
                     end
                     // No timeout while waiting for room: the host drains the
