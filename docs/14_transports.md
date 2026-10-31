@@ -717,10 +717,13 @@ Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
 
 All 11 board hardware tests pass on it.
 
-On the Arty A7 (`arty_a7_vex_top`, onboard Digilent channel A) at 6 and
-30 MHz: `probe`, an ELA capture through the burst path, and EJTAG-AXI
-reads.  At 30 MHz `read_block` reads about 190 KB/s and the streaming read
-about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
+On the Arty A7 (`arty_a7_vex_top`, onboard Digilent channel A) the board's
+hardware suite (`FPGACAP_BACKEND=ftdi`, see
+[`examples/arty_a7`](../examples/arty_a7/README.md)) passes at 6 and 30 MHz:
+ELA, EIO, EJTAG-AXI and the AXI monitor, 70 tests in about 20 s.  Only the
+tests that need the suite to program the FPGA, or a UART loopback bitstream,
+are skipped.  At 30 MHz `read_block` reads about 190 KB/s and the streaming
+read about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
 
 ## IR table presets
 
