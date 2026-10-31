@@ -640,10 +640,15 @@ class EjtagAxiController:
                 except AXIError:
                     # The range's own response: the stream has already ended.
                     raise
-                except Exception as exc:  # _StreamLost, transport I/O
+                except BaseException as exc:  # _StreamLost, transport I/O
+                    # Abort while the lock is still held: if the next lock()
+                    # or anything else fails, the bridge must not be left in
+                    # stream mode, where the next SET_ADDR would be an abort.
+                    self._abort_stream()
+                    if not isinstance(exc, Exception):
+                        raise
                     failures += 1
                     if failures > retries:
-                        self._abort_stream()
                         raise AXIError(
                             f"Stream read 0x{base_addr:08X}: {failures} "
                             f"attempt(s) failed, last: {exc}"

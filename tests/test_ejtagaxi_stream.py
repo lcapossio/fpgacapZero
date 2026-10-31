@@ -209,6 +209,25 @@ class StreamReadTests(unittest.TestCase):
         t.regs = [0x1000 + i for i in range(16)]
         self.assertEqual(ctrl.read_block(0x10, 4), [0x1004, 0x1005, 0x1006, 0x1007])
 
+    def test_failed_attempt_is_aborted_before_the_next_lock(self):
+        # A retry whose lock() fails must not leave the stream running.
+        ctrl, t = self._make()
+        locks = []
+
+        def lock():
+            locks.append(1)
+            if len(locks) == 2:
+                raise ConnectionError("lock lost")
+
+        t.jtag_lock = lock
+        t.jtag_unlock = lambda: None
+        t.drop_words = [3]
+        with self.assertRaises(ConnectionError):
+            ctrl.stream_read(0x0, 100, slots_per_scan=10, retries=2)
+        self.assertFalse(t.stream_mode)
+        t.regs = [0x1000 + i for i in range(16)]
+        self.assertEqual(ctrl.read_block(0x10, 4), [0x1004, 0x1005, 0x1006, 0x1007])
+
     def test_a_lost_word_in_the_last_scan_is_caught(self):
         ctrl, t = self._make()
         t.drop_words = [9]
