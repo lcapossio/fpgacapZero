@@ -36,6 +36,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Up to 15 MHz nothing changes. Verified on the Arty A7 at 30 MHz: probe, ELA
   capture and EJTAG-AXI reads.
 
+- **Arty A7 hardware suite over FTDI.** `FPGACAP_BACKEND=ftdi` runs
+  `examples/arty_a7/test_hw_integration.py` on the onboard cable through D2XX
+  (`FPGACAP_FTDI_TCK_MHZ`, default 30; `FPGACAP_FTDI_DEVICE`). The board must
+  be programmed first. All 70 tests that run without programming pass at 6 and
+  30 MHz, in about 20 s. The suite also gains a streaming-read test.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 
