@@ -8,17 +8,26 @@ These tests require:
   - An Arty A7-100T physically connected via USB
   - For hw_server backend: Vivado/XSDB on PATH, hw_server on localhost:3121
   - For openocd backend: OpenOCD running with examples/arty_a7/arty_a7.cfg
+  - For ftdi backend: the board's onboard Digilent cable (channel A) through
+    FTDI's D2XX driver, with hw_server, Vivado's Hardware Manager and OpenOCD
+    closed.  Neither openocd nor ftdi programs the FPGA: load the bitstream
+    first (for example with Vivado), then stop hw_server.
 
 Environment variables
 ---------------------
 FPGACAP_SKIP_HW=1
     Skip all hardware tests (CI default).
-FPGACAP_BACKEND=openocd|hw_server
+FPGACAP_BACKEND=hw_server|openocd|ftdi
     Select the transport backend.  Defaults to ``hw_server``.
 FPGACAP_OPENOCD_PORT=<port>
     OpenOCD TCL port.  Defaults to 6666.
 FPGACAP_OPENOCD_TAP=<tap>
     OpenOCD TAP name.  Defaults to ``xc7a100t.tap``.
+FPGACAP_FTDI_DEVICE=<name>
+    ``ftdi`` only: adapter channel description or serial.  Defaults to
+    ``Digilent USB Device A`` (the JTAG channel of the onboard cable).
+FPGACAP_FTDI_TCK_MHZ=<mhz>
+    ``ftdi`` only: TCK in MHz (30 MHz divided by an integer).  Defaults to 30.
 
 Run:
     # hw_server backend (default)
@@ -27,6 +36,9 @@ Run:
     # OpenOCD backend (start openocd first)
     openocd -f examples/arty_a7/arty_a7.cfg &
     FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+    # FTDI backend (bitstream already loaded, hw_server stopped)
+    FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 Skip if no hardware:
     FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -60,6 +72,8 @@ BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
+_FTDI_DEVICE = os.environ.get("FPGACAP_FTDI_DEVICE") or "Digilent USB Device A"
+_FTDI_TCK_MHZ = float(os.environ.get("FPGACAP_FTDI_TCK_MHZ", "30"))
 PORT = 3121
 FPGA = "xc7a100t"
 ELA0_SAMPLE_CLOCK_HZ = 150_000_000
@@ -247,6 +261,9 @@ if _STALE_MSG and not _SKIP:
 
 
 def _make_transport():
+    if _BACKEND == "ftdi":
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+        return FtdiMpsseTransport(device=_FTDI_DEVICE, tck_hz=_FTDI_TCK_MHZ * 1e6)
     if _BACKEND == "openocd":
         from fcapz.transport import OpenOcdTransport
         return OpenOcdTransport(port=_OPENOCD_PORT, tap=_OPENOCD_TAP)
@@ -259,7 +276,10 @@ def _make_transport():
 def _rpc_connect_req():
     """`connect` request for the active backend — drives the RpcServer handlers
     (rebind / ejtag_axi_probe) exactly as the web/CLI do. hw_server programs the
-    bitstream on connect; openocd assumes the board is already loaded."""
+    bitstream on connect; openocd and ftdi assume the board is already loaded."""
+    if _BACKEND == "ftdi":
+        return {"cmd": "connect", "backend": "ftdi", "hardware": _FTDI_DEVICE,
+                "tck_mhz": _FTDI_TCK_MHZ, "ir_table": "xilinx7"}
     if _BACKEND == "openocd":
         return {"cmd": "connect", "backend": "openocd", "host": "127.0.0.1",
                 "port": _OPENOCD_PORT, "tap": _OPENOCD_TAP, "ir_table": "xilinx7"}
@@ -1403,6 +1423,26 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         self.bridge.burst_write(0x00, data)
         result = self.bridge.burst_read(0x00, 8)
         self.assertEqual(result, data)
+
+    def test_stream_read(self):
+        """Streaming read of 64 Ki words, checked against the slave's words."""
+        import time
+
+        if not self.bridge.has_stream:
+            self.skipTest("bitstream built without STREAM_EN")
+        # The slave aliases (addr>>2) % 32; words 16..31 belong to the CPU, so
+        # only the host's words 0..15 are checked.
+        data = [0x5A000000 | (i * 0x00010203) for i in range(16)]
+        self.bridge.write_block(0x00, data)
+        n = 65536
+        t0 = time.perf_counter()
+        words = self.bridge.stream_read(0x00, n)
+        elapsed = time.perf_counter() - t0
+        print(f"\n  stream_read {n} words: {elapsed:.3f}s = "
+              f"{4 * n / 1e6 / elapsed:.2f} MB/s")
+        self.assertEqual(len(words), n)
+        bad = [i for i in range(n) if i % 32 < 16 and words[i] != data[i % 32]]
+        self.assertEqual(bad, [], f"{len(bad)} wrong words, first at {bad[:4]}")
 
     def test_error_on_error_addr(self):
         """Write to test slave's ERROR_ADDR (0xFFFFFFFC) → AXIError."""

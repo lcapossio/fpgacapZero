@@ -196,6 +196,18 @@ openocd -f examples/arty_a7/arty_a7.cfg
 FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
+To run them on the onboard cable directly through FTDI's D2XX driver, program
+the bitstream first (the FTDI backend does not program the FPGA), then close
+`hw_server`, Vivado's Hardware Manager and OpenOCD:
+
+```sh
+FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
+```
+
+TCK defaults to 30 MHz; `FPGACAP_FTDI_TCK_MHZ` sets it (30 MHz divided by an
+integer), and `FPGACAP_FTDI_DEVICE` names the adapter channel (default
+`Digilent USB Device A`).
+
 The suite defaults to the **VexRiscv** bitstream (`arty_a7_vex_top.bit`). To run
 it against the legacy **MicroBlaze** top or the **VHDL** top instead, set the
 variant (it selects the matching default bitfile and freshness sources):
