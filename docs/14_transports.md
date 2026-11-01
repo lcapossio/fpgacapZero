@@ -724,6 +724,10 @@ ELA, EIO, EJTAG-AXI and the AXI monitor, 70 tests in about 20 s.  Only the
 tests that need the suite to program the FPGA, or a UART loopback bitstream,
 are skipped.  At 30 MHz `read_block` reads about 190 KB/s and the streaming
 read about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
+The web interface works over it too, at its fixed 6 MHz: connect, the core
+list, an ELA capture, EIO writes and input polling, AXI read, write and dump
+(single and burst), and an AXI-monitor capture triggered by a write, with
+that transaction decoded.
 
 ## IR table presets
 

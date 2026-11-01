@@ -16,7 +16,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `hw_server`, against 6 KB/s for `read_block` over `hw_server`. Opt in
   with `STREAM_EN=1` on the core or the Verilog wrappers (default 0, about
   200 LUTs / 200 FFs, no BRAM; not in the VHDL core yet); `FEATURES[24]`
-  announces it. Host: `EjtagAxiController.stream_read()` and `has_stream()`,
+  announces it. Host: `EjtagAxiController.stream_read()` and `has_stream`,
   `connect()` reports `"stream"`. Every scan's header is checked, a failed
   attempt rereads the whole range, and words are returned only after the
   range's AXI response reads OKAY.
@@ -40,7 +40,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `examples/arty_a7/test_hw_integration.py` on the onboard cable through D2XX
   (`FPGACAP_FTDI_TCK_MHZ`, default 30; `FPGACAP_FTDI_DEVICE`). The board must
   be programmed first. All 70 tests that run without programming pass at 6 and
-  30 MHz, in about 20 s. The suite also gains a streaming-read test.
+  30 MHz, in about 20 s. The suite also gains a streaming-read test. The Arty
+  README gains a "Connect With FTDI" section, and the web interface chapter
+  now covers picking the FTDI adapter and the UI's fixed 6 MHz TCK.
 
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.

@@ -180,6 +180,26 @@ For a Digilent HS3 cable, use `arty_a7_hs3.cfg` instead.
 OpenOCD does not program the FPGA through the fpgacapZero transport, so program
 `arty_a7_vex_top.bit` separately before running host commands.
 
+## Connect With FTDI
+
+The `ftdi` backend drives the onboard cable's JTAG channel directly through
+FTDI's D2XX driver, with no `hw_server` or OpenOCD. It does not program the
+FPGA, so program the bitstream first (for example with the `hw_server`
+command above), then close `hw_server`, Vivado's Hardware Manager and
+OpenOCD, since one program owns the channel at a time:
+
+```sh
+fcapz --backend ftdi --hardware "Digilent USB Device A" --tck-mhz 30 probe
+```
+
+`--hardware` can be left out when the Arty is the only FTDI JTAG adapter
+attached. TCK is 30 MHz divided by an integer (default 6 MHz).
+
+The web interface (`fcapz-web`, see
+[`docs/18_web_interface.md`](../../docs/18_web_interface.md)) connects the
+same way: pick the `ftdi` backend and, if needed, enter
+`Digilent USB Device A` as the FTDI adapter. It runs at 6 MHz.
+
 ## Hardware Tests
 
 With an Arty A7 connected, the bitstream built, and `hw_server` running:
