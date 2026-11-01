@@ -196,6 +196,12 @@ _SEND_IMMEDIATE = 0x87
 _SYNC_MARK = 0xAB
 # ADBUS bits of the JTAG pins (TDO is ADBUS2).
 _PIN_TCK, _PIN_TDI, _PIN_TMS = 0x01, 0x02, 0x08
+# Read opcode bit 2 samples TDO on the falling edge instead: a full TCK
+# period after the target drove it, for cables whose TDO round trip is longer
+# than half a period (the Arty A7's onboard FT2232H at 30 MHz).
+_READ_FALLING = 0x04
+#: Above this TCK, TDO is sampled on the falling edge unless told otherwise.
+_FALLING_EDGE_ABOVE_HZ = 15_000_000
 
 # TAP paths from Run-Test/Idle.
 _IDLE_TO_SHIFT_IR = (1, 1, 0, 0)
@@ -208,11 +214,15 @@ class _Batch:
     """MPSSE command bytes for a run of JTAG scans, plus how to decode the
     bytes they return."""
 
-    def __init__(self) -> None:
+    def __init__(self, sample_falling: bool = False) -> None:
         self.cmd = bytearray()
         self.read_bytes = 0
         # Per captured scan: (width, whole data bytes, leftover bits).
         self.captures: list[tuple[int, int, int]] = []
+        edge = _READ_FALLING if sample_falling else 0
+        self._bytes_inout = _DATA_BYTES_INOUT | edge
+        self._bits_inout = _DATA_BITS_INOUT | edge
+        self._tms_inout = _TMS_INOUT | edge
 
     def tms(self, bits, tdi: int = 0) -> None:
         bits = list(bits)
@@ -240,18 +250,18 @@ class _Batch:
             while done < nbytes:
                 n = min(nbytes - done, 0x10000)
                 chunk = (value >> (done * 8)) & ((1 << (n * 8)) - 1)
-                op = _DATA_BYTES_INOUT if capture else _DATA_BYTES_OUT
+                op = self._bytes_inout if capture else _DATA_BYTES_OUT
                 self.cmd += bytes((op, (n - 1) & 0xFF, (n - 1) >> 8))
                 self.cmd += chunk.to_bytes(n, "little")
                 done += n
         if rem:
-            op = _DATA_BITS_INOUT if capture else _DATA_BITS_OUT
+            op = self._bits_inout if capture else _DATA_BITS_OUT
             bits = (value >> (nbytes * 8)) & ((1 << rem) - 1)
             self.cmd += bytes((op, rem - 1, bits))
         last = (value >> (width - 1)) & 1
         tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | (last << 7)
         self.cmd += bytes(
-            (_TMS_INOUT if capture else _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)
+            (self._tms_inout if capture else _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)
         )
         if capture:
             self.captures.append((width, nbytes, rem))
@@ -319,6 +329,7 @@ class _OpenChannel:
         self.ir_length: int | None = None
         self.family: str | None = None
         self.actual_tck_hz: float | None = None
+        self.sample_falling = False
 
 
 _OPEN_CHANNELS: list[_OpenChannel] = []
@@ -345,9 +356,14 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     ``0x22`` / ``0x23``) or Gowin.  ``burst`` defaults to that
     family's wrapper default (on for PolarFire and AMD/Xilinx, off for
     Gowin).  ``layout`` overrides the adapter's ``(ADBUS value, direction)``.
+    ``tdo_sample_edge`` is ``"rising"`` or ``"falling"``; by default TDO is
+    sampled on the rising edge up to 15 MHz and on the falling edge above,
+    where a cable's TDO round trip can exceed half a TCK period (the Arty
+    A7 reads a shifted IDCODE at 30 MHz on the rising edge).
 
     Transports on the same channel in one process share its handle (the
-    first one's clock and layout apply); the channel closes with the last.
+    first one's clock, layout and sample edge apply); the channel closes
+    with the last.
     """
 
     READ_IDLE_CYCLES = 20
@@ -370,9 +386,17 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         burst_data_chain: int = 2,
         layout: tuple[int, int] | None = None,
         timeout_ms: int = 2000,
+        tdo_sample_edge: str | None = None,
     ):
         if not 1_000 <= tck_hz <= 30_000_000:
             raise ValueError(f"tck_hz must be 1 kHz..30 MHz, got {tck_hz}")
+        if tdo_sample_edge not in (None, "rising", "falling"):
+            raise ValueError(
+                f"tdo_sample_edge must be 'rising' or 'falling', got {tdo_sample_edge!r}"
+            )
+        self.tdo_sample_edge = tdo_sample_edge
+        #: Set from the clock by connect(), or taken from a shared channel.
+        self.sample_falling = False
         self.device = device
         self.ir_table = dict(ir_table) if ir_table else {}
         self._ir_table_given = bool(ir_table)
@@ -417,6 +441,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._io_lock = ch.lock
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
+            self.sample_falling = ch.sample_falling
         try:
             self._apply_family_defaults()
         except Exception:
@@ -457,6 +482,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         ch = _OpenChannel(lib, handle, dev)
         ch.idcode, ch.ir_length = self.idcode, self.ir_length
         ch.family, ch.actual_tck_hz = self.family, self.actual_tck_hz
+        ch.sample_falling = self.sample_falling
         return ch
 
     def open_pins(self) -> tuple[int, int]:
@@ -555,6 +581,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         # The TCK the divisor programs.  An FT2232-compatible clone can
         # accept the opcodes and still run a clock of its own.
         self.actual_tck_hz = base_hz / (divisor + 1)
+        if self.tdo_sample_edge is None:
+            self.sample_falling = self.actual_tck_hz > _FALLING_EDGE_ABOVE_HZ
+        else:
+            self.sample_falling = self.tdo_sample_edge == "falling"
         value, direction = layout
         self._write(bytes((
             0x86, divisor & 0xFF, divisor >> 8,     # TCK = base / (divisor + 1)
@@ -624,7 +654,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     # -- chain discovery -----------------------------------------------------
 
     def _identify(self) -> None:
-        batch = _Batch()
+        batch = _Batch(self.sample_falling)
         batch.reset()
         width = 32 * (self.MAX_DEVICES + 1)
         batch.scan(False, (1 << width) - 1, width, True)
@@ -640,7 +670,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             )
         self.idcode = idcodes[0]
         self.ir_length = self._measure_ir_length()
-        batch = _Batch()
+        batch = _Batch(self.sample_falling)
         batch.reset()  # back to IDCODE / BYPASS after the IR probe
         self._flush(batch)
         self.family = (
@@ -689,7 +719,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         """Fill the IR with ones, then time a single zero through it."""
         width, mark = 256, 128
         pattern = ((1 << width) - 1) & ~(1 << mark)
-        batch = _Batch()
+        batch = _Batch(self.sample_falling)
         batch.scan(True, pattern, width, True)
         (out,) = self._flush(batch)
         for j in range(mark + 1, width):
@@ -704,7 +734,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             raise RuntimeError("not connected — call connect() first")
         out: list[int] = []
         with self._io_lock:
-            batch = _Batch()
+            batch = _Batch(self.sample_falling)
             for op in ops:
                 kind = op[0]
                 if kind == "ir":
@@ -724,7 +754,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     or batch.read_bytes >= self._FLUSH_READ_BYTES
                 ):
                     out.extend(self._flush(batch))
-                    batch = _Batch()
+                    batch = _Batch(self.sample_falling)
             out.extend(self._flush(batch))
         return out
 

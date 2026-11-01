@@ -44,6 +44,9 @@ is Python, and you can read every line of the FSM in
   `FIFO_DEPTH` beats.  The host paces the writes one per JTAG scan;
   the bridge returns one completion per beat so the host
   knows when to send the next beat.
+- **Streaming read** (opt-in, `STREAM_EN=1`) — up to 16383 words per
+  long DR scan, so the cable sets the rate instead of the per-scan
+  tool overhead.  See [Streaming read](#streaming-read).
 
 What it **can't** do (yet):
 
@@ -78,6 +81,16 @@ Burst writes use one completion per beat through the same response
 path.  This keeps the inter-beat pacing host-controlled; the AXI
 side never times out between beats, only on the AXI handshake waits
 themselves (`wready`, `bvalid`, `arready`, `rvalid`).
+
+A read whose address the slave has accepted is never abandoned on the
+R channel.  If it times out waiting for `rvalid`, or a RESET cuts it
+off, the bridge keeps `rready` high and discards the late beats up to
+`rlast`, however late they come, so they cannot come back as the data
+of a later read.  The next command waits for them up to `TIMEOUT`
+cycles without a beat; after that, writes and CONFIG run normally,
+while reads answer SLVERR without touching the bus until the owed
+beats have arrived.  A slave that never answers therefore costs
+SLVERRs, not a hung bridge.
 
 ## The 72-bit DR shift format
 
@@ -118,6 +131,7 @@ polling.
 | `0x7` | BURST_WDATA | Push one word into burst write buffer |
 | `0x8` | BURST_RDATA | Pop one word from burst read FIFO |
 | `0x9` | BURST_RSTART | Initiate burst read (starts the address phase) |
+| `0xA` | STREAM_RSTART | Start a streaming read (addr = start, payload = word count); `STREAM_EN=1` only |
 | `0xE` | CONFIG | Read bridge config register (addr selects which) |
 | `0xF` | RESET | Reset bridge state machines |
 
@@ -158,6 +172,7 @@ print(info)
 #   "addr_w": 32,
 #   "data_w": 32,
 #   "fifo_depth": 16,            # <-- cached from FEATURES register
+#   "stream": False,             # FEATURES[24]: streaming read built in
 # }
 ```
 
@@ -175,6 +190,8 @@ After `connect()`, the controller has:
   `burst_read()` / `burst_write()` checks the requested count
   against this and rejects oversized requests at the API boundary
   with a clear error message — see "FIFO_DEPTH guard rails" below.
+- Cached whether the bitstream has the streaming read
+  (`FEATURES[24]`, `bridge.has_stream()`).
 
 ### Single read
 
@@ -268,6 +285,79 @@ Same constraints as `burst_read`.  The host paces beats one per
 scan; the bridge per-beat-acks so the host knows when to queue the
 next beat.
 
+### Streaming read
+
+```python
+if bridge.has_stream():
+    words = bridge.stream_read(0x80000000, count=262144)   # 1 MiB
+```
+
+Block and burst reads cost one 72-bit scan per word, and every scan
+pays the tool's per-scan overhead: a few KB/s whatever the cable.
+The streaming read moves up to 16383 words in one long DR scan
+(`slots_per_scan` changes it), so the cable's shift rate sets the
+speed.  Measured on the Arty A7 reference design (`arty_a7_vex_top`,
+onboard FT2232H cable, `hw_server`, TCK 30 MHz): about 1.9 MB/s for
+a 4 MiB read, against 6 KB/s for `read_block`.  That is about what
+`hw_server` shifts through that cable (about 18 Mbit/s at TCK
+30 MHz), so over `hw_server` the TCK rate is what is left to tune:
+check or set it in xsdb with `jtag frequency` (hw_server keeps it
+per cable).  The same cable driven directly by
+[`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport) at 30 MHz
+reads about 2.8 MB/s.
+
+It is built only when the bridge has `STREAM_EN=1` (default 0, about
+200 LUTs and 200 FFs, no BRAM; Verilog core only for now):
+
+```verilog
+fcapz_ejtagaxi_xilinx7 #(
+    .FIFO_DEPTH (256),
+    .STREAM_EN  (1)
+) u_axi ( ... );
+```
+
+The bridge announces it in `FEATURES[24]`.  On a bitstream without it
+`stream_read()` raises `RuntimeError`; `read_block()` and
+`burst_read()` keep working either way.
+
+**Protocol.**  `CMD_STREAM_RSTART` (addr = start, payload = word
+count) switches the 72-bit DR into stream mode.  The AXI side then
+reads the range in INCR bursts of `FIFO_DEPTH/4` beats that never
+cross a 4 KB boundary, and starts a burst only when the burst FIFO
+has room for all of it, so the slave is never back-pressured.  From
+then on every DR scan, of any length, shifts out 33-bit slots
+`{data[31:0], valid}`, LSB first:
+
+- Slot 0 is a header: `valid = 0`, `data` = words not yet delivered.
+- A slot with `valid = 1` carries the next word; `valid = 0` means
+  the FIFO was empty and nothing was consumed.
+- A word counts as delivered only once all 33 bits are out; a scan
+  that ends inside a slot gets that word again in the next scan.
+- TDI must stay 0.  Any 1 shifted in aborts the stream like
+  `CMD_RESET`.
+- Stream mode ends at the UPDATE of the first scan whose header reads
+  0, so the host ends with a 33-bit header-only scan.  The next normal
+  scan returns the range's AXI response (the first non-OKAY one).
+
+**Host rules.**  `stream_read()` keeps a scan's words only after the
+next scan's header confirms how many the bridge handed out, so a lost
+or repeated word is always caught.  On a header mismatch, a stall or a
+transport error it aborts the stream and reads the **whole** range
+again (up to `retries` times), because an aborted stream's AXI
+response is never seen.  Words are returned only after the final
+response reads OKAY, and the stream is aborted before any error is
+raised, so the bridge is back in normal mode for the next command.
+
+**Chain lock.**  A stream lives across many scans, and another
+client's scan of the same USER chain with a 1 in it aborts the
+stream.  On `hw_server` other clients (a soft-CPU debugger, the
+Vivado hardware manager, hw_server's own polls) scan every few tens
+of milliseconds, so each attempt holds xsdb's `jtag lock`
+(`XilinxHwServerTransport.jtag_lock()` / `jtag_unlock()`), the final
+abort included.  Other transports have no lock and fall back to one
+`raw_dr_scan()` per scan; the streaming read has only been tested on
+hardware over `hw_server`.
+
 ### Closing
 
 ```python
@@ -316,6 +406,7 @@ register at `0x002C`:
 FEATURES[7:0]   = ADDR_W
 FEATURES[15:8]  = DATA_W
 FEATURES[23:16] = FIFO_DEPTH - 1   (AXI4 awlen convention so 256 fits in 8 bits)
+FEATURES[24]    = STREAM_ON        (streaming read built in)
 ```
 
 So `FIFO_DEPTH=16` is encoded as `0x0F` in the bitstream and the

@@ -343,7 +343,8 @@ module arty_a7_vex_top (
         .RESP_FIFO_DEPTH(16),
         .CMD_FIFO_MEMORY_TYPE("distributed"),
         .TIMEOUT(4096),
-        .DEBUG_EN(0)
+        .DEBUG_EN(0),
+        .STREAM_EN(1)
     ) u_ejtagaxi (
         .axi_clk(clk_100),
         .axi_rst(rst_100),

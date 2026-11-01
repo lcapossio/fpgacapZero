@@ -1209,6 +1209,19 @@ class Transport(ABC):
         """
         return [self.raw_dr_scan(bits, width, chain=chain) for bits, width in scans]
 
+    def raw_dr_capture(
+        self, width: int, *, chain: int | None = None, tdi: int = 0
+    ) -> int:
+        """One DR scan of *width* bits shifting a constant *tdi* (0 or 1).
+
+        Returns the captured TDO value.  Used for long scans such as the
+        EJTAG-AXI streaming read, where only TDO carries data.  The default
+        builds the constant word and calls :meth:`raw_dr_scan`; transports
+        with a cheaper way to shift a constant override it.
+        """
+        fill = (1 << width) - 1 if tdi else 0
+        return self.raw_dr_scan(fill, width, chain=chain)
+
 
 #: One step of a raw scan batch (see :meth:`_ScanBurstMixin._run_scans`):
 #: ``("ir", chain)`` loads the IR of a USER chain, ``("dr", value, width,
@@ -4628,6 +4641,61 @@ class XilinxHwServerTransport(Transport):
         parts.append("puts [$_rdb run -bits]; $_rdb delete")
         out = self._send("; ".join(parts))
         return self._parse_scan_bits_list(out, widths, totals)
+
+    def jtag_lock(self, timeout_ms: int = 5000) -> None:
+        """Lock the FPGA's scan chain against every other hw_server client.
+
+        One ``jtag sequence`` always runs uninterrupted, but between two
+        sequences other clients (the MicroBlaze debugger, Vivado, hw_server's
+        own polls) may scan the chain.  A protocol that keeps state across
+        sequences, such as the EJTAG-AXI streaming read, holds this lock for
+        its whole length.  Raises RuntimeError if the lock is not granted.
+        """
+        out = self._send(
+            f"if {{[catch {{jtag lock {int(timeout_ms)}}} _lk]}} "
+            f"{{puts \"FCAPZ_LOCK_ERR $_lk\"}} else {{puts FCAPZ_LOCK_OK}}"
+        )
+        if "FCAPZ_LOCK_OK" not in out:
+            raise RuntimeError(f"xsdb: jtag lock failed: {out.strip()[:300]!r}")
+
+    def jtag_unlock(self) -> None:
+        """Release :meth:`jtag_lock` (errors ignored: best effort)."""
+        self._send("catch {jtag unlock}")
+
+    def raw_dr_capture(
+        self, width: int, *, chain: int | None = None, tdi: int = 0
+    ) -> int:
+        """One long DR scan of a constant *tdi*.
+
+        The constant data is built inside xsdb (``string repeat``), so no
+        per-bit TCL string crosses the pipe, and ``run -hex`` brings TDO back
+        at 4 bits per character (little-endian bytes, two hex digits each).
+        The scan then runs at what hw_server shifts through the cable: on
+        the Arty A7 at TCK 30 MHz, about 18 Mbit/s.  Not
+        ``drshift -tdi 0``: through the Arty's Digilent cable (Vivado 2025.2)
+        it shifts ones, which aborts an EJTAG-AXI stream.
+        """
+        ch = chain if chain is not None else self._active_chain
+        total = self._user_dr_bits(width)
+        fill = f"[string repeat {'F' if tdi else '0'} {(total + 7) // 8 * 2}]"
+        tcl = (
+            f"set _rc [jtag sequence]; "
+            f"{self._irshift_tcl('_rc', ch)}; "
+            f"$_rc drshift -state DRUPDATE -capture -hex {total} {fill}; "
+            f"$_rc state IDLE {self.RAW_DR_IDLE_CYCLES}; "
+            f"puts [$_rc run -hex]; $_rc delete"
+        )
+        out = self._send(tcl)
+        ndigits = (total + 7) // 8 * 2
+        hexdigits = set("0123456789abcdefABCDEF")
+        for token in reversed(out.replace("{", " ").replace("}", " ").split()):
+            if len(token) == ndigits and set(token) <= hexdigits:
+                value = int.from_bytes(bytes.fromhex(token), "little")
+                return (value >> self._dr_data_offset()) & ((1 << width) - 1)
+        raise RuntimeError(
+            f"xsdb: expected a {ndigits}-digit hex DR capture, "
+            f"stdout={out[:500]!r}; recent stderr={self._stderr_lines[-10:]!r}"
+        )
 
     # -- register access -----------------------------------------------------
 
