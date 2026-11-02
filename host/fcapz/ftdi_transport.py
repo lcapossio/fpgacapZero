@@ -481,7 +481,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.layout = layout
         self.timeout_ms = int(timeout_ms)
         self.bitfile = bitfile
-        self._cancel_requested = False
+        #: :meth:`cancel` counts up; a session started at another count is
+        #: cancelled.
+        self._cancel_count = 0
+        self._session_count = 0
         self._active_chain = 1
         self._handle: ctypes.c_void_p | None = None
         self._lib = None
@@ -499,10 +502,13 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
-                return
-            self._cancel_requested = False
+                if not self._cancelled:
+                    return
+                self._detach()  # a cancelled session: start a new one
+            self._session_count = count
             ch = _find_open_channel(self.device)
             opened = ch is None
             if opened:
@@ -522,6 +528,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     # Before the channel is published: no transport joins
                     # while the FPGA is being configured.
                     self._program(self._load_bitstream(self.bitfile), self.bitfile)
+                if self._cancelled:
+                    raise RuntimeError("FTDI transport cancelled; reconnect")
             except BaseException:
                 self._channel = self._handle = None
                 ch.users -= 1
@@ -580,6 +588,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
                 raise RuntimeError("this transport already holds its channel")
+            self._session_count = self._cancel_count
             lib, handle, dev, layout = self._open_mpsse()
             ch = _OpenChannel(lib, handle, dev)
             ch.users = 1
@@ -618,19 +627,19 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             _release(ch.lib, ch.handle)
 
     def cancel(self) -> None:
-        """Abort from another thread without waiting on the call in flight.
+        """Abort the call in flight from another thread, without a lock.
 
-        Programming holds the channel registry for seconds, so it is only
-        flagged: it stops at its next paced write (about a quarter second
-        of TCK) and closes the channel.  Otherwise this closes the
-        transport, as on the other backends.
+        The call stops at its next USB write (a read already waiting ends
+        within the D2XX timeout), with nothing half sent, so other
+        transports on the channel carry on.  Programming stops within
+        about a quarter second of TCK and closes the channel.  This
+        transport then refuses I/O until :meth:`close` or :meth:`connect`.
         """
-        self._cancel_requested = True
-        if _OPEN_CHANNELS_LOCK.acquire(blocking=False):
-            try:
-                self._detach()
-            finally:
-                _OPEN_CHANNELS_LOCK.release()
+        self._cancel_count += 1
+
+    @property
+    def _cancelled(self) -> bool:
+        return self._session_count != self._cancel_count
 
     @property
     def opened_device(self) -> str | None:
@@ -682,6 +691,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         )))
 
     def _write(self, data: bytes) -> None:
+        if self._cancelled:
+            raise RuntimeError("FTDI transport cancelled; reconnect")
         written = ctypes.c_ulong()
         self._call("FT_Write", data, len(data), ctypes.byref(written))
         if written.value != len(data):
@@ -932,8 +943,6 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         it answers only then.  Commands that read nothing return as soon as
         the adapter buffers them, and its buffer holds seconds of clocks at
         a slow TCK, enough to delay the next read past the D2XX timeout."""
-        if self._cancel_requested:
-            raise RuntimeError("programming cancelled")
         self._write(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)))
         self._read(1)
 

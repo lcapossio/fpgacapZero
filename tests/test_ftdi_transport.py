@@ -601,18 +601,38 @@ class ProgramTests(_FtdiTestCase):
             return real(cycles)
 
         with mock.patch.object(t, "_idle", cancel_from_another_thread):
-            with self.assertRaisesRegex(RuntimeError, "programming cancelled"):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
                 t.program(self._file(self.data, "design.bin"))
         self.assertEqual(blocked, [False])  # cancel() returned at once
         self.assertEqual(self.lib.closes, 1)
         self.assertEqual(ft._OPEN_CHANNELS, [])
 
-    def test_cancel_when_idle_closes(self):
-        t = self._transport()
-        t.cancel()
+    def test_cancel_stops_scans_and_spares_peers(self):
+        a = self._transport()
+        b = self._transport()
+        with ft._OPEN_CHANNELS_LOCK:  # takes no lock: a busy registry is fine
+            a.cancel()
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            a.read_reg(0x0000)
+        self.assertEqual(b.read_reg(0x0000), 0x46430004)
+        a.connect()  # a new session on the same channel
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
+        self.assertEqual(self.lib.opens, 1)
+
+    def test_cancel_while_connect_waits_cancels_it(self):
+        t = FtdiMpsseTransport(bitfile=self._file(self.data, "design.bin"))
+        real = ft._find_open_channel
+
+        def cancel_then_find(device):  # cancel() lands once connect() waits
+            t.cancel()
+            return real(device)
+
+        with mock.patch.object(ft, "_find_open_channel", cancel_then_find):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                t.connect()
+        self.assertEqual(self.lib.dev.programs, 0)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
         self.assertEqual(self.lib.closes, 1)
-        t.connect()  # a new session is not cancelled
-        self.assertEqual(t.read_reg(0x0000), 0x46430004)
 
     def test_reconnect_forgets_the_old_bitstream(self):
         t = self._transport()

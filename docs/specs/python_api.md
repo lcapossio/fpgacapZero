@@ -2054,12 +2054,13 @@ Close the transport.  Must be idempotent — safe to call multiple times.
 cancel() -> None
 ```
 
-Abort from another thread without waiting on the call in flight.
+Abort the call in flight from another thread, without a lock.
 
-Programming holds the channel registry for seconds, so it is only
-flagged: it stops at its next paced write (about a quarter second
-of TCK) and closes the channel.  Otherwise this closes the
-transport, as on the other backends.
+The call stops at its next USB write (a read already waiting ends
+within the D2XX timeout), with nothing half sent, so other
+transports on the channel carry on.  Programming stops within
+about a quarter second of TCK and closes the channel.  This
+transport then refuses I/O until `close` or `connect`.
 
 #### `FtdiMpsseTransport.opened_device`
 
