@@ -326,6 +326,11 @@ _XC_WRITE_IDCODE = b"\x30\x01\x80\x01"  # type-1 packet: write 1 word to IDCODE
 _BIT_REVERSE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
 
 
+class _ConfigFailed(RuntimeError):
+    """Configuration did not complete, but every scan went out whole, so
+    the adapter and TAP are in a known state."""
+
+
 def read_xilinx_bitstream(path: str) -> tuple[bytes, str | None]:
     """Return the configuration data of a ``.bit`` or raw ``.bin`` file and
     the part the ``.bit`` header names (``None`` for ``.bin``)."""
@@ -499,7 +504,6 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             opened = ch is None
             if opened:
                 ch = self._open_channel()
-                _OPEN_CHANNELS.append(ch)
             ch.users += 1
             self._channel = ch
             self._lib, self._handle, self.adapter = ch.lib, ch.handle, ch.adapter
@@ -507,13 +511,20 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
             self.sample_falling = ch.sample_falling
-        try:
-            self._apply_family_defaults()
-            if opened and self.bitfile:
-                self.program(self.bitfile)
-        except Exception:
-            self.close()
-            raise
+            try:
+                self._apply_family_defaults()
+                if opened and self.bitfile:
+                    # Before the channel is published: no transport joins
+                    # while the FPGA is being configured.
+                    self._program(self._load_bitstream(self.bitfile), self.bitfile)
+            except BaseException:
+                self._channel = self._handle = None
+                ch.users -= 1
+                if opened:
+                    _release(ch.lib, ch.handle)
+                raise
+            if opened:
+                _OPEN_CHANNELS.append(ch)
 
     def _open_mpsse(self) -> tuple[Any, ctypes.c_void_p, FtdiDevice, tuple[int, int]]:
         """Open the device and put it in MPSSE mode: ``(lib, handle, device,
@@ -789,13 +800,38 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
         the bitstream through CFG_IN, JSTART, then wait for DONE.  A
         bitstream built for another part is refused before the FPGA is
-        cleared.  Every core on the FPGA, and any other transport's state
-        on this channel, is lost.  *timeout_s* bounds each of the two waits.
+        cleared.  Every core on the FPGA is lost, so this is refused while
+        other transports share the channel.  If a USB transfer fails
+        partway, the adapter may be left mid-command, so the channel is
+        closed: connect again.  *timeout_s* bounds each of the two waits.
         Single-die UltraScale shares the IR table and this sequence (UG570)
         but is not hardware-validated.
         """
-        if self._handle is None or self.ir_length is None:
+        ch = self._channel
+        if self._handle is None or ch is None or self.ir_length is None:
             raise RuntimeError("not connected — call connect() first")
+        data = self._load_bitstream(bitfile)
+        broken = False
+        try:
+            with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
+                if ch.users > 1:
+                    raise RuntimeError(
+                        f"cannot program: {ch.users - 1} other transport(s) share "
+                        "this FTDI channel and would lose their cores; close them first"
+                    )
+                try:
+                    self._program(data, bitfile, timeout_s)
+                except _ConfigFailed:
+                    raise
+                except BaseException:
+                    broken = True
+                    raise
+        finally:
+            if broken:
+                self.close()
+
+    def _load_bitstream(self, bitfile: str) -> bytes:
+        """*bitfile*'s configuration data, checked against the device."""
         if self.family != "xilinx7":
             raise RuntimeError(
                 "programming over FTDI supports AMD/Xilinx 7-series only; this "
@@ -809,6 +845,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 f"{bitfile} is built for IDCODE 0x{want:08x}{built}; the device "
                 f"reads 0x{self.idcode:08x}"
             )
+        return data
+
+    def _program(self, data: bytes, bitfile: str, timeout_s: float = 2.0) -> None:
+        """The UG470 sequence for :meth:`program`.  The FPGA not clearing or
+        DONE staying low raises :class:`_ConfigFailed` with the TAP reset;
+        any other exception may leave MPSSE mid-command."""
         with self._io_lock:
             try:
                 batch = _Batch(self.sample_falling)
@@ -827,20 +869,35 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 self._shift_dr_bytes(data.translate(_BIT_REVERSE))
                 batch = _Batch(self.sample_falling)
                 batch.scan(True, _XC_JSTART, self.ir_length, False)
-                batch.idle(self.STARTUP_IDLE_CYCLES)
                 self._flush(batch)
+                self._idle(self.STARTUP_IDLE_CYCLES)
                 self._wait_config_status(
                     lambda s: s & _XC_IR_DONE,
                     timeout_s,
                     f"{bitfile} did not configure the FPGA: DONE stayed low after "
                     "JSTART (a corrupt bitstream fails its CRC this way)",
                 )
+            except _ConfigFailed:
+                self._reset_tap()
+                raise
             finally:
-                batch = _Batch(self.sample_falling)
-                batch.reset()  # back to IDCODE / BYPASS
-                self._flush(batch)
-        # A new bitstream: what was learned about the old one's cores is void.
-        self._forget_hub_state()
+                # The old bitstream's cores are gone: what was learned is void.
+                self._forget_hub_state()
+            self._reset_tap()
+
+    def _reset_tap(self) -> None:
+        batch = _Batch(self.sample_falling)
+        batch.reset()  # back to IDCODE / BYPASS
+        self._flush(batch)
+
+    def _idle(self, cycles: int) -> None:
+        """Clock *cycles* TCK in Run-Test/Idle, in writes of about a quarter
+        second of TCK, so none outlasts the D2XX timeout at a slow clock."""
+        piece = max(7, int(self.actual_tck_hz * 0.25))
+        for done in range(0, cycles, piece):
+            batch = _Batch(self.sample_falling)
+            batch.idle(min(piece, cycles - done))
+            self._flush(batch)
 
     def _config_status(self) -> int:
         """The IR capture: configuration status bits over the fixed ``01``."""
@@ -854,14 +911,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     def _wait_config_status(self, ready, timeout_s: float, failure: str) -> int:
         deadline = time.monotonic() + timeout_s
         while True:
-            batch = _Batch(self.sample_falling)
-            batch.idle(self.STATUS_POLL_IDLE_CYCLES)
-            self._flush(batch)
+            self._idle(self.STATUS_POLL_IDLE_CYCLES)
             status = self._config_status()
             if ready(status):
                 return status
             if time.monotonic() > deadline:
-                raise RuntimeError(f"{failure} (IR status 0x{status:02x})")
+                raise _ConfigFailed(f"{failure} (IR status 0x{status:02x})")
 
     def _shift_dr_bytes(self, data: bytes) -> None:
         """Shift *data* through the selected DR, each byte LSB first, from

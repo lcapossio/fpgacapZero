@@ -191,6 +191,8 @@ class _FakeD2xx:
         self.opens = 0
         self.closes = 0
         self.writes = 0
+        self.write_clocks: list[int] = []  # TCK clocked by each write
+        self.clocks = 0
         self.tms = 1
         self.divisor = None
         self.pins = None  # last ADBUS value set with 0x80
@@ -225,7 +227,9 @@ class _FakeD2xx:
 
     def FT_Write(self, handle, data, n, written):
         self.writes += 1
+        start = self.clocks
         self._run(bytes(data[:n]))
+        self.write_clocks.append(self.clocks - start)
         written._obj.value = n
         return 0
 
@@ -238,6 +242,7 @@ class _FakeD2xx:
 
     # MPSSE
     def _clock(self, tms, tdi):
+        self.clocks += 1
         self.tms = tms
         return self.dev.clock(tms, tdi)
 
@@ -481,6 +486,8 @@ class ProgramTests(_FtdiTestCase):
         writes = self.lib.writes
         t.program(self._file(data, "design.bin"))
         self.assertGreater(self.lib.writes - writes, 4)
+        # The data, the startup clocks and every status poll alike.
+        self.assertLessEqual(max(self.lib.write_clocks[writes:]), 2500 + 20)
         self.assertTrue(self.lib.dev.done)
 
     def test_wrong_part_is_refused_before_clearing(self):
@@ -527,6 +534,53 @@ class ProgramTests(_FtdiTestCase):
                 t.connect()
         self.assertEqual(self.lib.closes, 1)
         self.assertEqual(ft._OPEN_CHANNELS, [])
+
+    def test_no_transport_joins_while_programming_at_connect(self):
+        published = []
+        real = FtdiMpsseTransport._program
+
+        def spy(t, *args, **kw):
+            published.append(list(ft._OPEN_CHANNELS))
+            return real(t, *args, **kw)
+
+        with mock.patch.object(FtdiMpsseTransport, "_program", spy):
+            self._transport(bitfile=self._file(self.data, "design.bin"))
+        self.assertEqual(published, [[]])
+        self.assertEqual(len(ft._OPEN_CHANNELS), 1)
+
+    def test_interrupted_program_at_connect_releases_the_channel(self):
+        t = FtdiMpsseTransport(bitfile=self._file(self.data, "design.bin"))
+        with mock.patch.object(t, "_shift_dr_bytes", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                t.connect()
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
+    def test_refused_while_other_transports_share_the_channel(self):
+        a = self._transport()
+        self._transport()
+        with self.assertRaisesRegex(RuntimeError, "1 other transport"):
+            a.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.dev.programs, 0)
+
+    def test_short_write_closes_the_channel(self):
+        t = self._transport()
+        real = self.lib.FT_Write
+        calls = itertools.count()
+
+        def flaky(handle, data, n, written):
+            status = real(handle, data, n, written)
+            if next(calls) == 3:  # partway through the configuration
+                written._obj.value = n - 1
+            return status
+
+        self.lib.FT_Write = flaky
+        with self.assertRaisesRegex(RuntimeError, "write short"):
+            t.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.closes, 1)  # MPSSE may be mid-command
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            t.read_reg(0)
 
 
 class BitstreamFileTests(unittest.TestCase):

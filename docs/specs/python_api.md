@@ -2069,8 +2069,10 @@ Takes a Vivado `.bit` or a raw `.bin`.  Follows UG470's JTAG
 sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
 the bitstream through CFG_IN, JSTART, then wait for DONE.  A
 bitstream built for another part is refused before the FPGA is
-cleared.  Every core on the FPGA, and any other transport's state
-on this channel, is lost.  *timeout_s* bounds each of the two waits.
+cleared.  Every core on the FPGA is lost, so this is refused while
+other transports share the channel.  If a USB transfer fails
+partway, the adapter may be left mid-command, so the channel is
+closed: connect again.  *timeout_s* bounds each of the two waits.
 Single-die UltraScale shares the IR table and this sequence (UG570)
 but is not hardware-validated.
 
