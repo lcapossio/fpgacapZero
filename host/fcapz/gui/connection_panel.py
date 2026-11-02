@@ -501,7 +501,7 @@ class ConnectionPanel(QGroupBox):
             quartus = self._quartus_stp.text().strip()
             if quartus and not Path(quartus).is_file():
                 return f"quartus_stp not found: {quartus}"
-        if backend == "hw_server":
+        if backend in ("hw_server", "ftdi"):
             if self._program_on_connect.isChecked():
                 raw = self._program.text().strip()
                 if not raw:

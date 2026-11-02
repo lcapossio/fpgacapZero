@@ -705,11 +705,15 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   and MCP `program`, the desktop GUI's *Program on connect*), configures an
   AMD/Xilinx 7-series FPGA over JTAG with a Vivado `.bit` or a raw `.bin`,
   following UG470: JPROGRAM, wait for INIT_COMPLETE, shift the bitstream
-  through CFG_IN, JSTART, then wait for DONE.  A bitstream built for another
-  part (its IDCODE check) is refused before the FPGA is cleared, and DONE
-  staying low (a corrupt bitstream fails its CRC) is an error.  `bitfile=`
-  programs only when the transport opens the channel: one that joins a
-  channel another transport holds never reprograms the FPGA under it.  The
+  through CFG_IN, JSTART, then wait for DONE (the MCP server takes `.bit`
+  only).  A bitstream built for another part (its IDCODE check) is refused
+  before the FPGA is cleared, and DONE staying low (a corrupt bitstream
+  fails its CRC) is an error.  `bitfile=` programs only when the transport
+  opens the channel, and no other transport can join until programming
+  ends; one that joins a channel another transport holds never reprograms
+  the FPGA under it.  `program()` is refused while other transports share
+  the channel.  If a USB transfer fails partway through, the channel is
+  closed, since the adapter may be left mid-command; connect again.  The
   Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
   Single-die UltraScale takes the same sequence but is not
   hardware-validated; PolarFire and Gowin are not supported (use their

@@ -156,6 +156,12 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertEqual((out.backend, out.ir_table), ("ftdi", "auto"))
         self.assertEqual(out.hardware, "Embedded FlashPro5 A")
         self.assertIsNone(p._validate())
+        p._program_on_connect.setChecked(True)
+        p._program.setText("")
+        self.assertIn("bitfile path is empty", p._validate())
+        p._program.setText("missing.bit")
+        self.assertIn("Bitfile not found", p._validate())
+        p._program_on_connect.setChecked(False)
         p._backend.setCurrentIndex(p._backend.findData("openocd"))
         self.assertEqual(p._ir.currentData(), "xilinx7")
 
