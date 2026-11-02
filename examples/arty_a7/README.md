@@ -183,22 +183,24 @@ OpenOCD does not program the FPGA through the fpgacapZero transport, so program
 ## Connect With FTDI
 
 The `ftdi` backend drives the onboard cable's JTAG channel directly through
-FTDI's D2XX driver, with no `hw_server` or OpenOCD. It does not program the
-FPGA, so program the bitstream first (for example with the `hw_server`
-command above), then close `hw_server`, Vivado's Hardware Manager and
-OpenOCD, since one program owns the channel at a time:
+FTDI's D2XX driver, with no `hw_server`, OpenOCD or Vivado. Close
+`hw_server`, Vivado's Hardware Manager and OpenOCD first, since one program
+owns the channel at a time. `--program` loads the bitstream over the same
+cable (about 1.2 s at 30 MHz):
 
 ```sh
-fcapz --backend ftdi --hardware "Digilent USB Device A" --tck-mhz 30 probe
+fcapz --backend ftdi --hardware "Digilent USB Device A" --tck-mhz 30   --program examples/arty_a7/arty_a7_vex_top.bit probe
 ```
 
+Leave out `--program` to attach to the bitstream already loaded.
 `--hardware` can be left out when the Arty is the only FTDI JTAG adapter
 attached. TCK is 30 MHz divided by an integer (default 6 MHz).
 
 The web interface (`fcapz-web`, see
 [`docs/18_web_interface.md`](../../docs/18_web_interface.md)) connects the
 same way: pick the `ftdi` backend and, if needed, enter
-`Digilent USB Device A` as the FTDI adapter. It runs at 6 MHz.
+`Digilent USB Device A` as the FTDI adapter. It runs at 6 MHz and has no
+bitstream field, so program the board with the CLI command above first.
 
 ## Hardware Tests
 
@@ -216,9 +218,10 @@ openocd -f examples/arty_a7/arty_a7.cfg
 FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
-To run them on the onboard cable directly through FTDI's D2XX driver, program
-the bitstream first (the FTDI backend does not program the FPGA), then close
-`hw_server`, Vivado's Hardware Manager and OpenOCD:
+To run them on the onboard cable directly through FTDI's D2XX driver, with no
+Vivado at all, close `hw_server`, Vivado's Hardware Manager and OpenOCD. The
+suite programs the bitstream over FTDI at the start of the run (and the
+startup-arm test programs it again), then runs in about 25 s:
 
 ```sh
 FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -226,7 +229,8 @@ FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 TCK defaults to 30 MHz; `FPGACAP_FTDI_TCK_MHZ` sets it (30 MHz divided by an
 integer), and `FPGACAP_FTDI_DEVICE` names the adapter channel (default
-`Digilent USB Device A`).
+`Digilent USB Device A`). `FPGACAP_FTDI_PROGRAM=0` skips the programming at
+the start and uses the bitstream already loaded.
 
 The suite defaults to the **VexRiscv** bitstream (`arty_a7_vex_top.bit`). To run
 it against the legacy **MicroBlaze** top or the **VHDL** top instead, set the

@@ -1954,6 +1954,7 @@ FtdiMpsseTransport(
     layout: tuple[int, int] | None = None,
     timeout_ms: int = 2000,
     tdo_sample_edge: str | None = None,
+    bitfile: str | None = None,
 )
 ```
 
@@ -1974,6 +1975,11 @@ sampled on the rising edge up to 15 MHz and on the falling edge above,
 where a cable's TDO round trip can exceed half a TCK period (the Arty
 A7 reads a shifted IDCODE at 30 MHz on the rising edge).
 
+`bitfile` programs an AMD/Xilinx 7-series FPGA with that `.bit` or
+`.bin` at connect (see `program`), only when this transport opens
+the channel: one joining a channel another transport holds never
+reprograms the FPGA under it.
+
 Transports on the same channel in one process share its handle (the
 first one's clock, layout and sample edge apply); the channel closes
 with the last.
@@ -1986,6 +1992,8 @@ WRITE_IDLE_CYCLES = 8
 RAW_DR_IDLE_CYCLES = 8
 USER1_PIPE_PRIME_READS = 3
 MAX_DEVICES = 8
+STARTUP_IDLE_CYCLES = 4000
+STATUS_POLL_IDLE_CYCLES = 1000
 _FLUSH_CMD_BYTES = 61440
 _FLUSH_READ_BYTES = 32768
 ```
@@ -2048,6 +2056,23 @@ opened_device -> str | None
 ```
 
 The connected device, for session labels: IDCODE and family.
+
+#### `FtdiMpsseTransport.program`
+
+```python
+program(bitfile: str, *, timeout_s: float = 2.0) -> None
+```
+
+Configure an AMD/Xilinx 7-series FPGA with *bitfile* over JTAG.
+
+Takes a Vivado `.bit` or a raw `.bin`.  Follows UG470's JTAG
+sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
+the bitstream through CFG_IN, JSTART, then wait for DONE.  A
+bitstream built for another part is refused before the FPGA is
+cleared.  Every core on the FPGA, and any other transport's state
+on this channel, is lost.  *timeout_s* bounds each of the two waits.
+Single-die UltraScale shares the IR table and this sequence (UG570)
+but is not hardware-validated.
 
 #### `FtdiMpsseTransport.select_chain`
 

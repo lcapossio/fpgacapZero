@@ -36,13 +36,27 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Up to 15 MHz nothing changes. Verified on the Arty A7 at 30 MHz: probe, ELA
   capture and EJTAG-AXI reads.
 
+- **FTDI: program AMD/Xilinx 7-series FPGAs.** `FtdiMpsseTransport.program()`
+  and `bitfile=` configure the FPGA over JTAG with a Vivado `.bit` or a raw
+  `.bin` (UG470: JPROGRAM, INIT_COMPLETE, CFG_IN, JSTART, DONE), with no
+  Vivado or hw_server. `--program` now works with `--backend ftdi`, and so do
+  RPC/MCP `program` and the desktop GUI's *Program on connect*. A bitstream
+  for another part is refused before the FPGA is cleared; DONE staying low is
+  an error. `bitfile=` programs only when the transport opens the channel, so
+  a transport joining a shared channel never reprograms the FPGA under
+  another. The Arty A7 loads in 1.2 s at 30 MHz. PolarFire and Gowin are not
+  supported.
+
 - **Arty A7 hardware suite over FTDI.** `FPGACAP_BACKEND=ftdi` runs
   `examples/arty_a7/test_hw_integration.py` on the onboard cable through D2XX
-  (`FPGACAP_FTDI_TCK_MHZ`, default 30; `FPGACAP_FTDI_DEVICE`). The board must
-  be programmed first. All 70 tests that run without programming pass at 6 and
-  30 MHz, in about 20 s. The suite also gains a streaming-read test. The Arty
-  README gains a "Connect With FTDI" section, and the web interface chapter
-  now covers picking the FTDI adapter and the UI's fixed 6 MHz TCK.
+  (`FPGACAP_FTDI_TCK_MHZ`, default 30; `FPGACAP_FTDI_DEVICE`), with no Vivado:
+  it programs the bitstream over FTDI once per run (`FPGACAP_FTDI_PROGRAM=0`
+  keeps the loaded one). All 71 tests that do not need a UART loopback
+  bitstream pass at 6 and 30 MHz, in about 25 s, the startup-arm test
+  included; it now writes a sentinel before programming, so a connect that
+  does not reprogram cannot pass. The suite also gains a streaming-read test.
+  The Arty README gains a "Connect With FTDI" section, and the web interface
+  chapter now covers picking the FTDI adapter and the UI's fixed 6 MHz TCK.
 
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
@@ -75,6 +89,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   ships, but development goes to the web interface (`fcapz-web`), the
   recommended graphical front-end. The README no longer advertises the desktop
   GUI, and the manual marks it as unmaintained.
+
+- **RPC: EIO, AXI and UART side connects ignore `program`.** Only the
+  session's `connect` programs the FPGA; a side controller's own transport
+  reprogramming it would wipe the cores the session is using.
 
 ### Fixed
 
