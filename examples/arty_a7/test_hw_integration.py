@@ -8,17 +8,30 @@ These tests require:
   - An Arty A7-100T physically connected via USB
   - For hw_server backend: Vivado/XSDB on PATH, hw_server on localhost:3121
   - For openocd backend: OpenOCD running with examples/arty_a7/arty_a7.cfg
+  - For ftdi backend: the board's onboard Digilent cable (channel A) through
+    FTDI's D2XX driver, with hw_server, Vivado's Hardware Manager and OpenOCD
+    closed.  The suite programs the bitstream over FTDI once per run, and
+    TestStartupArmGsr programs it again; no Vivado is needed.  OpenOCD does
+    not program the FPGA: load the bitstream first.
 
 Environment variables
 ---------------------
 FPGACAP_SKIP_HW=1
     Skip all hardware tests (CI default).
-FPGACAP_BACKEND=openocd|hw_server
+FPGACAP_BACKEND=hw_server|openocd|ftdi
     Select the transport backend.  Defaults to ``hw_server``.
 FPGACAP_OPENOCD_PORT=<port>
     OpenOCD TCL port.  Defaults to 6666.
 FPGACAP_OPENOCD_TAP=<tap>
     OpenOCD TAP name.  Defaults to ``xc7a100t.tap``.
+FPGACAP_FTDI_DEVICE=<name>
+    ``ftdi`` only: adapter channel description or serial.  Defaults to
+    ``Digilent USB Device A`` (the JTAG channel of the onboard cable).
+FPGACAP_FTDI_TCK_MHZ=<mhz>
+    ``ftdi`` only: TCK in MHz (30 MHz divided by an integer).  Defaults to 30.
+FPGACAP_FTDI_PROGRAM=0
+    ``ftdi`` only: do not program the bitstream at the start of the run; use
+    the one already loaded.  TestStartupArmGsr still programs it.
 
 Run:
     # hw_server backend (default)
@@ -27,6 +40,9 @@ Run:
     # OpenOCD backend (start openocd first)
     openocd -f examples/arty_a7/arty_a7.cfg &
     FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+    # FTDI backend (hw_server stopped; the suite programs the bitstream)
+    FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 Skip if no hardware:
     FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -60,6 +76,9 @@ BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
+_FTDI_DEVICE = os.environ.get("FPGACAP_FTDI_DEVICE") or "Digilent USB Device A"
+_FTDI_TCK_MHZ = float(os.environ.get("FPGACAP_FTDI_TCK_MHZ", "30"))
+_FTDI_PROGRAM = os.environ.get("FPGACAP_FTDI_PROGRAM", "1") != "0"
 PORT = 3121
 FPGA = "xc7a100t"
 ELA0_SAMPLE_CLOCK_HZ = 150_000_000
@@ -246,20 +265,41 @@ if _STALE_MSG and not _SKIP:
     raise RuntimeError(_STALE_MSG)
 
 
-def _make_transport():
+def _make_transport(program: bool | None = None):
+    """A transport for the active backend.  *program* says whether its
+    connect programs ``BITFILE``; by default hw_server does on every connect
+    and ftdi does not (setUpModule programmed it once).  OpenOCD never can."""
+    if _BACKEND == "ftdi":
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+        return FtdiMpsseTransport(
+            device=_FTDI_DEVICE, tck_hz=_FTDI_TCK_MHZ * 1e6,
+            bitfile=BITFILE if program else None,
+        )
     if _BACKEND == "openocd":
         from fcapz.transport import OpenOcdTransport
         return OpenOcdTransport(port=_OPENOCD_PORT, tap=_OPENOCD_TAP)
     from fcapz.transport import XilinxHwServerTransport
     return XilinxHwServerTransport(
-        port=PORT, fpga_name=FPGA, bitfile=BITFILE,
+        port=PORT, fpga_name=FPGA, bitfile=None if program is False else BITFILE,
     )
+
+
+def setUpModule():
+    """Over FTDI, program the bitstream once for the whole run."""
+    if _SKIP or _BACKEND != "ftdi" or not _FTDI_PROGRAM:
+        return
+    t = _make_transport(program=True)
+    t.connect()
+    t.close()
 
 
 def _rpc_connect_req():
     """`connect` request for the active backend — drives the RpcServer handlers
     (rebind / ejtag_axi_probe) exactly as the web/CLI do. hw_server programs the
-    bitstream on connect; openocd assumes the board is already loaded."""
+    bitstream on connect; openocd and ftdi use the one already loaded."""
+    if _BACKEND == "ftdi":
+        return {"cmd": "connect", "backend": "ftdi", "hardware": _FTDI_DEVICE,
+                "tck_mhz": _FTDI_TCK_MHZ, "ir_table": "xilinx7"}
     if _BACKEND == "openocd":
         return {"cmd": "connect", "backend": "openocd", "host": "127.0.0.1",
                 "port": _OPENOCD_PORT, "tap": _OPENOCD_TAP, "ir_table": "xilinx7"}
@@ -469,15 +509,30 @@ class TestMultiElaManager(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
-@unittest.skipIf(_BACKEND != "hw_server", "requires hw_server programming on connect")
+@unittest.skipIf(_BACKEND == "openocd", "requires programming on connect")
 class TestStartupArmGsr(unittest.TestCase):
     """Configuration-time startup arm validation for the Arty bitstream."""
 
+    SENTINEL = 0x5EED0028
+
     def test_bitstream_powers_up_armed_after_gsr(self):
-        """After FPGA programming, STARTUP_ARM=1 should arm without host reset."""
-        t = _make_transport()
+        """After FPGA programming, STARTUP_ARM=1 should arm without host reset.
+
+        A trigger mask written before programming must be gone after it, so
+        a connect that did not really reprogram the FPGA cannot pass."""
+        t = _make_transport(program=False)
         try:
             t.connect()
+            t.write_reg(0x0028, self.SENTINEL)
+            self.assertEqual(t.read_reg(0x0028), self.SENTINEL)
+        finally:
+            t.close()
+        t = _make_transport(program=True)
+        try:
+            t.connect()
+            self.assertNotEqual(
+                t.read_reg(0x0028), self.SENTINEL, "trigger mask survived programming"
+            )
             self.assertEqual(t.read_reg(0x00D8) & 0x1, 1)
             self.assertEqual(t.read_reg(0x00B4) & 0x3, 2)
 
@@ -1399,10 +1454,42 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
     def test_burst_write_read(self):
         """AXI4 burst write 8 words, burst read back, verify."""
-        data = [0xBEEF0000 + i for i in range(8)]
+        # Over openocd/ftdi the slave keeps earlier tests' words: seed others
+        # first, so a burst write that writes nothing cannot pass.
+        sentinel = [0x0DD00000 + i for i in range(8)]
+        self.bridge.write_block(0x00, sentinel)
+        self.assertEqual(self.bridge.read_block(0x00, 8), sentinel)
+        data = [0xC0DE0000 + i for i in range(8)]
         self.bridge.burst_write(0x00, data)
         result = self.bridge.burst_read(0x00, 8)
         self.assertEqual(result, data)
+
+    def test_stream_read(self):
+        """Streaming read of 64 Ki words, checked against the slave's words."""
+        import time
+
+        if not self.bridge.has_stream:
+            self.skipTest("bitstream built without STREAM_EN")
+        # The slave aliases (addr>>2) % 32, so this checks the data path, not
+        # address progression across bursts and 4 KiB pages (that is covered
+        # by tb/fcapz_ejtagaxi_stream_tb.sv).  Words 16..31 belong to the CPU:
+        # every word that holds still across the read is checked.
+        data = [0x5A000000 | (i * 0x00010203) for i in range(16)]
+        self.bridge.write_block(0x00, data)
+        before = self.bridge.read_block(0x00, 32)
+        self.assertEqual(before[:16], data)
+        n = 65536
+        t0 = time.perf_counter()
+        words = self.bridge.stream_read(0x00, n)
+        elapsed = time.perf_counter() - t0
+        print(f"\n  stream_read {n} words: {elapsed:.3f}s = "
+              f"{4 * n / 1e6 / elapsed:.2f} MB/s")
+        after = self.bridge.read_block(0x00, 32)
+        stable = {k for k in range(32) if before[k] == after[k]}
+        self.assertTrue(set(range(16)) <= stable, "host words changed during the read")
+        self.assertEqual(len(words), n)
+        bad = [i for i in range(n) if i % 32 in stable and words[i] != before[i % 32]]
+        self.assertEqual(bad, [], f"{len(bad)} wrong words, first at {bad[:4]}")
 
     def test_error_on_error_addr(self):
         """Write to test slave's ERROR_ADDR (0xFFFFFFFC) → AXIError."""
@@ -1599,13 +1686,20 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
     def _set_go(self, value: int) -> None:
         self.bridge.axi_write(self.GO_OFF, value)
 
-    def _arm_on_writes(self, pretrigger=4, posttrigger=32):
+    def _seed_cpu_words(self) -> None:
+        """With the CPU gated off, overwrite words 16/17 with sentinels."""
+        for off in (self.D0_OFF, self.D1_OFF):
+            self.bridge.axi_write(off, 0x0BAD0000 | off)
+            self.assertEqual(self.bridge.axi_read(off), 0x0BAD0000 | off)
+
+    def _arm_on_writes(self, pretrigger=4, posttrigger=32, *, quiet_bus=True):
         cfg = self.mon.event_capture_config(
             "aw_hs", pretrigger=pretrigger, posttrigger=posttrigger, depth=256
         )
         self.an.configure(cfg)
         self.an.arm()
-        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+        if quiet_bus:  # with CPU writes flowing, it triggers before we look
+            self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
 
     def test_cpu_quiet_until_gated_on(self):
         """Gated off, the CPU issues no writes: an aw_hs-armed monitor stays
@@ -1624,8 +1718,14 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         bridge reads the CPU's pattern back from the shared slave (repeatably)."""
         import time
 
-        self._arm_on_writes(pretrigger=2, posttrigger=12)
-        self._set_go(1)  # turn the CPU loose
+        # Over openocd/ftdi the slave keeps an earlier test's CPU words: seed
+        # sentinels while the CPU is gated off, so only new CPU writes pass.
+        self._seed_cpu_words()
+        # Turn the CPU loose *first*: armed before, the host's own write to the
+        # go word would trigger the monitor.
+        self._set_go(1)
+        time.sleep(0.05)
+        self._arm_on_writes(pretrigger=2, posttrigger=12, quiet_bus=False)
 
         deadline = time.time() + 3.0
         status = 0
@@ -1650,6 +1750,7 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         written over word16 via EJTAG survives (the CPU no longer overwrites it)."""
         import time
 
+        self._seed_cpu_words()
         self._set_go(1)
         time.sleep(0.05)
         self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)

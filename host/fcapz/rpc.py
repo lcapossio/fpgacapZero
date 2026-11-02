@@ -187,6 +187,9 @@ class RpcServer:
         """
         if side:
             self._refuse_serial_side(req)
+            # Only the session's connect programs the FPGA: a side controller
+            # reprogramming it would wipe the cores the session is using.
+            req = {k: v for k, v in req.items() if k != "program"}
         transport = self._build_transport(req)
         self._register_opening(transport)
         return transport
@@ -761,6 +764,7 @@ class RpcServer:
                 tck_hz=float(req.get("tck_mhz", 6.0)) * 1e6,
                 burst=None if burst is None else bool(burst),
                 single_chain_burst=single_chain_burst,
+                bitfile=req.get("program"),
             )
         if backend == "hw_server":
             fpga_name = str(req.get("tap", "xc7a100t"))

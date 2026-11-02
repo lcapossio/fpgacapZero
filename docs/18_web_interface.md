@@ -120,8 +120,14 @@ connected. The panels:
   `quartus_stp` path lives on the server (auto-detected, or its
   `--quartus-stp` flag), never in the browser, and Connect goes straight to
   the local cable with no TCP scan. `ftdi` works the same way with an
-  optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`); the IR table
-  comes from the device IDCODE. For OpenOCD, Connect
+  optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`, or
+  `Digilent USB Device A` for the Arty A7's onboard cable); the IR table
+  comes from the device IDCODE. Blank picks the only FTDI JTAG adapter, and
+  with several attached Connect fails and lists their names. The UI has no
+  clock field, so `ftdi` runs at the server's default TCK of 6 MHz. The
+  server holds the channel until Disconnect, so close `hw_server`, OpenOCD
+  and vendor programmers first (see
+  [`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport)). For OpenOCD, Connect
   **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects

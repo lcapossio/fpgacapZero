@@ -662,8 +662,8 @@ t.connect()
 print(hex(t.idcode), t.family)         # 0xf8181cf polarfire (MPFS095T)
 ```
 
-CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
-`--tck-mhz` sets the clock.
+CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
+`--tck-mhz` sets the clock and `--program` loads a bitstream first.
 
 - **Adapter.** `device` is a D2XX channel description (for example
   `"Embedded FlashPro5 A"`) or a serial.  Left empty, the transport uses
@@ -693,7 +693,7 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
   on FTDI's D2XX driver, which installs `ftd2xx.dll`, so you swap no
   drivers.  Each channel opens for one program at a time.  Close Libero's
   programmer, FlashPro Express, hw_server or OpenOCD before connecting, and
-  disconnect before programming.  On Linux, install FTDI's D2XX library and
+  disconnect before programming with them.  On Linux, install FTDI's D2XX library and
   detach `ftdi_sio` from the adapter.  `$FCAPZ_D2XX_LIBRARY` names the
   library explicitly.
 - **Sharing in one process.** Transports on the same channel in one Python
@@ -701,6 +701,27 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
   the RPC server or the GUI.  The first transport's clock, layout and sample
   edge apply,
   and the channel closes with the last transport.
+- **Programming.** `program(bitfile)`, or `bitfile=` (CLI `--program`, RPC
+  and MCP `program`, the desktop GUI's *Program on connect*), configures an
+  AMD/Xilinx 7-series FPGA over JTAG with a Vivado `.bit` or a raw `.bin`,
+  following UG470: JPROGRAM, wait for INIT_COMPLETE, shift the bitstream
+  through CFG_IN, JSTART, then wait for DONE (the MCP server takes `.bit`
+  only).  A bitstream built for another part (its IDCODE check) is refused
+  before the FPGA is cleared, and DONE staying low (a corrupt bitstream
+  fails its CRC) is an error.  `bitfile=` programs only when the transport
+  opens the channel, and no other transport can join until programming
+  ends; one that joins a channel another transport holds never reprograms
+  the FPGA under it.  `program()` is refused while other transports share
+  the channel.  If a USB transfer fails partway through, the channel is
+  closed, since the adapter may be left mid-command; connect again.
+  Cancelling (the RPC and MCP watchdogs, the GUI's Cancel) takes no lock:
+  programming stops within about a quarter second of TCK and closes the
+  channel the same way, and any other call stops at its next USB transfer,
+  leaving other transports on the channel working.  The
+  Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
+  Single-die UltraScale takes the same sequence but is not
+  hardware-validated; PolarFire and Gowin are not supported (use their
+  vendor tools).  The web interface has no bitstream field.
 - **Validated** on the PolarFire SoC Discovery Kit's embedded FlashPro5: all
   11 hardware tests of
   [`examples/mpfs_disco_kit`](../examples/mpfs_disco_kit/README.md) pass, in
@@ -717,10 +738,18 @@ Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
 
 All 11 board hardware tests pass on it.
 
-On the Arty A7 (`arty_a7_vex_top`, onboard Digilent channel A) at 6 and
-30 MHz: `probe`, an ELA capture through the burst path, and EJTAG-AXI
-reads.  At 30 MHz `read_block` reads about 190 KB/s and the streaming read
-about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
+On the Arty A7 (`arty_a7_vex_top`, onboard Digilent channel A) the board's
+hardware suite (`FPGACAP_BACKEND=ftdi`, see
+[`examples/arty_a7`](../examples/arty_a7/README.md)) passes at 6 and 30 MHz
+with no Vivado at all: it programs the bitstream over FTDI, then runs ELA,
+EIO, EJTAG-AXI, the AXI monitor and the configuration-time startup-arm test,
+71 tests in about 25 s.  Only the tests that need a UART loopback bitstream
+are skipped.  At 30 MHz `read_block` reads about 190 KB/s and the streaming
+read about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
+The web interface works over it too, at its fixed 6 MHz: connect, the core
+list, an ELA capture, EIO writes and input polling, AXI read, write and dump
+(single and burst), and an AXI-monitor capture triggered by a write, with
+that transaction decoded.
 
 ## IR table presets
 

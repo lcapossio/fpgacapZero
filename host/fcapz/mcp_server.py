@@ -1682,9 +1682,10 @@ class FcapzMcpSession:
             raise PermissionError(
                 "FPGA programming is disabled; restart with --allow-program to enable it"
             )
-        if backend != "hw_server":
+        if backend not in ("hw_server", "ftdi"):
             raise ValueError(
-                "program= is only supported for backend 'hw_server' in this MCP server"
+                "program= is only supported for backends 'hw_server' and 'ftdi' "
+                "in this MCP server"
             )
         path = Path(program).expanduser().resolve()
         if path.suffix.lower() != ".bit":
@@ -3510,8 +3511,9 @@ def build_mcp_server(
         to the backend is rejected. `ir_table` picks the JTAG IR codes for
         hw_server/openocd/ftdi; omit it to infer them from the tap name (gw*
         is Gowin, xcku/xcvu/xcau UltraScale, else 7-series) or, on ftdi, from
-        the IDCODE. `program` (ELA only, hw_server only) is disabled unless
-        started with --allow-program and must be an existing .bit file;
+        the IDCODE. `program` (ELA only; hw_server, or ftdi for AMD/Xilinx
+        7-series) is disabled unless started with --allow-program and must
+        be an existing .bit file;
         `single_chain_burst` is ELA only.
         """
 

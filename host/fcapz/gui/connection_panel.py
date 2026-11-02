@@ -56,7 +56,7 @@ def _quartus_path_version_key(path: Path) -> tuple[int, ...]:
 
 
 class ConnectionPanel(QGroupBox):
-    """Transport parameters, connect/disconnect, and optional bitfile for hw_server."""
+    """Transport parameters, connect/disconnect, and optional bitfile for hw_server or FTDI."""
 
     connect_requested = Signal()
     disconnect_requested = Signal()
@@ -146,7 +146,8 @@ class ConnectionPanel(QGroupBox):
         self._program_on_connect = QCheckBox("Program on connect")
         self._program_on_connect.setChecked(ConnectionSettings().program_on_connect)
         self._program_on_connect.setToolTip(
-            "When checked, Connect runs XSDB fpga -file on the path below. "
+            "When checked, Connect programs the bitstream below: hw_server runs "
+            "XSDB fpga -file, FTDI configures an AMD/Xilinx 7-series FPGA over JTAG. "
             "Uncheck to attach over JTAG only (FPGA must already hold the right image, "
             "and captures will reflect whatever image is already loaded)."
         )
@@ -279,8 +280,8 @@ class ConnectionPanel(QGroupBox):
         self._quartus_stp.setEnabled(editable and is_usb)
         self._quartus_row.setEnabled(editable and is_usb)
         self._tcp_timeout.setEnabled(editable and not local)
-        self._program_on_connect.setEnabled(editable and is_hw)
-        self._program.setEnabled(editable and is_hw)
+        self._program_on_connect.setEnabled(editable and (is_hw or is_ftdi))
+        self._program.setEnabled(editable and (is_hw or is_ftdi))
         self._scan_targets_btn.setEnabled(editable and self._backend_supports_scan())
 
     def _on_backend_changed(self) -> None:
@@ -500,7 +501,7 @@ class ConnectionPanel(QGroupBox):
             quartus = self._quartus_stp.text().strip()
             if quartus and not Path(quartus).is_file():
                 return f"quartus_stp not found: {quartus}"
-        if backend == "hw_server":
+        if backend in ("hw_server", "ftdi"):
             if self._program_on_connect.isChecked():
                 raw = self._program.text().strip()
                 if not raw:
