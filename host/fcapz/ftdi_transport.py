@@ -810,15 +810,18 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         Single-die UltraScale shares the IR table and this sequence (UG570)
         but is not hardware-validated.
         """
-        if self._handle is None or self.ir_length is None:
+        ch = self._channel
+        if self._handle is None or ch is None or self.ir_length is None:
             raise RuntimeError("not connected — call connect() first")
-        data = self._load_bitstream(bitfile)
+        data = self._load_bitstream(bitfile)  # checked against this channel's device
         broken = False
         try:
             with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
-                ch = self._channel  # this transport may have reconnected since
-                if ch is None or self._handle is None:
-                    raise RuntimeError("not connected — call connect() first")
+                if self._channel is not ch or self._handle is None:
+                    raise RuntimeError(
+                        "the transport disconnected or reconnected while the "
+                        "bitstream loaded; call program() again"
+                    )
                 if ch.users > 1:
                     raise RuntimeError(
                         f"cannot program: {ch.users - 1} other transport(s) share "

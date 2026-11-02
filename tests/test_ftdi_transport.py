@@ -570,18 +570,19 @@ class ProgramTests(_FtdiTestCase):
             a.program(self._file(self.data, "design.bin"))
         self.assertEqual(self.lib.dev.programs, 0)
 
-    def test_sharing_is_checked_on_the_channel_in_use(self):
+    def test_reconnect_while_loading_is_refused(self):
         a = self._transport()
         real = a._load_bitstream
 
-        def reconnect_and_share(path):
-            a.close()  # a moves to a new channel while the file loads
+        def reconnect(path):
+            data = real(path)  # checked against the old channel's device
+            a.close()  # a moves to a new channel, maybe another FPGA
             a.connect()
             self._transport()
-            return real(path)
+            return data
 
-        with mock.patch.object(a, "_load_bitstream", reconnect_and_share):
-            with self.assertRaisesRegex(RuntimeError, "1 other transport"):
+        with mock.patch.object(a, "_load_bitstream", reconnect):
+            with self.assertRaisesRegex(RuntimeError, "reconnected while the bitstream"):
                 a.program(self._file(self.data, "design.bin"))
         self.assertEqual(self.lib.dev.programs, 0)
 
