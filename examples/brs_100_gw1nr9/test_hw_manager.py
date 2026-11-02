@@ -3,7 +3,7 @@
 
 """
 Hardware tests for the BRS-100-GW1NR9 core-manager variant
-(brs_100_gw1nr9_manager_top.v), driven over OpenOCD.
+(brs_100_gw1nr9_manager_top.v), driven over OpenOCD or ``--backend ftdi``.
 
 One fcapz_debug_multi_gowin hub on GW_JTAG ER1 carries four slots: ELA0
 (counter), ELA1 (counter XOR 0xA5), EIO0 (buttons + a slow counter in, LEDs
@@ -16,11 +16,13 @@ Build and load the variant, then start OpenOCD:
     # program out_manager/fcapz_brs_100_gw1nr9_manager.fs with your Gowin flow
     openocd -f examples/brs_100_gw1nr9/brs_100_gw1nr9.cfg
 
-Environment variables are those of test_hw_integration.py: FPGACAP_SKIP_HW,
-FPGACAP_OPENOCD_PORT and FPGACAP_OPENOCD_TAP.
+Environment variables: FPGACAP_SKIP_HW, FPGACAP_BACKEND (``openocd`` or
+``ftdi``), FPGACAP_OPENOCD_PORT, FPGACAP_OPENOCD_TAP and FPGACAP_FTDI_DEVICE.
 
 Run:
     python -m pytest examples/brs_100_gw1nr9/test_hw_manager.py -v
+    FPGACAP_BACKEND=ftdi FPGACAP_FTDI_DEVICE="USB Debugger A" \\
+        python -m pytest examples/brs_100_gw1nr9/test_hw_manager.py -v
 """
 
 from __future__ import annotations
@@ -30,8 +32,10 @@ import time
 import unittest
 
 _SKIP = os.environ.get("FPGACAP_SKIP_HW", "")
+_BACKEND = os.environ.get("FPGACAP_BACKEND", "openocd").strip().lower()
 _PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "GW1NR-9C.tap")
+_FTDI_DEVICE = os.environ.get("FPGACAP_FTDI_DEVICE") or None
 
 MANAGER_CHAIN = 1
 DEPTH = 64
@@ -39,6 +43,10 @@ EIO_CORE_ID = 0x494F
 
 
 def _make_transport():
+    if _BACKEND == "ftdi":
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+
+        return FtdiMpsseTransport(device=_FTDI_DEVICE)
     from fcapz.transport import OpenOcdTransport
 
     return OpenOcdTransport(
