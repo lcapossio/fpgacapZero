@@ -44,8 +44,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   for another part is refused before the FPGA is cleared; DONE staying low is
   an error. `bitfile=` programs only when the transport opens the channel, so
   a transport joining a shared channel never reprograms the FPGA under
-  another. The Arty A7 loads in 1.2 s at 30 MHz. PolarFire and Gowin are not
-  supported.
+  another, and `program()` is refused while other transports share it. The
+  Arty A7 loads in 1.2 s at 30 MHz. PolarFire and Gowin are not supported.
+- **FTDI: `cancel()` no longer waits on the call it aborts.** It takes no
+  lock: the call stops at its next USB transfer (programming within about a
+  quarter second of TCK), other transports on the channel keep working, and
+  the transport refuses I/O until `close()` or `connect()`. The desktop GUI's
+  connect Cancel now calls `cancel()` instead of `close()`.
 
 - **Arty A7 hardware suite over FTDI.** `FPGACAP_BACKEND=ftdi` runs
   `examples/arty_a7/test_hw_integration.py` on the onboard cable through D2XX

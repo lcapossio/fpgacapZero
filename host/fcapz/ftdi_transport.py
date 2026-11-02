@@ -508,7 +508,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 if not self._cancelled:
                     return
                 # A cancelled session: let its call in flight end (it fails
-                # at its next write), then start a new one.
+                # at its next write; a read already waiting ends within the
+                # D2XX timeout, as close() may wait), then start a new one.
                 with self._io_lock:
                     self._detach()
             self._session_count = count
