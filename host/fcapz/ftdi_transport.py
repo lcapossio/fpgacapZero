@@ -507,7 +507,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             if self._channel is not None:
                 if not self._cancelled:
                     return
-                self._detach()  # a cancelled session: start a new one
+                # A cancelled session: let its call in flight end (it fails
+                # at its next write), then start a new one.
+                with self._io_lock:
+                    self._detach()
             self._session_count = count
             ch = _find_open_channel(self.device)
             opened = ch is None
@@ -585,10 +588,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         releases it.  Returns the ``(ADBUS value, direction)`` layout in
         force.  For ``fcapz openocd-bridge``.
         """
+        count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
                 raise RuntimeError("this transport already holds its channel")
-            self._session_count = self._cancel_count
+            self._session_count = count
             lib, handle, dev, layout = self._open_mpsse()
             ch = _OpenChannel(lib, handle, dev)
             ch.users = 1

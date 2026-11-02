@@ -342,6 +342,27 @@ class OpenPinsTests(_FtdiTestCase):
         t.close()  # idempotent
         self.assertEqual(self.lib.closes, 1)
 
+    def test_cancel_while_opening_is_kept(self):
+        t = FtdiMpsseTransport()
+        self.addCleanup(t.close)
+        errors = []
+
+        def open_pins():
+            try:
+                t.open_pins()
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        with ft._OPEN_CHANNELS_LOCK:  # open_pins() waits for the registry
+            opener = threading.Thread(target=open_pins)
+            opener.start()
+            opener.join(0.1)
+            t.cancel()
+        opener.join(2.0)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("cancelled", errors[0])
+        self.assertEqual(self.lib.closes, 1)  # the half-open channel is released
+
     def test_a_second_open_is_refused(self):
         t = FtdiMpsseTransport()
         self.addCleanup(t.close)
@@ -618,6 +639,30 @@ class ProgramTests(_FtdiTestCase):
         a.connect()  # a new session on the same channel
         self.assertEqual(a.read_reg(0x0000), 0x46430004)
         self.assertEqual(self.lib.opens, 1)
+
+    def test_reconnect_waits_for_the_cancelled_call(self):
+        a = self._transport()
+        self._transport()  # a peer keeps the channel open
+        a.cancel()
+        held, release = threading.Event(), threading.Event()
+
+        def call_in_flight():
+            with a._io_lock:
+                held.set()
+                release.wait(2.0)
+
+        flight = threading.Thread(target=call_in_flight)
+        flight.start()
+        held.wait(2.0)
+        reconnect = threading.Thread(target=a.connect)
+        reconnect.start()
+        reconnect.join(0.2)
+        self.assertTrue(reconnect.is_alive())  # the cancelled call ends first
+        release.set()
+        flight.join(2.0)
+        reconnect.join(2.0)
+        self.assertFalse(reconnect.is_alive())
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
 
     def test_cancel_while_connect_waits_cancels_it(self):
         t = FtdiMpsseTransport(bitfile=self._file(self.data, "design.bin"))
