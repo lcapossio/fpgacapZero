@@ -62,7 +62,7 @@ After install, three things are available:
 ```bash
 $ fcapz --help                          # CLI tool on your PATH
 $ python -c "import fcapz; print(fcapz.__version__)"
-0.5.0
+0.5.1
 $ python -m fcapz.cli --help            # equivalent to `fcapz`
 ```
 

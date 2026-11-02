@@ -7,6 +7,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-02
+
 ### Added
 
 - **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 16383

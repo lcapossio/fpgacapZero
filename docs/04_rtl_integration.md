@@ -87,8 +87,8 @@ the project version and per-core ASCII identifiers as `\`define`s:
 ```verilog
 `define FCAPZ_VERSION_MAJOR   8'h00
 `define FCAPZ_VERSION_MINOR   8'h05
-`define FCAPZ_VERSION_PATCH   8'h00
-`define FCAPZ_VERSION_STRING  "0.5.0"
+`define FCAPZ_VERSION_PATCH   8'h01
+`define FCAPZ_VERSION_STRING  "0.5.1"
 `define FCAPZ_ELA_CORE_ID     16'h4C41   // "LA" — Logic Analyzer
 `define FCAPZ_EIO_CORE_ID     16'h494F   // "IO" — Embedded I/O
 `define FCAPZ_ELA_VERSION_REG {`FCAPZ_VERSION_MAJOR, `FCAPZ_VERSION_MINOR, `FCAPZ_ELA_CORE_ID}
