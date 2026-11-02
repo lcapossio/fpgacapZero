@@ -481,6 +481,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.layout = layout
         self.timeout_ms = int(timeout_ms)
         self.bitfile = bitfile
+        self._cancel_requested = False
         self._active_chain = 1
         self._handle: ctypes.c_void_p | None = None
         self._lib = None
@@ -501,6 +502,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
                 return
+            self._cancel_requested = False
             ch = _find_open_channel(self.device)
             opened = ch is None
             if opened:
@@ -599,17 +601,36 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     def close(self) -> None:
         with _OPEN_CHANNELS_LOCK:
-            ch, self._channel = self._channel, None
-            self._handle = None
-            if ch is None:
-                return
-            ch.users -= 1
-            if ch.users > 0:
-                return
-            if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
-                _OPEN_CHANNELS.remove(ch)
-            with ch.lock:
-                _release(ch.lib, ch.handle)
+            self._detach()
+
+    def _detach(self) -> None:
+        """:meth:`close`, with ``_OPEN_CHANNELS_LOCK`` held."""
+        ch, self._channel = self._channel, None
+        self._handle = None
+        if ch is None:
+            return
+        ch.users -= 1
+        if ch.users > 0:
+            return
+        if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
+            _OPEN_CHANNELS.remove(ch)
+        with ch.lock:
+            _release(ch.lib, ch.handle)
+
+    def cancel(self) -> None:
+        """Abort from another thread without waiting on the call in flight.
+
+        Programming holds the channel registry for seconds, so it is only
+        flagged: it stops at its next paced write (about a quarter second
+        of TCK) and closes the channel.  Otherwise this closes the
+        transport, as on the other backends.
+        """
+        self._cancel_requested = True
+        if _OPEN_CHANNELS_LOCK.acquire(blocking=False):
+            try:
+                self._detach()
+            finally:
+                _OPEN_CHANNELS_LOCK.release()
 
     @property
     def opened_device(self) -> str | None:
@@ -806,7 +827,9 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         cleared.  Every core on the FPGA is lost, so this is refused while
         other transports share the channel.  If a USB transfer fails
         partway, the adapter may be left mid-command, so the channel is
-        closed: connect again.  *timeout_s* bounds each of the two waits.
+        closed: connect again.  :meth:`cancel` from another thread stops it
+        within about a quarter second of TCK, closing the channel too.
+        *timeout_s* bounds each of the two waits.
         Single-die UltraScale shares the IR table and this sequence (UG570)
         but is not hardware-validated.
         """
@@ -814,33 +837,26 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         if self._handle is None or ch is None or self.ir_length is None:
             raise RuntimeError("not connected — call connect() first")
         data = self._load_bitstream(bitfile)  # checked against this channel's device
-        broken = False
-        try:
-            with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
-                if self._channel is not ch or self._handle is None:
-                    raise RuntimeError(
-                        "the transport disconnected or reconnected while the "
-                        "bitstream loaded; call program() again"
-                    )
-                if ch.users > 1:
-                    raise RuntimeError(
-                        f"cannot program: {ch.users - 1} other transport(s) share "
-                        "this FTDI channel and would lose their cores; close them first"
-                    )
-                try:
-                    self._program(data, bitfile, timeout_s)
-                except _ConfigFailed:
-                    raise
-                except BaseException:
-                    # MPSSE may be mid-command: unlisted before the lock goes,
-                    # no transport can join the channel before it closes.
-                    broken = True
-                    if ch in _OPEN_CHANNELS:
-                        _OPEN_CHANNELS.remove(ch)
-                    raise
-        finally:
-            if broken:
-                self.close()
+        with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
+            if self._channel is not ch or self._handle is None:
+                raise RuntimeError(
+                    "the transport disconnected or reconnected while the "
+                    "bitstream loaded; call program() again"
+                )
+            if ch.users > 1:
+                raise RuntimeError(
+                    f"cannot program: {ch.users - 1} other transport(s) share "
+                    "this FTDI channel and would lose their cores; close them first"
+                )
+            try:
+                self._program(data, bitfile, timeout_s)
+            except _ConfigFailed:
+                raise
+            except BaseException:
+                # MPSSE may be mid-command: closed before the lock goes, so
+                # no transport joins it.
+                self._detach()
+                raise
 
     def _load_bitstream(self, bitfile: str) -> bytes:
         """*bitfile*'s configuration data, checked against the device."""
@@ -916,6 +932,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         it answers only then.  Commands that read nothing return as soon as
         the adapter buffers them, and its buffer holds seconds of clocks at
         a slow TCK, enough to delay the next read past the D2XX timeout."""
+        if self._cancel_requested:
+            raise RuntimeError("programming cancelled")
         self._write(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)))
         self._read(1)
 

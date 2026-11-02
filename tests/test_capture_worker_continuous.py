@@ -78,3 +78,17 @@ def test_continuous_capture_sleeps_between_cycles() -> None:
     # One full interruptible delay after 1st progress, another after 2nd before loop exits.
     assert sum(sleeps) >= delay_s * 1.5, f"expected ~{delay_s * 2}s of sleep, got {sum(sleeps)}"
     an.capture.assert_called()
+
+
+def test_connect_cancel_uses_transport_cancel() -> None:
+    """Cancel must not wait on a connect in flight: Transport.cancel(), not
+    close() (FTDI programming holds its channel registry for seconds)."""
+    from fcapz.gui.settings import ConnectionSettings
+    from fcapz.gui.worker import ConnectWorker
+
+    w = ConnectWorker(ConnectionSettings(backend="ftdi"))
+    t = MagicMock()
+    w._transport = t
+    w.request_cancel()
+    t.cancel.assert_called_once_with()
+    t.close.assert_not_called()

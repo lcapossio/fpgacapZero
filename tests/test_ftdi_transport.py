@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import itertools
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -586,6 +587,33 @@ class ProgramTests(_FtdiTestCase):
                 a.program(self._file(self.data, "design.bin"))
         self.assertEqual(self.lib.dev.programs, 0)
 
+    def test_cancel_stops_programming_without_waiting(self):
+        t = self._transport()
+        real = t._idle
+        blocked = []
+
+        def cancel_from_another_thread(cycles):
+            if not blocked:  # programming holds the registry lock here
+                worker = threading.Thread(target=t.cancel)
+                worker.start()
+                worker.join(1.0)
+                blocked.append(worker.is_alive())
+            return real(cycles)
+
+        with mock.patch.object(t, "_idle", cancel_from_another_thread):
+            with self.assertRaisesRegex(RuntimeError, "programming cancelled"):
+                t.program(self._file(self.data, "design.bin"))
+        self.assertEqual(blocked, [False])  # cancel() returned at once
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
+    def test_cancel_when_idle_closes(self):
+        t = self._transport()
+        t.cancel()
+        self.assertEqual(self.lib.closes, 1)
+        t.connect()  # a new session is not cancelled
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+
     def test_reconnect_forgets_the_old_bitstream(self):
         t = self._transport()
         t.__dict__["_fcapz_owned_managers"] = {(1, 0x0000): 7}
@@ -605,17 +633,8 @@ class ProgramTests(_FtdiTestCase):
             return status
 
         self.lib.FT_Write = flaky
-        joinable = []
-        real_close = t.close
-
-        def close_noting_joinable():  # what a transport connecting now finds
-            joinable.append(ft._find_open_channel(None))
-            real_close()
-
-        with mock.patch.object(t, "close", close_noting_joinable):
-            with self.assertRaisesRegex(RuntimeError, "write short"):
-                t.program(self._file(self.data, "design.bin"))
-        self.assertEqual(joinable, [None])  # unlisted before the lock went
+        with self.assertRaisesRegex(RuntimeError, "write short"):
+            t.program(self._file(self.data, "design.bin"))
         self.assertEqual(self.lib.closes, 1)  # MPSSE may be mid-command
         self.assertEqual(ft._OPEN_CHANNELS, [])
         with self.assertRaisesRegex(RuntimeError, "not connected"):

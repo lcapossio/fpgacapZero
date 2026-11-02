@@ -2048,6 +2048,19 @@ close() -> None
 
 Close the transport.  Must be idempotent — safe to call multiple times.
 
+#### `FtdiMpsseTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Abort from another thread without waiting on the call in flight.
+
+Programming holds the channel registry for seconds, so it is only
+flagged: it stops at its next paced write (about a quarter second
+of TCK) and closes the channel.  Otherwise this closes the
+transport, as on the other backends.
+
 #### `FtdiMpsseTransport.opened_device`
 
 ```python
@@ -2072,7 +2085,9 @@ bitstream built for another part is refused before the FPGA is
 cleared.  Every core on the FPGA is lost, so this is refused while
 other transports share the channel.  If a USB transfer fails
 partway, the adapter may be left mid-command, so the channel is
-closed: connect again.  *timeout_s* bounds each of the two waits.
+closed: connect again.  `cancel` from another thread stops it
+within about a quarter second of TCK, closing the channel too.
+*timeout_s* bounds each of the two waits.
 Single-die UltraScale shares the IR table and this sequence (UG570)
 but is not hardware-validated.
 

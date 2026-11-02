@@ -713,7 +713,10 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   ends; one that joins a channel another transport holds never reprograms
   the FPGA under it.  `program()` is refused while other transports share
   the channel.  If a USB transfer fails partway through, the channel is
-  closed, since the adapter may be left mid-command; connect again.  The
+  closed, since the adapter may be left mid-command; connect again.
+  Cancelling (the RPC and MCP watchdogs, the GUI's Cancel) stops
+  programming within about a quarter second of TCK and closes the channel
+  the same way.  The
   Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
   Single-die UltraScale takes the same sequence but is not
   hardware-validated; PolarFire and Gowin are not supported (use their
