@@ -93,7 +93,7 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 | **Quartus hardware** / **FTDI adapter** | Optional Quartus hardware name for USB-Blaster (e.g. `DE25-Nano [USB-1]`), or FTDI channel description or serial (e.g. `Embedded FlashPro5 A`); leave empty to auto-select when exactly one cable is present |
 | **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
 | **[Scan]** | hw_server: lists XSDB JTAG targets. OpenOCD: lists tap names via `jtag names`. Click to fill the **TAP** field instead of typing it |
-| **Bitfile** | Optional path to a `.bit` file; if set, the GUI runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected" |
+| **Bitfile** | Optional path to a `.bit` file, used when **Program on connect** is checked: hw_server runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected"; FTDI configures an AMD/Xilinx 7-series FPGA over JTAG (a `.bit` or `.bin`) |
 | **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `UltraScale+`, `Gowin`, `Microchip PolarFire`, or `Auto from IDCODE (FTDI)`, which the FTDI backend selects by itself.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
 | **Burst readout** | The bitstream's burst path: single chain (default), two chain (legacy USER2) or none (register window).  OpenOCD reads by burst for the PolarFire preset only; FTDI follows the detected family |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
@@ -107,11 +107,13 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 
 When you click **Connect**:
 
-1. The GUI builds a `XilinxHwServerTransport`, `OpenOcdTransport`, or
-   `QuartusStpTransport` with the field values.
+1. The GUI builds a `XilinxHwServerTransport`, `OpenOcdTransport`,
+   `QuartusStpTransport` or `FtdiMpsseTransport` with the field values.
 2. Calls `transport.connect()`, which spawns `xsdb`, talks to
-   OpenOCD, or starts `quartus_stp`.  The GUI programs the FPGA only
-   for the AMD/Xilinx `hw_server` backend when a bitfile is set.
+   OpenOCD, starts `quartus_stp` or opens the FTDI channel.  The GUI
+   programs the FPGA only for the `hw_server` and FTDI backends (FTDI:
+   AMD/Xilinx 7-series), when **Program on connect** is checked and a
+   bitfile is set.
 3. Reads the USER1 register window with `Analyzer.probe_optional()`.
    If VERSION reports the fcapz ELA core id (`'LA'`), **ELA capture**
    and the probe summary are enabled.  If not (EIO-only / AXI-only

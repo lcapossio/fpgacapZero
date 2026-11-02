@@ -992,6 +992,22 @@ class ChainShapeKwargsTests(unittest.TestCase):
         self.assertEqual(t.dr_extra_bits, 0)
 
 
+class RpcFtdiProgramTests(unittest.TestCase):
+    def test_connect_program_reaches_the_ftdi_transport(self):
+        t = RpcServer()._build_transport({"backend": "ftdi", "program": "top.bit"})
+        self.assertEqual(t.bitfile, "top.bit")
+        self.assertIsNone(RpcServer()._build_transport({"backend": "ftdi"}).bitfile)
+
+    def test_side_connects_never_program(self):
+        # An EIO/AXI/UART controller's own transport must not reprogram the
+        # FPGA under the session, even if the client sends `program`.
+        for backend in ("ftdi", "hw_server"):
+            with self.subTest(backend=backend):
+                req = {"backend": backend, "program": "top.bit"}
+                self.assertIsNone(RpcServer()._new_transport(req, side=True).bitfile)
+                self.assertEqual(req["program"], "top.bit")  # caller's dict untouched
+
+
 class RpcChainShapeTests(unittest.TestCase):
     """The RPC server (web UI, MCP) builds hw_server transports like the CLI."""
 
@@ -1159,6 +1175,9 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIs(_make_transport(args)._burst_arg, True)
         args = parser.parse_args(["--backend", "ftdi", "--tap", "xcku040", "probe"])
         self.assertEqual(_make_transport(args).ir_table, OpenOcdTransport.IR_TABLE_US)
+        self.assertIsNone(_make_transport(args).bitfile)
+        args = parser.parse_args(["--backend", "ftdi", "--program", "top.bit", "probe"])
+        self.assertEqual(_make_transport(args).bitfile, "top.bit")
 
     def test_no_burst_flag_declares_a_build_without_burst(self):
         parser = build_parser()

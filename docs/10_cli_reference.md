@@ -46,7 +46,7 @@ subcommand follows:
 | `--no-burst` | off | hw_server/usb_blaster/openocd/ftdi: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
 | `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: the first ELA slot behind a core manager) |
-| `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
+| `--program BITFILE` | — | hw_server: run fpga -file on this .bit before the command (slow); ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin over JTAG. Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
 
 <!-- END GENERATED cli:global -->
 
@@ -57,6 +57,9 @@ Examples:
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       --program my_design.bit \
       probe
+
+# direct FTDI cable: configure an AMD/Xilinx 7-series FPGA over JTAG, no Vivado
+fcapz --backend ftdi --tck-mhz 30 --program my_design.bit probe
 
 # openocd with default port and tap
 fcapz --backend openocd probe

@@ -145,7 +145,7 @@ readiness wait.
   "host": "127.0.0.1",
   "port": 3121,
   "tap": "xc7a100t",          // hw_server target, openocd TAP, or Quartus device/auto
-  "program": "my_design.bit"  // optional, hw_server only
+  "program": "my_design.bit"  // optional: hw_server, or ftdi (AMD/Xilinx 7-series)
 }
 ```
 
@@ -196,7 +196,10 @@ something to report: `{"kind", "channel", "proto_version", "num_chains",
 
 For a direct FTDI cable (FlashPro5, Digilent), use `"backend": "ftdi"`.
 `hardware` optionally names the channel and `tck_mhz` sets the clock
-(default 6). The IR table comes from the device IDCODE, and `ir_table` in
+(default 6). `program` configures an AMD/Xilinx 7-series FPGA with a `.bit`
+or `.bin` over JTAG first. On every backend, EIO, AXI and UART side
+connects ignore `program`, so they never reprogram the FPGA under the session.
+The IR table comes from the device IDCODE, and `ir_table` in
 the response echoes the detected family:
 
 ```json

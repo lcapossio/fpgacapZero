@@ -546,7 +546,7 @@ words = bridge.burst_read(0x40000000, count=16)    # count <= fifo_depth
 bridge.burst_write(0x40000000, [0xAA, 0xBB, 0xCC, 0xDD])
 
 # Streaming read (bitstreams built with STREAM_EN=1)
-if bridge.has_stream():
+if bridge.has_stream:
     words = bridge.stream_read(0x40000000, count=65536)
 
 bridge.close()

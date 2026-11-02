@@ -29,65 +29,6 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and over OpenOCD through `fcapz openocd-bridge`); ECP5 and Efinix have no
   board build.
 
-- **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 16383
-  words per long DR scan as 33-bit `{data, valid}` slots, so the cable sets
-  the rate instead of the per-scan tool overhead. On the Arty A7 at TCK
-  30 MHz: about 2.8 MB/s over the FTDI backend and 1.9 MB/s over
-  `hw_server`, against 6 KB/s for `read_block` over `hw_server`. Opt in
-  with `STREAM_EN=1` on the core or the Verilog wrappers (default 0, about
-  200 LUTs / 200 FFs, no BRAM; not in the VHDL core yet); `FEATURES[24]`
-  announces it. Host: `EjtagAxiController.stream_read()` and `has_stream()`,
-  `connect()` reports `"stream"`. Every scan's header is checked, a failed
-  attempt rereads the whole range, and words are returned only after the
-  range's AXI response reads OKAY.
-
-- **Transport: `raw_dr_capture()`, `jtag_lock()` / `jtag_unlock()`.**
-  `raw_dr_capture(width, tdi=0)` is one long constant-TDI DR scan returning
-  TDO; `XilinxHwServerTransport` builds the constant inside xsdb, so a 540 kbit
-  scan costs about its shift time. `jtag_lock()` / `jtag_unlock()` (hw_server
-  only) hold xsdb's `jtag lock`, which `stream_read()` takes per attempt:
-  without it other hw_server clients' scans aborted streams within tens of
-  milliseconds.
-
-- **FTDI backend: TDO sampled on the falling edge above 15 MHz.**
-  `FtdiMpsseTransport` reads TDO a full TCK period after the target drives it
-  when the clock is above 15 MHz (`tdo_sample_edge` overrides it): at 30 MHz
-  the Arty A7's onboard cable returned every bit one late on the rising edge.
-  Up to 15 MHz nothing changes. Verified on the Arty A7 at 30 MHz: probe, ELA
-  capture and EJTAG-AXI reads.
-
-- **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
-  `[31:0]` can trigger; the RTL integration guide now says so.
-
-- **MCP server: `ftdi` and `serial` backends.** `fcapz_connect` reaches an
-  FTDI MPSSE adapter directly (`hardware`, `ir_table`, `tck_mhz`) and the
-  byte-stream TAP bridge over a serial port (`serial_port`, `baudrate`), as
-  the CLI, GUI and RPC already could. `serial_port` must be a port the machine
-  lists, so an agent cannot have the server open an arbitrary path.
-  `ir_table` also takes `"polarfire"` and `"efinix"`.
-
-- **`fcapz openocd-bridge`: OpenOCD on Windows through a vendor-driver FTDI
-  cable.** On Windows the PolarFire kits' FlashPro5 and Digilent cables are
-  bound to FTDI's D2XX driver, which OpenOCD's `ftdi` driver cannot open.
-  The bridge opens the cable through D2XX and serves it to OpenOCD over
-  `remote_bitbang` on `127.0.0.1`, so OpenOCD flows work without swapping the
-  driver (which breaks Libero and Vivado). TRST is driven on the FlashPro5;
-  OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
-  `exchange()` give it the adapter without a chain scan.
-
-- **Docs sync check.** `tests/test_docs_sync.py` fails CI when the manual's
-  hand-written examples drift from the code: Verilog snippets naming a
-  parameter or port the RTL module lacks, `fcapz` commands the CLI parser
-  rejects, and version strings that don't match `VERSION`. A deliberately old
-  example opts out with `<!-- docs-sync: skip (why) -->`.
-
-### Changed
-
-- **The desktop GUI (`fcapz-gui`) is no longer actively maintained.** It still
-  ships, but development goes to the web interface (`fcapz-web`), the
-  recommended graphical front-end. The README no longer advertises the desktop
-  GUI, and the manual marks it as unmaintained.
-
 ### Fixed
 
 - **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
@@ -140,6 +81,102 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`core.json` lists what the new hubs need:** the PolarFire and Efinix TAP
   adapters, the Gowin register adapter, its synchronisers and the `GW_JTAG`
   declaration.
+
+## [0.5.1] — 2026-11-02
+
+### Added
+
+- **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 16383
+  words per long DR scan as 33-bit `{data, valid}` slots, so the cable sets
+  the rate instead of the per-scan tool overhead. On the Arty A7 at TCK
+  30 MHz: about 2.8 MB/s over the FTDI backend and 1.9 MB/s over
+  `hw_server`, against 6 KB/s for `read_block` over `hw_server`. Opt in
+  with `STREAM_EN=1` on the core or the Verilog wrappers (default 0, about
+  200 LUTs / 200 FFs, no BRAM; not in the VHDL core yet); `FEATURES[24]`
+  announces it. Host: `EjtagAxiController.stream_read()` and `has_stream`,
+  `connect()` reports `"stream"`. Every scan's header is checked, a failed
+  attempt rereads the whole range, and words are returned only after the
+  range's AXI response reads OKAY.
+
+- **Transport: `raw_dr_capture()`, `jtag_lock()` / `jtag_unlock()`.**
+  `raw_dr_capture(width, tdi=0)` is one long constant-TDI DR scan returning
+  TDO; `XilinxHwServerTransport` builds the constant inside xsdb, so a 540 kbit
+  scan costs about its shift time. `jtag_lock()` / `jtag_unlock()` (hw_server
+  only) hold xsdb's `jtag lock`, which `stream_read()` takes per attempt:
+  without it other hw_server clients' scans aborted streams within tens of
+  milliseconds.
+
+- **FTDI backend: TDO sampled on the falling edge above 15 MHz.**
+  `FtdiMpsseTransport` reads TDO a full TCK period after the target drives it
+  when the clock is above 15 MHz (`tdo_sample_edge` overrides it): at 30 MHz
+  the Arty A7's onboard cable returned every bit one late on the rising edge.
+  Up to 15 MHz nothing changes. Verified on the Arty A7 at 30 MHz: probe, ELA
+  capture and EJTAG-AXI reads.
+
+- **FTDI: program AMD/Xilinx 7-series FPGAs.** `FtdiMpsseTransport.program()`
+  and `bitfile=` configure the FPGA over JTAG with a Vivado `.bit` or a raw
+  `.bin` (UG470: JPROGRAM, INIT_COMPLETE, CFG_IN, JSTART, DONE), with no
+  Vivado or hw_server. `--program` now works with `--backend ftdi`, and so do
+  RPC/MCP `program` and the desktop GUI's *Program on connect*. A bitstream
+  for another part is refused before the FPGA is cleared; DONE staying low is
+  an error. `bitfile=` programs only when the transport opens the channel, so
+  a transport joining a shared channel never reprograms the FPGA under
+  another, and `program()` is refused while other transports share it. The
+  Arty A7 loads in 1.2 s at 30 MHz. PolarFire and Gowin are not supported.
+- **FTDI: `cancel()` no longer waits on the call it aborts.** It takes no
+  lock: the call stops at its next USB transfer (programming within about a
+  quarter second of TCK), other transports on the channel keep working, and
+  the transport refuses I/O until `close()` or `connect()`. The desktop GUI's
+  connect Cancel now calls `cancel()` instead of `close()`.
+
+- **Arty A7 hardware suite over FTDI.** `FPGACAP_BACKEND=ftdi` runs
+  `examples/arty_a7/test_hw_integration.py` on the onboard cable through D2XX
+  (`FPGACAP_FTDI_TCK_MHZ`, default 30; `FPGACAP_FTDI_DEVICE`), with no Vivado:
+  it programs the bitstream over FTDI once per run (`FPGACAP_FTDI_PROGRAM=0`
+  keeps the loaded one). All 71 tests that do not need a UART loopback
+  bitstream pass at 6 and 30 MHz, in about 25 s, the startup-arm test
+  included; it now writes a sentinel before programming, so a connect that
+  does not reprogram cannot pass. The suite also gains a streaming-read test.
+  The Arty README gains a "Connect With FTDI" section, and the web interface
+  chapter now covers picking the FTDI adapter and the UI's fixed 6 MHz TCK.
+
+- **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
+  `[31:0]` can trigger; the RTL integration guide now says so.
+
+- **MCP server: `ftdi` and `serial` backends.** `fcapz_connect` reaches an
+  FTDI MPSSE adapter directly (`hardware`, `ir_table`, `tck_mhz`) and the
+  byte-stream TAP bridge over a serial port (`serial_port`, `baudrate`), as
+  the CLI, GUI and RPC already could. `serial_port` must be a port the machine
+  lists, so an agent cannot have the server open an arbitrary path.
+  `ir_table` also takes `"polarfire"` and `"efinix"`.
+
+- **`fcapz openocd-bridge`: OpenOCD on Windows through a vendor-driver FTDI
+  cable.** On Windows the PolarFire kits' FlashPro5 and Digilent cables are
+  bound to FTDI's D2XX driver, which OpenOCD's `ftdi` driver cannot open.
+  The bridge opens the cable through D2XX and serves it to OpenOCD over
+  `remote_bitbang` on `127.0.0.1`, so OpenOCD flows work without swapping the
+  driver (which breaks Libero and Vivado). TRST is driven on the FlashPro5;
+  OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
+  `exchange()` give it the adapter without a chain scan.
+
+- **Docs sync check.** `tests/test_docs_sync.py` fails CI when the manual's
+  hand-written examples drift from the code: Verilog snippets naming a
+  parameter or port the RTL module lacks, `fcapz` commands the CLI parser
+  rejects, and version strings that don't match `VERSION`. A deliberately old
+  example opts out with `<!-- docs-sync: skip (why) -->`.
+
+### Changed
+
+- **The desktop GUI (`fcapz-gui`) is no longer actively maintained.** It still
+  ships, but development goes to the web interface (`fcapz-web`), the
+  recommended graphical front-end. The README no longer advertises the desktop
+  GUI, and the manual marks it as unmaintained.
+
+- **RPC: EIO, AXI and UART side connects ignore `program`.** Only the
+  session's `connect` programs the FPGA; a side controller's own transport
+  reprogramming it would wipe the cores the session is using.
+
+### Fixed
 
 - **EJTAG-AXI: late R beats after a timeout or RESET became the next read's
   data.** A read that timed out waiting for `rvalid`, or that `CMD_RESET` cut

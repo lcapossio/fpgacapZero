@@ -211,7 +211,8 @@ either way: its entry looks ordinary and its identity is stable, but the
 bytes can belong to a file outside the root. Probe files are also capped at
 1 MiB.
 
-Programming is intentionally `hw_server`-only in the MCP layer.
+Programming is limited to the `hw_server` and `ftdi` backends in the MCP
+layer (`ftdi` programs AMD/Xilinx 7-series FPGAs only).
 
 If `program` is passed while programming is disabled, the server reports the
 permission error before backend-specific validation so agents see the global
@@ -226,7 +227,7 @@ The live RPC layer supports:
 | `hw_server` | `host`, `port`, `tap`, `ir_table` | `program`, `single_chain_burst` defaults to `true` |
 | `openocd` | `host`, `port`, `tap`, `ir_table` | - |
 | `usb_blaster` | `hardware`, `quartus_stp` | - |
-| `ftdi` | `hardware`, `ir_table` | `tck_mhz` (default 6) |
+| `ftdi` | `hardware`, `ir_table` | `tck_mhz` (default 6), `program` (AMD/Xilinx 7-series) |
 | `serial` | `serial_port` | `baudrate` (default 1000000) |
 
 `ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"`,
@@ -869,7 +870,7 @@ fcapz_close(core="uart")
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
-| `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
+| `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or neither `hw_server` nor `ftdi`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
 | Tool call raises `TimeoutError` | The RPC watchdog (`--rpc-timeout`, 30 s by default) fired before the backend returned. | The board session is torn down, or is being torn down if the call was abandoned. Poll `fcapz_status` until `session_state` is `ready`, then call `fcapz_connect` again. Restart `fcapz-mcp` only if it never returns to `ready`. |
 | A new tool call is refused while the session is recovering from an abandoned call (`session_recovering`) | A timed-out hardware call is still being torn down; `session_state` is `poisoned`. | Wait: once the abandoned call returns, the server closes the board session, clears its state and goes back to `ready`. Then reconnect. Restart only if recovery never completes. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |

@@ -39,6 +39,7 @@ def transport_from_connection(conn: ConnectionSettings) -> Transport:
             ir_table=ir,
             burst=False if conn.burst_path == "none" else None,
             single_chain_burst=conn.burst_path != "two_chain",
+            bitfile=conn.program if (conn.program_on_connect and conn.program) else None,
         )
     if conn.backend == "hw_server":
         fpga = conn.tap

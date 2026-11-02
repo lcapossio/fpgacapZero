@@ -7,7 +7,11 @@ command stream through a bit-level JTAG TAP model.  No hardware."""
 from __future__ import annotations
 
 import ctypes
+import itertools
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fcapz import ftdi_transport as ft
@@ -16,7 +20,9 @@ from fcapz.ftdi_transport import (
     FtdiMpsseTransport,
     _Batch,
     _pick_device,
+    bitstream_idcode,
     family_from_idcode,
+    read_xilinx_bitstream,
 )
 
 # -- TAP model ----------------------------------------------------------------
@@ -101,6 +107,78 @@ class _Device:
         return tdo
 
 
+class _Xilinx7Device(_Device):
+    """A 7-series TAP with its JTAG configuration logic (UG470): JPROGRAM
+    clears the FPGA for *clear_clocks* TCKs, CFG_IN collects the bitstream,
+    and JSTART plus 2000 idle TCKs raise DONE if it was *accepts*."""
+
+    CFG_IN, JPROGRAM, JSTART = 0x05, 0x0B, 0x0C
+
+    def __init__(self, accepts: bytes = b"", clear_clocks: int = 3000):
+        super().__init__(XILINX_IDCODE, ir_len=6, user1=0x02, idcode_ir=0x09)
+        self.accepts = accepts
+        self.clear_clocks = clear_clocks
+        self.done = self.init = True
+        self.clear_left = 0
+        self.cfg_bits: list[int] = []
+        self.started = False
+        self.startup_clocks = 0
+        self.programs = 0
+
+    def loaded(self) -> bytes:
+        bits = self.cfg_bits
+        return bytes(
+            sum(bits[i + k] << (7 - k) for k in range(8)) for i in range(0, len(bits) - 7, 8)
+        )
+
+    def clock(self, tms: int, tdi: int) -> int:
+        if self.state == "SHIFT_DR" and self.ir == self.CFG_IN:
+            self.cfg_bits.append(tdi & 1)
+        if self.clear_left:
+            self.clear_left -= 1
+            self.init = self.clear_left == 0
+        if self.started and self.state == "IDLE":
+            self.startup_clocks += 1
+            if self.startup_clocks >= 2000 and self.loaded() == self.accepts:
+                self.done = True
+        before = self.state
+        tdo = super().clock(tms, tdi)
+        if before == "CAPTURE_IR":
+            self.sr = 0b01 | (0x10 if self.init else 0) | (0x20 if self.done else 0)
+        if self.state == "UPDATE_IR":
+            if self.ir == self.JPROGRAM:
+                self.programs += 1
+                self.done = self.init = self.started = False
+                self.clear_left = self.clear_clocks
+                self.cfg_bits = []
+            elif self.ir == self.JSTART:
+                self.started, self.startup_clocks = True, 0
+        return tdo
+
+
+def _bitstream(idcode: int = XILINX_IDCODE & 0x0FFFFFFF, body: bytes = b"\x5a\xc3" * 20) -> bytes:
+    """Configuration data shaped like Vivado's: dummy words, the bus-width
+    pattern, the sync word, then an IDCODE check."""
+    return (
+        b"\xff" * 8 + b"\x00\x00\x00\xbb\x11\x22\x00\x44" + b"\xff" * 4
+        + b"\xaa\x99\x55\x66" + b"\x30\x01\x80\x01" + idcode.to_bytes(4, "big") + body
+    )
+
+
+def _bit_file(data: bytes, part: str = "7a100tcsg324") -> bytes:
+    """A Vivado .bit around *data*."""
+    def field(key: str, text: str) -> bytes:
+        value = text.encode() + b"\0"
+        return key.encode() + len(value).to_bytes(2, "big") + value
+
+    return (
+        b"\x00\x09\x0f\xf0\x0f\xf0\x0f\xf0\x0f\xf0\x00\x00\x01"
+        + field("a", "top;UserID=0XFFFFFFFF") + field("b", part)
+        + field("c", "2026/11/02") + field("d", "12:00:00")
+        + b"e" + len(data).to_bytes(4, "big") + data
+    )
+
+
 class _FakeD2xx:
     """D2XX entry points over an MPSSE interpreter driving ``_Device``.
 
@@ -122,6 +200,10 @@ class _FakeD2xx:
         self.opens = 0
         self.closes = 0
         self.writes = 0
+        self.write_clocks: list[int] = []  # TCK clocked by each write
+        self.clocks = 0
+        self.read_waits: list[int] = []  # TCK queued ahead of each read
+        self._read_mark = 0
         self.tms = 1
         self.divisor = None
         self.pins = None  # last ADBUS value set with 0x80
@@ -156,11 +238,15 @@ class _FakeD2xx:
 
     def FT_Write(self, handle, data, n, written):
         self.writes += 1
+        start = self.clocks
         self._run(bytes(data[:n]))
+        self.write_clocks.append(self.clocks - start)
         written._obj.value = n
         return 0
 
     def FT_Read(self, handle, buf, n, got):
+        self.read_waits.append(self.clocks - self._read_mark)
+        self._read_mark = self.clocks
         take = bytes(self.rx[:n])
         del self.rx[:n]
         ctypes.memmove(buf, take, len(take))
@@ -169,6 +255,7 @@ class _FakeD2xx:
 
     # MPSSE
     def _clock(self, tms, tdi):
+        self.clocks += 1
         self.tms = tms
         return self.dev.clock(tms, tdi)
 
@@ -272,6 +359,27 @@ class OpenPinsTests(_FtdiTestCase):
         self.assertEqual(self.lib.closes, 1)
         t.close()  # idempotent
         self.assertEqual(self.lib.closes, 1)
+
+    def test_cancel_while_opening_is_kept(self):
+        t = FtdiMpsseTransport()
+        self.addCleanup(t.close)
+        errors = []
+
+        def open_pins():
+            try:
+                t.open_pins()
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        with ft._OPEN_CHANNELS_LOCK:  # open_pins() waits for the registry
+            opener = threading.Thread(target=open_pins)
+            opener.start()
+            opener.join(0.1)
+            t.cancel()
+        opener.join(2.0)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("cancelled", errors[0])
+        self.assertEqual(self.lib.closes, 1)  # the half-open channel is released
 
     def test_a_second_open_is_refused(self):
         t = FtdiMpsseTransport()
@@ -445,6 +553,267 @@ class SharedChannelTests(_FtdiTestCase):
         self._transport(tck_hz=30e6)
         b = self._transport(tck_hz=6e6)
         self.assertTrue(b.sample_falling)
+
+
+class ProgramTests(_FtdiTestCase):
+    """program(): JTAG configuration of an AMD/Xilinx 7-series FPGA."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = _bitstream()
+        self.lib.dev = _Xilinx7Device(accepts=self.data)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def _file(self, content: bytes, name: str = "design.bit") -> str:
+        path = self.dir / name
+        path.write_bytes(content)
+        return str(path)
+
+    def test_configures_with_a_bit_file(self):
+        t = self._transport()
+        t.write_reg(0x0010, 1)  # anything learned about the old image is dropped
+        t.program(self._file(_bit_file(self.data)))
+        dev = self.lib.dev
+        self.assertEqual(dev.programs, 1)
+        self.assertEqual(dev.loaded(), self.data)  # MSB of each byte first
+        self.assertTrue(dev.done)
+        self.assertGreaterEqual(dev.startup_clocks, 2000)
+        self.assertEqual((dev.state, dev.ir), ("IDLE", dev.idcode_ir))  # left reset
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+
+    def test_configures_with_a_raw_bin(self):
+        t = self._transport()
+        t.program(self._file(self.data, "design.bin"))
+        self.assertTrue(self.lib.dev.done)
+
+    def test_slow_clock_writes_in_pieces(self):
+        data = self.data + b"\x00" * 1000
+        self.lib.dev.accepts = data
+        t = self._transport(tck_hz=10e3)  # a quarter second is 312 bytes
+        writes = self.lib.writes
+        t.program(self._file(data, "design.bin"))
+        self.assertGreater(self.lib.writes - writes, 4)
+        # The data, the startup clocks and every status poll alike: no write,
+        # and no read waiting behind clocks still queued in the adapter,
+        # outlasts much more than a quarter second.
+        self.assertLessEqual(max(self.lib.write_clocks[writes:]), 2500 + 20)
+        self.assertLessEqual(max(self.lib.read_waits[-50:]), 2600)
+        self.assertTrue(self.lib.dev.done)
+
+    def test_wrong_part_is_refused_before_clearing(self):
+        t = self._transport()
+        path = self._file(_bit_file(_bitstream(idcode=0x03727093), part="7k70tfbg676"))
+        with self.assertRaisesRegex(RuntimeError, r"IDCODE 0x03727093 \(7k70tfbg676\)"):
+            t.program(path)
+        self.assertEqual(self.lib.dev.programs, 0)
+        self.assertTrue(self.lib.dev.done)
+
+    def test_done_staying_low_is_an_error(self):
+        self.lib.dev.accepts = b"something else"
+        self.lib.dev.clear_clocks = 10  # cleared by the first poll, whatever the load
+        t = self._transport()
+        with self.assertRaisesRegex(RuntimeError, r"DONE stayed low.*IR status 0x11"):
+            t.program(self._file(self.data, "design.bin"), timeout_s=0.01)
+        self.assertEqual(self.lib.dev.state, "IDLE")
+
+    def test_clearing_that_never_finishes_is_an_error(self):
+        self.lib.dev.clear_clocks = 10**9
+        t = self._transport()
+        with self.assertRaisesRegex(RuntimeError, r"did not finish clearing.*0x01\)"):
+            t.program(self._file(self.data, "design.bin"), timeout_s=0.01)
+
+    def test_other_families_are_refused(self):
+        self.lib.dev = _Device()  # PolarFire
+        t = self._transport()
+        with self.assertRaisesRegex(RuntimeError, "7-series only.*polarfire"):
+            t.program(self._file(self.data, "design.bin"))
+
+    def test_bitfile_programs_only_when_opening_the_channel(self):
+        path = self._file(self.data, "design.bin")
+        a = self._transport(bitfile=path)
+        self.assertEqual(self.lib.dev.programs, 1)
+        self._transport(bitfile=path)  # joins a's channel: no reprogram under it
+        self.assertEqual(self.lib.dev.programs, 1)
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
+
+    def test_failed_program_at_connect_releases_the_channel(self):
+        t = FtdiMpsseTransport(bitfile=self._file(self.data, "design.bin"))
+        clock = mock.Mock(monotonic=mock.Mock(side_effect=itertools.count(0, 10)))
+        with mock.patch.object(ft, "time", clock):  # every wait times out at once
+            with self.assertRaisesRegex(RuntimeError, "did not finish clearing"):
+                t.connect()
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
+    def test_no_transport_joins_while_programming_at_connect(self):
+        published = []
+        real = FtdiMpsseTransport._program
+
+        def spy(t, *args, **kw):
+            published.append(list(ft._OPEN_CHANNELS))
+            return real(t, *args, **kw)
+
+        with mock.patch.object(FtdiMpsseTransport, "_program", spy):
+            self._transport(bitfile=self._file(self.data, "design.bin"))
+        self.assertEqual(published, [[]])
+        self.assertEqual(len(ft._OPEN_CHANNELS), 1)
+
+    def test_interrupted_program_at_connect_releases_the_channel(self):
+        t = FtdiMpsseTransport(bitfile=self._file(self.data, "design.bin"))
+        with mock.patch.object(t, "_shift_dr_bytes", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                t.connect()
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
+    def test_refused_while_other_transports_share_the_channel(self):
+        a = self._transport()
+        self._transport()
+        with self.assertRaisesRegex(RuntimeError, "1 other transport"):
+            a.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.dev.programs, 0)
+
+    def test_reconnect_while_loading_is_refused(self):
+        a = self._transport()
+        real = a._load_bitstream
+
+        def reconnect(path):
+            data = real(path)  # checked against the old channel's device
+            a.close()  # a moves to a new channel, maybe another FPGA
+            a.connect()
+            self._transport()
+            return data
+
+        with mock.patch.object(a, "_load_bitstream", reconnect):
+            with self.assertRaisesRegex(RuntimeError, "reconnected while the bitstream"):
+                a.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.dev.programs, 0)
+
+    def test_cancel_stops_programming_without_waiting(self):
+        t = self._transport()
+        real = t._idle
+        blocked = []
+
+        def cancel_from_another_thread(cycles):
+            if not blocked:  # programming holds the registry lock here
+                worker = threading.Thread(target=t.cancel)
+                worker.start()
+                worker.join(1.0)
+                blocked.append(worker.is_alive())
+            return real(cycles)
+
+        with mock.patch.object(t, "_idle", cancel_from_another_thread):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                t.program(self._file(self.data, "design.bin"))
+        self.assertEqual(blocked, [False])  # cancel() returned at once
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
+    def test_cancel_stops_scans_and_spares_peers(self):
+        a = self._transport()
+        b = self._transport()
+        with ft._OPEN_CHANNELS_LOCK:  # takes no lock: a busy registry is fine
+            a.cancel()
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            a.read_reg(0x0000)
+        self.assertEqual(b.read_reg(0x0000), 0x46430004)
+        a.connect()  # a new session on the same channel
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
+        self.assertEqual(self.lib.opens, 1)
+
+    def test_reconnect_waits_for_the_cancelled_call(self):
+        a = self._transport()
+        self._transport()  # a peer keeps the channel open
+        a.cancel()
+        held, release = threading.Event(), threading.Event()
+
+        def call_in_flight():
+            with a._io_lock:
+                held.set()
+                release.wait(2.0)
+
+        flight = threading.Thread(target=call_in_flight)
+        flight.start()
+        held.wait(2.0)
+        reconnect = threading.Thread(target=a.connect)
+        reconnect.start()
+        reconnect.join(0.2)
+        self.assertTrue(reconnect.is_alive())  # the cancelled call ends first
+        release.set()
+        flight.join(2.0)
+        reconnect.join(2.0)
+        self.assertFalse(reconnect.is_alive())
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
+
+    def test_cancel_while_connect_waits_cancels_it(self):
+        t = FtdiMpsseTransport(bitfile=self._file(self.data, "design.bin"))
+        real = ft._find_open_channel
+
+        def cancel_then_find(device):  # cancel() lands once connect() waits
+            t.cancel()
+            return real(device)
+
+        with mock.patch.object(ft, "_find_open_channel", cancel_then_find):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                t.connect()
+        self.assertEqual(self.lib.dev.programs, 0)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+        self.assertEqual(self.lib.closes, 1)
+
+    def test_reconnect_forgets_the_old_bitstream(self):
+        t = self._transport()
+        t.__dict__["_fcapz_owned_managers"] = {(1, 0x0000): 7}
+        t.close()
+        t.connect()
+        self.assertNotIn("_fcapz_owned_managers", t.__dict__)
+
+    def test_short_write_closes_the_channel(self):
+        t = self._transport()
+        real = self.lib.FT_Write
+        calls = itertools.count()
+
+        def flaky(handle, data, n, written):
+            status = real(handle, data, n, written)
+            if next(calls) == 3:  # partway through the configuration
+                written._obj.value = n - 1
+            return status
+
+        self.lib.FT_Write = flaky
+        with self.assertRaisesRegex(RuntimeError, "write short"):
+            t.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.closes, 1)  # MPSSE may be mid-command
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+        with self.assertRaisesRegex(RuntimeError, "not connected"):
+            t.read_reg(0)
+
+
+class BitstreamFileTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def _write(self, content: bytes) -> str:
+        path = self.dir / "f.bit"
+        path.write_bytes(content)
+        return str(path)
+
+    def test_bit_header_and_raw_bin(self):
+        data = _bitstream()
+        self.assertEqual(
+            read_xilinx_bitstream(self._write(_bit_file(data))), (data, "7a100tcsg324")
+        )
+        self.assertEqual(read_xilinx_bitstream(self._write(data)), (data, None))
+        self.assertEqual(bitstream_idcode(data), XILINX_IDCODE & 0x0FFFFFFF)
+        self.assertIsNone(bitstream_idcode(b"\xff" * 4 + b"\xaa\x99\x55\x66"))
+
+    def test_bad_files(self):
+        with self.assertRaisesRegex(ValueError, "no AMD/Xilinx sync word"):
+            read_xilinx_bitstream(self._write(b"\x01\x02" * 100))
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            read_xilinx_bitstream(self._write(_bit_file(_bitstream())[:-4]))
 
 
 class SampleEdgeTests(_FtdiTestCase):

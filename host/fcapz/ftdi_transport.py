@@ -12,7 +12,8 @@ transport holds the adapter only while connected.
 
 Scope: one device on the JTAG chain.  At connect the transport reads the
 IDCODE chain, measures the IR length, and picks the IR table from the
-IDCODE manufacturer unless one is given.
+IDCODE manufacturer unless one is given.  It can also configure an
+AMD/Xilinx 7-series FPGA (:meth:`FtdiMpsseTransport.program`).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import ctypes
 import os
 import sys
 import threading
+import time
 from typing import Any, List, NamedTuple
 
 from .transport import (
@@ -192,6 +194,7 @@ _DATA_BITS_INOUT = 0x3B
 _TMS_OUT = 0x4B
 _TMS_INOUT = 0x6B
 _SEND_IMMEDIATE = 0x87
+_READ_PINS = 0x81  # ADBUS low byte
 # Not an opcode: its rejection (0xFA 0xAB) marks the end of setup replies.
 _SYNC_MARK = 0xAB
 # ADBUS bits of the JTAG pins (TDO is ADBUS2).
@@ -312,6 +315,69 @@ def family_from_idcode(idcode: int, ir_length: int) -> str | None:
     return None
 
 
+# -- AMD/Xilinx JTAG configuration -------------------------------------------
+
+# Configuration instructions of 7-series and single-die UltraScale (UG470,
+# UG570), and the status bits their IR capture carries.
+_XC_CFG_IN = 0x05
+_XC_JPROGRAM = 0x0B
+_XC_JSTART = 0x0C
+_XC_BYPASS = 0x3F
+_XC_IR_INIT = 0x10  # INIT_COMPLETE: housecleaning finished
+_XC_IR_DONE = 0x20
+_XC_SYNC = b"\xaa\x99\x55\x66"
+_XC_WRITE_IDCODE = b"\x30\x01\x80\x01"  # type-1 packet: write 1 word to IDCODE
+#: Bytes with their bit order reversed: configuration data is shifted MSB first.
+_BIT_REVERSE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
+
+
+class _ConfigFailed(RuntimeError):
+    """Configuration did not complete, but every scan went out whole, so
+    the adapter and TAP are in a known state."""
+
+
+def read_xilinx_bitstream(path: str) -> tuple[bytes, str | None]:
+    """Return the configuration data of a ``.bit`` or raw ``.bin`` file and
+    the part the ``.bit`` header names (``None`` for ``.bin``)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    data, part = raw, None
+    if raw[:2] == b"\x00\x09":
+        # .bit: a 9-byte magic field, 0x0001, then keyed fields; 'e' holds the
+        # configuration data with a 4-byte length, the others a 2-byte one.
+        pos = 2 + 9 + 2
+        fields: dict[str, bytes] = {}
+        while pos < len(raw):
+            key = chr(raw[pos])
+            if key == "e":
+                n = int.from_bytes(raw[pos + 1:pos + 5], "big")
+                data = raw[pos + 5:pos + 5 + n]
+                if len(data) != n:
+                    raise ValueError(f"{path}: bitstream truncated ({len(data)} of {n} bytes)")
+                break
+            n = int.from_bytes(raw[pos + 1:pos + 3], "big")
+            fields[key] = raw[pos + 3:pos + 3 + n]
+            pos += 3 + n
+        else:
+            raise ValueError(f"{path}: .bit header has no configuration data field")
+        if "b" in fields:
+            part = fields["b"].rstrip(b"\0").decode("ascii", errors="replace")
+    if _XC_SYNC not in data[:1024]:
+        raise ValueError(
+            f"{path}: no AMD/Xilinx sync word (0xAA995566) near the start; not a "
+            ".bit or a raw, unswapped .bin bitstream"
+        )
+    return data, part
+
+
+def bitstream_idcode(data: bytes) -> int | None:
+    """The IDCODE a bitstream checks the device against, or ``None``."""
+    i = data.find(_XC_WRITE_IDCODE, data.find(_XC_SYNC))
+    if i < 0 or i + 8 > len(data):
+        return None
+    return int.from_bytes(data[i + 4:i + 8], "big")
+
+
 class _OpenChannel:
     """One D2XX handle, shared by every transport on that channel in this
     process: D2XX opens a channel exclusively, and the ELA, EIO and bridge
@@ -361,6 +427,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     where a cable's TDO round trip can exceed half a TCK period (the Arty
     A7 reads a shifted IDCODE at 30 MHz on the rising edge).
 
+    ``bitfile`` programs an AMD/Xilinx 7-series FPGA with that ``.bit`` or
+    ``.bin`` at connect (see :meth:`program`), only when this transport opens
+    the channel: one joining a channel another transport holds never
+    reprograms the FPGA under it.
+
     Transports on the same channel in one process share its handle (the
     first one's clock, layout and sample edge apply); the channel closes
     with the last.
@@ -371,6 +442,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     RAW_DR_IDLE_CYCLES = 8
     USER1_PIPE_PRIME_READS = 3
     MAX_DEVICES = 8
+    #: TCKs in Run-Test/Idle after JSTART, for the startup sequence (UG470
+    #: asks for at least 2000).
+    STARTUP_IDLE_CYCLES = 4000
+    #: TCKs in Run-Test/Idle between configuration status polls.
+    STATUS_POLL_IDLE_CYCLES = 1000
     #: Flush a batch to the adapter at this many command or reply bytes.
     _FLUSH_CMD_BYTES = 0xF000
     _FLUSH_READ_BYTES = 0x8000
@@ -387,6 +463,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         layout: tuple[int, int] | None = None,
         timeout_ms: int = 2000,
         tdo_sample_edge: str | None = None,
+        bitfile: str | None = None,
     ):
         if not 1_000 <= tck_hz <= 30_000_000:
             raise ValueError(f"tck_hz must be 1 kHz..30 MHz, got {tck_hz}")
@@ -407,6 +484,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.burst_data_chain = int(burst_data_chain)
         self.layout = layout
         self.timeout_ms = int(timeout_ms)
+        self.bitfile = bitfile
+        #: :meth:`cancel` counts up; a session started at another count is
+        #: cancelled.
+        self._cancel_count = 0
+        self._session_count = 0
         self._active_chain = 1
         self._handle: ctypes.c_void_p | None = None
         self._lib = None
@@ -428,13 +510,21 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
-                return
+                if not self._cancelled:
+                    return
+                # A cancelled session: let its call in flight end (it fails
+                # at its next write; a read already waiting ends within the
+                # D2XX timeout, as close() may wait), then start a new one.
+                with self._io_lock:
+                    self._detach()
+            self._session_count = count
             ch = _find_open_channel(self.device)
-            if ch is None:
+            opened = ch is None
+            if opened:
                 ch = self._open_channel()
-                _OPEN_CHANNELS.append(ch)
             ch.users += 1
             self._channel = ch
             self._lib, self._handle, self.adapter = ch.lib, ch.handle, ch.adapter
@@ -442,11 +532,24 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
             self.sample_falling = ch.sample_falling
-        try:
-            self._apply_family_defaults()
-        except Exception:
-            self.close()
-            raise
+            # The FPGA may hold another bitstream than on a past connection.
+            self._forget_hub_state()
+            try:
+                self._apply_family_defaults()
+                if opened and self.bitfile:
+                    # Before the channel is published: no transport joins
+                    # while the FPGA is being configured.
+                    self._program(self._load_bitstream(self.bitfile), self.bitfile)
+                if self._cancelled:
+                    raise RuntimeError("FTDI transport cancelled; reconnect")
+            except BaseException:
+                self._channel = self._handle = None
+                ch.users -= 1
+                if opened:
+                    _release(ch.lib, ch.handle)
+                raise
+            if opened:
+                _OPEN_CHANNELS.append(ch)
 
     def _open_mpsse(self) -> tuple[Any, ctypes.c_void_p, FtdiDevice, tuple[int, int]]:
         """Open the device and put it in MPSSE mode: ``(lib, handle, device,
@@ -494,9 +597,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         releases it.  Returns the ``(ADBUS value, direction)`` layout in
         force, and sets :attr:`gpio`.  For ``fcapz openocd-bridge``.
         """
+        count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
                 raise RuntimeError("this transport already holds its channel")
+            self._session_count = count
             lib, handle, dev, layout = self._open_mpsse()
             ch = _OpenChannel(lib, handle, dev)
             ch.users = 1
@@ -523,17 +628,36 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     def close(self) -> None:
         with _OPEN_CHANNELS_LOCK:
-            ch, self._channel = self._channel, None
-            self._handle = None
-            if ch is None:
-                return
-            ch.users -= 1
-            if ch.users > 0:
-                return
-            if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
-                _OPEN_CHANNELS.remove(ch)
-            with ch.lock:
-                _release(ch.lib, ch.handle)
+            self._detach()
+
+    def _detach(self) -> None:
+        """:meth:`close`, with ``_OPEN_CHANNELS_LOCK`` held."""
+        ch, self._channel = self._channel, None
+        self._handle = None
+        if ch is None:
+            return
+        ch.users -= 1
+        if ch.users > 0:
+            return
+        if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
+            _OPEN_CHANNELS.remove(ch)
+        with ch.lock:
+            _release(ch.lib, ch.handle)
+
+    def cancel(self) -> None:
+        """Abort the call in flight from another thread, without a lock.
+
+        The call stops at its next USB write (a read already waiting ends
+        within the D2XX timeout), with nothing half sent, so other
+        transports on the channel carry on.  Programming stops within
+        about a quarter second of TCK and closes the channel.  This
+        transport then refuses I/O until :meth:`close` or :meth:`connect`.
+        """
+        self._cancel_count += 1
+
+    @property
+    def _cancelled(self) -> bool:
+        return self._session_count != self._cancel_count
 
     @property
     def opened_device(self) -> str | None:
@@ -625,6 +749,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         return reply[0] & mask == both and reply[1] & mask == 0
 
     def _write(self, data: bytes) -> None:
+        if self._cancelled:
+            raise RuntimeError("FTDI transport cancelled; reconnect")
         written = ctypes.c_ulong()
         self._call("FT_Write", data, len(data), ctypes.byref(written))
         if written.value != len(data):
@@ -757,6 +883,170 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     batch = _Batch(self.sample_falling)
             out.extend(self._flush(batch))
         return out
+
+    # -- configuration -----------------------------------------------------------
+
+    def program(self, bitfile: str, *, timeout_s: float = 2.0) -> None:
+        """Configure an AMD/Xilinx 7-series FPGA with *bitfile* over JTAG.
+
+        Takes a Vivado ``.bit`` or a raw ``.bin``.  Follows UG470's JTAG
+        sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
+        the bitstream through CFG_IN, JSTART, then wait for DONE.  A
+        bitstream built for another part is refused before the FPGA is
+        cleared.  Every core on the FPGA is lost, so this is refused while
+        other transports share the channel.  If a USB transfer fails
+        partway, the adapter may be left mid-command, so the channel is
+        closed: connect again.  :meth:`cancel` from another thread stops it
+        within about a quarter second of TCK, closing the channel too.
+        *timeout_s* bounds each of the two waits.
+        Single-die UltraScale shares the IR table and this sequence (UG570)
+        but is not hardware-validated.
+        """
+        ch = self._channel
+        if self._handle is None or ch is None or self.ir_length is None:
+            raise RuntimeError("not connected — call connect() first")
+        data = self._load_bitstream(bitfile)  # checked against this channel's device
+        with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
+            if self._channel is not ch or self._handle is None:
+                raise RuntimeError(
+                    "the transport disconnected or reconnected while the "
+                    "bitstream loaded; call program() again"
+                )
+            if ch.users > 1:
+                raise RuntimeError(
+                    f"cannot program: {ch.users - 1} other transport(s) share "
+                    "this FTDI channel and would lose their cores; close them first"
+                )
+            try:
+                self._program(data, bitfile, timeout_s)
+            except _ConfigFailed:
+                raise
+            except BaseException:
+                # MPSSE may be mid-command: closed before the lock goes, so
+                # no transport joins it.
+                self._detach()
+                raise
+
+    def _load_bitstream(self, bitfile: str) -> bytes:
+        """*bitfile*'s configuration data, checked against the device."""
+        if self.family != "xilinx7":
+            raise RuntimeError(
+                "programming over FTDI supports AMD/Xilinx 7-series only; this "
+                f"device is {self.opened_device}"
+            )
+        data, part = read_xilinx_bitstream(bitfile)
+        want = bitstream_idcode(data)
+        if want is not None and self.idcode is not None and (want ^ self.idcode) & 0x0FFFFFFF:
+            built = f" ({part})" if part else ""
+            raise RuntimeError(
+                f"{bitfile} is built for IDCODE 0x{want:08x}{built}; the device "
+                f"reads 0x{self.idcode:08x}"
+            )
+        return data
+
+    def _program(self, data: bytes, bitfile: str, timeout_s: float = 2.0) -> None:
+        """The UG470 sequence for :meth:`program`.  The FPGA not clearing or
+        DONE staying low raises :class:`_ConfigFailed` with the TAP reset;
+        any other exception may leave MPSSE mid-command."""
+        with self._io_lock:
+            try:
+                batch = _Batch(self.sample_falling)
+                batch.reset()
+                batch.scan(True, _XC_JPROGRAM, self.ir_length, False)
+                self._flush(batch)
+                self._wait_config_status(
+                    lambda s: s & _XC_IR_INIT and not s & _XC_IR_DONE,
+                    timeout_s,
+                    "the FPGA did not finish clearing after JPROGRAM (INIT_COMPLETE "
+                    "stayed low)",
+                )
+                batch = _Batch(self.sample_falling)
+                batch.scan(True, _XC_CFG_IN, self.ir_length, False)
+                self._flush(batch)
+                self._shift_dr_bytes(data.translate(_BIT_REVERSE))
+                batch = _Batch(self.sample_falling)
+                batch.scan(True, _XC_JSTART, self.ir_length, False)
+                self._flush(batch)
+                self._idle(self.STARTUP_IDLE_CYCLES)
+                self._wait_config_status(
+                    lambda s: s & _XC_IR_DONE,
+                    timeout_s,
+                    f"{bitfile} did not configure the FPGA: DONE stayed low after "
+                    "JSTART (a corrupt bitstream fails its CRC this way)",
+                )
+            except _ConfigFailed:
+                self._reset_tap()
+                raise
+            finally:
+                # The old bitstream's cores are gone: what was learned is void.
+                self._forget_hub_state()
+            self._reset_tap()
+
+    def _reset_tap(self) -> None:
+        batch = _Batch(self.sample_falling)
+        batch.reset()  # back to IDCODE / BYPASS
+        self._flush(batch)
+
+    def _idle(self, cycles: int) -> None:
+        """Clock *cycles* TCK in Run-Test/Idle, in pieces of about a quarter
+        second of TCK, each waited for (see :meth:`_write_paced`)."""
+        piece = max(7, int(self.actual_tck_hz * 0.25))
+        for done in range(0, cycles, piece):
+            batch = _Batch(self.sample_falling)
+            batch.idle(min(piece, cycles - done))
+            self._write_paced(bytes(batch.cmd))
+
+    def _write_paced(self, cmd: bytes) -> None:
+        """Write *cmd*, then wait until MPSSE has run it: a pin read behind
+        it answers only then.  Commands that read nothing return as soon as
+        the adapter buffers them, and its buffer holds seconds of clocks at
+        a slow TCK, enough to delay the next read past the D2XX timeout."""
+        self._write(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)))
+        self._read(1)
+
+    def _config_status(self) -> int:
+        """The IR capture: configuration status bits over the fixed ``01``."""
+        batch = _Batch(self.sample_falling)
+        batch.scan(True, _XC_BYPASS, self.ir_length, True)
+        (status,) = self._flush(batch)
+        if status & 0b11 != 0b01:
+            raise RuntimeError(f"IR capture 0x{status:02x} lacks the fixed 01 bits")
+        return status
+
+    def _wait_config_status(self, ready, timeout_s: float, failure: str) -> int:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            self._idle(self.STATUS_POLL_IDLE_CYCLES)
+            status = self._config_status()
+            if ready(status):
+                return status
+            if time.monotonic() > deadline:
+                raise _ConfigFailed(f"{failure} (IR status 0x{status:02x})")
+
+    def _shift_dr_bytes(self, data: bytes) -> None:
+        """Shift *data* through the selected DR, each byte LSB first, from
+        Run-Test/Idle back to Run-Test/Idle, without reading TDO.
+
+        Written in pieces of about a quarter second of TCK, each waited
+        for, so no write or read outlasts the D2XX timeout at a slow clock.
+        """
+        if not data:
+            raise ValueError("no data to shift")
+        piece = max(1, min(0x10000, int(self.actual_tck_hz * 0.25) // 8))
+        batch = _Batch(self.sample_falling)
+        batch.tms(_IDLE_TO_SHIFT_DR)
+        self._write(bytes(batch.cmd))
+        body, last = data[:-1], data[-1]
+        for pos in range(0, len(body), piece):
+            chunk = body[pos:pos + piece]
+            n = len(chunk) - 1
+            self._write_paced(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk)
+        # The last byte's top bit leaves Shift-DR with TMS.
+        tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | ((last >> 7) << 7)
+        self._write(bytes((
+            _DATA_BITS_OUT, 6, last & 0x7F,
+            _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value,
+        )))
 
     # -- Transport API -----------------------------------------------------------
 

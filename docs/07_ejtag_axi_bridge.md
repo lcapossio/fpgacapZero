@@ -191,7 +191,7 @@ After `connect()`, the controller has:
   against this and rejects oversized requests at the API boundary
   with a clear error message — see "FIFO_DEPTH guard rails" below.
 - Cached whether the bitstream has the streaming read
-  (`FEATURES[24]`, `bridge.has_stream()`).
+  (`FEATURES[24]`, `bridge.has_stream`).
 
 ### Single read
 
@@ -288,7 +288,7 @@ next beat.
 ### Streaming read
 
 ```python
-if bridge.has_stream():
+if bridge.has_stream:
     words = bridge.stream_read(0x80000000, count=262144)   # 1 MiB
 ```
 
