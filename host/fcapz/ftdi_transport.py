@@ -194,6 +194,7 @@ _DATA_BITS_INOUT = 0x3B
 _TMS_OUT = 0x4B
 _TMS_INOUT = 0x6B
 _SEND_IMMEDIATE = 0x87
+_READ_PINS = 0x81  # ADBUS low byte
 # Read opcode bit 2 samples TDO on the falling edge instead: a full TCK
 # period after the target drove it, for cables whose TDO round trip is longer
 # than half a period (the Arty A7's onboard FT2232H at 30 MHz).
@@ -511,6 +512,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
             self.sample_falling = ch.sample_falling
+            # The FPGA may hold another bitstream than on a past connection.
+            self._forget_hub_state()
             try:
                 self._apply_family_defaults()
                 if opened and self.bitfile:
@@ -807,13 +810,15 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         Single-die UltraScale shares the IR table and this sequence (UG570)
         but is not hardware-validated.
         """
-        ch = self._channel
-        if self._handle is None or ch is None or self.ir_length is None:
+        if self._handle is None or self.ir_length is None:
             raise RuntimeError("not connected — call connect() first")
         data = self._load_bitstream(bitfile)
         broken = False
         try:
             with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
+                ch = self._channel  # this transport may have reconnected since
+                if ch is None or self._handle is None:
+                    raise RuntimeError("not connected — call connect() first")
                 if ch.users > 1:
                     raise RuntimeError(
                         f"cannot program: {ch.users - 1} other transport(s) share "
@@ -824,7 +829,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 except _ConfigFailed:
                     raise
                 except BaseException:
+                    # MPSSE may be mid-command: unlisted before the lock goes,
+                    # no transport can join the channel before it closes.
                     broken = True
+                    if ch in _OPEN_CHANNELS:
+                        _OPEN_CHANNELS.remove(ch)
                     raise
         finally:
             if broken:
@@ -891,13 +900,21 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self._flush(batch)
 
     def _idle(self, cycles: int) -> None:
-        """Clock *cycles* TCK in Run-Test/Idle, in writes of about a quarter
-        second of TCK, so none outlasts the D2XX timeout at a slow clock."""
+        """Clock *cycles* TCK in Run-Test/Idle, in pieces of about a quarter
+        second of TCK, each waited for (see :meth:`_write_paced`)."""
         piece = max(7, int(self.actual_tck_hz * 0.25))
         for done in range(0, cycles, piece):
             batch = _Batch(self.sample_falling)
             batch.idle(min(piece, cycles - done))
-            self._flush(batch)
+            self._write_paced(bytes(batch.cmd))
+
+    def _write_paced(self, cmd: bytes) -> None:
+        """Write *cmd*, then wait until MPSSE has run it: a pin read behind
+        it answers only then.  Commands that read nothing return as soon as
+        the adapter buffers them, and its buffer holds seconds of clocks at
+        a slow TCK, enough to delay the next read past the D2XX timeout."""
+        self._write(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)))
+        self._read(1)
 
     def _config_status(self) -> int:
         """The IR capture: configuration status bits over the fixed ``01``."""
@@ -922,8 +939,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         """Shift *data* through the selected DR, each byte LSB first, from
         Run-Test/Idle back to Run-Test/Idle, without reading TDO.
 
-        Written in pieces of about a quarter second of TCK, so no write
-        outlasts the D2XX timeout at a slow clock.
+        Written in pieces of about a quarter second of TCK, each waited
+        for, so no write or read outlasts the D2XX timeout at a slow clock.
         """
         if not data:
             raise ValueError("no data to shift")
@@ -935,7 +952,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         for pos in range(0, len(body), piece):
             chunk = body[pos:pos + piece]
             n = len(chunk) - 1
-            self._write(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk)
+            self._write_paced(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk)
         # The last byte's top bit leaves Shift-DR with TMS.
         tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | ((last >> 7) << 7)
         self._write(bytes((

@@ -193,6 +193,8 @@ class _FakeD2xx:
         self.writes = 0
         self.write_clocks: list[int] = []  # TCK clocked by each write
         self.clocks = 0
+        self.read_waits: list[int] = []  # TCK queued ahead of each read
+        self._read_mark = 0
         self.tms = 1
         self.divisor = None
         self.pins = None  # last ADBUS value set with 0x80
@@ -234,6 +236,8 @@ class _FakeD2xx:
         return 0
 
     def FT_Read(self, handle, buf, n, got):
+        self.read_waits.append(self.clocks - self._read_mark)
+        self._read_mark = self.clocks
         take = bytes(self.rx[:n])
         del self.rx[:n]
         ctypes.memmove(buf, take, len(take))
@@ -486,8 +490,11 @@ class ProgramTests(_FtdiTestCase):
         writes = self.lib.writes
         t.program(self._file(data, "design.bin"))
         self.assertGreater(self.lib.writes - writes, 4)
-        # The data, the startup clocks and every status poll alike.
+        # The data, the startup clocks and every status poll alike: no write,
+        # and no read waiting behind clocks still queued in the adapter,
+        # outlasts much more than a quarter second.
         self.assertLessEqual(max(self.lib.write_clocks[writes:]), 2500 + 20)
+        self.assertLessEqual(max(self.lib.read_waits[-50:]), 2600)
         self.assertTrue(self.lib.dev.done)
 
     def test_wrong_part_is_refused_before_clearing(self):
@@ -563,6 +570,28 @@ class ProgramTests(_FtdiTestCase):
             a.program(self._file(self.data, "design.bin"))
         self.assertEqual(self.lib.dev.programs, 0)
 
+    def test_sharing_is_checked_on_the_channel_in_use(self):
+        a = self._transport()
+        real = a._load_bitstream
+
+        def reconnect_and_share(path):
+            a.close()  # a moves to a new channel while the file loads
+            a.connect()
+            self._transport()
+            return real(path)
+
+        with mock.patch.object(a, "_load_bitstream", reconnect_and_share):
+            with self.assertRaisesRegex(RuntimeError, "1 other transport"):
+                a.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.dev.programs, 0)
+
+    def test_reconnect_forgets_the_old_bitstream(self):
+        t = self._transport()
+        t.__dict__["_fcapz_owned_managers"] = {(1, 0x0000): 7}
+        t.close()
+        t.connect()
+        self.assertNotIn("_fcapz_owned_managers", t.__dict__)
+
     def test_short_write_closes_the_channel(self):
         t = self._transport()
         real = self.lib.FT_Write
@@ -575,8 +604,17 @@ class ProgramTests(_FtdiTestCase):
             return status
 
         self.lib.FT_Write = flaky
-        with self.assertRaisesRegex(RuntimeError, "write short"):
-            t.program(self._file(self.data, "design.bin"))
+        joinable = []
+        real_close = t.close
+
+        def close_noting_joinable():  # what a transport connecting now finds
+            joinable.append(ft._find_open_channel(None))
+            real_close()
+
+        with mock.patch.object(t, "close", close_noting_joinable):
+            with self.assertRaisesRegex(RuntimeError, "write short"):
+                t.program(self._file(self.data, "design.bin"))
+        self.assertEqual(joinable, [None])  # unlisted before the lock went
         self.assertEqual(self.lib.closes, 1)  # MPSSE may be mid-command
         self.assertEqual(ft._OPEN_CHANNELS, [])
         with self.assertRaisesRegex(RuntimeError, "not connected"):
