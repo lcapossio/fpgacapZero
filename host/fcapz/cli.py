@@ -259,6 +259,7 @@ def _make_transport(args: argparse.Namespace):
             tck_hz=getattr(args, "tck_mhz", 6.0) * 1e6,
             burst=False if no_burst else (True if want_burst else None),
             single_chain_burst=not two_chain,
+            bitfile=getattr(args, "program", None),
         )
     if args.backend == "usb_blaster":
         device_name = None if args.tap in QUARTUS_AUTO_DEVICE_TAPS else args.tap
@@ -398,8 +399,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BITFILE",
         default=None,
         help=(
-            "hw_server only: run fpga -file on this .bit before the command (slow). "
-            "Omit to attach to the FPGA without reprogramming (already-loaded bitstream)."
+            "hw_server: run fpga -file on this .bit before the command (slow); "
+            "ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin "
+            "over JTAG. Omit to attach to the FPGA without reprogramming "
+            "(already-loaded bitstream)."
         ),
     )
 

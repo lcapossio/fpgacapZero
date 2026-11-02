@@ -149,6 +149,8 @@ class TestConnectionPanel(unittest.TestCase):
         self.assertTrue(p._quartus_row.isHidden())
         self.assertTrue(p._burst_path.isEnabled())
         self.assertEqual(p._hardware_label.text(), "FTDI adapter")
+        self.assertTrue(p._program_on_connect.isEnabled())
+        self.assertTrue(p._program.isEnabled())
         p._hardware.setText("Embedded FlashPro5 A")
         out = p.connection_settings()
         self.assertEqual((out.backend, out.ir_table), ("ftdi", "auto"))
