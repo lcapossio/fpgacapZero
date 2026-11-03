@@ -41,7 +41,7 @@ module jtag_burst_read_tb;
         .arst(arst),
         .tck(tck),
         .tdi(tdi),
-        .tdo(tdo),
+        .tdo(tdo), .tdo_next(),
         .capture(capture),
         .shift_en(shift_en),
         .update(update),

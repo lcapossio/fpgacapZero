@@ -19,7 +19,7 @@ end entity fcapz_eio_ecp5;
 architecture rtl of fcapz_eio_ecp5 is
     signal tap_tck     : std_logic;
     signal tap_tdi     : std_logic;
-    signal tap_tdo     : std_logic;
+    signal tap_tdo_next : std_logic;
     signal tap_capture : std_logic;
     signal tap_shift   : std_logic;
     signal tap_update  : std_logic;
@@ -35,7 +35,7 @@ begin
     u_tap : entity work.jtag_tap_ecp5
         generic map (CHAIN => CHAIN)
         port map (
-            tck => tap_tck, tdi => tap_tdi, tdo => tap_tdo,
+            tck => tap_tck, tdi => tap_tdi, tdo_next => tap_tdo_next,
             capture => tap_capture, shift => tap_shift,
             update => tap_update, sel => tap_sel
         );
@@ -43,7 +43,7 @@ begin
     u_reg : entity work.jtag_reg_iface
         port map (
             arst => '0',
-            tck => tap_tck, tdi => tap_tdi, tdo => tap_tdo,
+            tck => tap_tck, tdi => tap_tdi, tdo => open, tdo_next => tap_tdo_next,
             capture => tap_capture, shift_en => tap_shift,
             update => tap_update, sel => tap_sel,
             reg_clk => jtag_clk, reg_rst => jtag_rst,

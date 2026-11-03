@@ -4,22 +4,26 @@
 library ieee;
 use ieee.std_logic_1164.all;
 
+-- Lattice ECP5 JTAG TAP wrapper (JTAGG).  Takes tdo_next (the scan's tdo
+-- after the next tck edge) instead of tdo, and runs the scan logic on the
+-- falling edge of JTCK; see jtag_tap_ecp5.v for JTAGG's timing.
 entity jtag_tap_ecp5 is
     generic (
         CHAIN : positive := 1
     );
     port (
-        tck     : out std_logic;
-        tdi     : out std_logic;
-        tdo     : in  std_logic;
-        capture : out std_logic;
-        shift   : out std_logic;
-        update  : out std_logic;
-        sel     : out std_logic
+        tck      : out std_logic;
+        tdi      : out std_logic;
+        tdo_next : in  std_logic;
+        capture  : out std_logic;
+        shift    : out std_logic;
+        update   : out std_logic;
+        sel      : out std_logic
     );
 end entity jtag_tap_ecp5;
 
 architecture rtl of jtag_tap_ecp5 is
+
     component JTAGG is
         port (
             JTCK    : out std_logic;
@@ -42,16 +46,26 @@ architecture rtl of jtag_tap_ecp5 is
     signal jupdate  : std_logic;
     signal jce1     : std_logic;
     signal jce2     : std_logic;
-    signal sel_i    : std_logic;
-    signal sel_prev : std_logic := '0';
-    signal jtdo1_i : std_logic;
-    signal jtdo2_i : std_logic;
-    signal jrstn_unused : std_logic;
+    signal jrstn    : std_logic;
+    signal ce       : std_logic;
+    signal tck_i    : std_logic;
+    -- The state each JTDI bit was taken in; see jtag_tap_ecp5.v.
+    signal ce_q      : std_logic := '0';
+    signal shift_q   : std_logic := '0';
+    signal update_q  : std_logic := '0';
+    signal rstn_q    : std_logic := '1';
+    -- "This DR scan is ours", Capture-DR to Update-DR.
+    signal scan_ours : std_logic := '0';
+    signal tdo_r     : std_logic := '0';
+    signal jtdo1_i   : std_logic;
+    signal jtdo2_i   : std_logic;
     signal jrti1_unused : std_logic;
     signal jrti2_unused : std_logic;
+
 begin
-    jtdo1_i <= tdo when CHAIN = 1 else '0';
-    jtdo2_i <= tdo when CHAIN = 2 else '0';
+
+    jtdo1_i <= tdo_r when CHAIN = 1 else '0';
+    jtdo2_i <= tdo_r when CHAIN = 2 else '0';
 
     u_jtagg : JTAGG
         port map (
@@ -61,26 +75,43 @@ begin
             JTDO2   => jtdo2_i,
             JSHIFT  => jshift,
             JUPDATE => jupdate,
-            JRSTN   => jrstn_unused,
+            JRSTN   => jrstn,
             JCE1    => jce1,
             JCE2    => jce2,
             JRTI1   => jrti1_unused,
             JRTI2   => jrti2_unused
         );
 
-    tck <= jtck;
-    tdi <= jtdi;
-    shift <= jshift;
-    update <= jupdate;
-    sel_i <= jce1 when CHAIN = 1 else jce2;
-    sel <= sel_i;
+    tck_i <= not jtck;
+    tck   <= tck_i;
+    tdi   <= jtdi;
+    ce    <= jce1 when CHAIN = 1 else jce2;
 
-    p_sel : process(jtck)
+    p_state : process(tck_i)
     begin
-        if rising_edge(jtck) then
-            sel_prev <= sel_i;
+        if rising_edge(tck_i) then
+            ce_q     <= ce;
+            shift_q  <= jshift;
+            update_q <= jupdate;
+            rstn_q   <= jrstn;
+            if rstn_q = '0' or update_q = '1' then
+                scan_ours <= '0';
+            elsif ce_q = '1' then
+                scan_ours <= '1';
+            end if;
         end if;
     end process;
 
-    capture <= sel_i and (not sel_prev) and (not jshift);
+    p_tdo : process(tck_i)
+    begin
+        if falling_edge(tck_i) then
+            tdo_r <= tdo_next;
+        end if;
+    end process;
+
+    shift   <= shift_q;
+    update  <= update_q;
+    capture <= ce_q and not shift_q;
+    sel     <= ce_q or (update_q and scan_ours);
+
 end architecture rtl;

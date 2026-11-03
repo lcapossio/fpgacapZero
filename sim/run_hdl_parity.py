@@ -166,10 +166,20 @@ CORES = (
             name=f"fcapz_debug_multi_{vendor}",
             verilog=RTL / f"fcapz_debug_multi_{vendor}.v",
             vhdl=RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd",
-            parameters=(*_DEBUG_MULTI_PARAMETERS, "BURST_W", "CTRL_CHAIN"),
+            parameters=(*_DEBUG_MULTI_PARAMETERS, *extra),
             constants=(),
         )
-        for vendor in ("xilinx7", "xilinxus", "intel")
+        for vendor, extra in (
+            ("xilinx7", ("BURST_W", "CTRL_CHAIN")),
+            ("xilinxus", ("BURST_W", "CTRL_CHAIN")),
+            ("intel", ("BURST_W", "CTRL_CHAIN")),
+            ("ecp5", ("BURST_W", "CTRL_CHAIN")),
+            # IR_USER1/IR_USER2 are 8-bit vectors the integer parser skips.
+            ("polarfire", ("BURST_W",)),
+            ("efinix", ("BURST_W",)),
+            # Register-only: no burst width.
+            ("gowin", ("CTRL_CHAIN",)),
+        )
     ),
 )
 

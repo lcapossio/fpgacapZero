@@ -110,10 +110,14 @@ architecture rtl of fcapz_core_manager is
     signal mgr_rst_req    : std_logic := '0';
     signal slot_rst_req_r : std_logic_vector(NUM_SLOTS - 1 downto 0) := (others => '0');
     signal mgr_rst_d      : std_logic := '0';
-    signal mgr_epoch      : unsigned(15 downto 0) := (others => '0');
+    signal mgr_releases   : unsigned(14 downto 0) := (others => '0');
     signal slot_rst_d     : std_logic_vector(NUM_SLOTS - 1 downto 0) := (others => '0');
-    signal slot_epoch     : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0) := (others => '0');
-    signal tlr_d          : std_logic := '0';
+    signal slot_releases  : std_logic_vector(NUM_SLOTS * 15 - 1 downto 0) := (others => '0');
+    -- {releases, held}; see fcapz_core_manager.v.
+    signal mgr_epoch      : unsigned(15 downto 0);
+    signal slot_epoch     : std_logic_vector(NUM_SLOTS * 16 - 1 downto 0);
+    -- Powers up high: only entries seen happen count; see fcapz_core_manager.v.
+    signal tlr_d          : std_logic := '1';
     signal tlr_count      : unsigned(15 downto 0) := (others => '0');
     -- Every MGR_ACTIVE write, accepted or not; see fcapz_core_manager.v.
     signal select_count   : unsigned(15 downto 0) := (others => '0');
@@ -140,6 +144,12 @@ architecture rtl of fcapz_core_manager is
     signal desc_epoch     : std_logic_vector(15 downto 0);
     signal manager_rdata  : std_logic_vector(31 downto 0);
 begin
+    mgr_epoch <= mgr_releases & mgr_rst_d;
+    g_epochs : for e in 0 to NUM_SLOTS - 1 generate
+        slot_epoch((e + 1) * 16 - 1 downto e * 16) <=
+            slot_releases((e + 1) * 15 - 1 downto e * 15) & slot_rst_d(e);
+    end generate;
+
     mgr_rst <= jtag_rst or mgr_rst_req;
     burst_rst <= mgr_rst or proto_rst;
 
@@ -212,8 +222,8 @@ begin
         end if;
     end process;
 
-    -- One-cycle reset requests; the epochs count both edges of each reset,
-    -- so an odd epoch means that reset is held now.
+    -- One-cycle reset requests; the epochs count the releases of each reset,
+    -- and their LSB is the reset level, so an odd epoch means it is held now.
     p_counters : process(jtag_clk)
     begin
         if rising_edge(jtag_clk) then
@@ -228,14 +238,14 @@ begin
             end loop;
 
             mgr_rst_d <= mgr_rst;
-            if mgr_rst_d /= mgr_rst then
-                mgr_epoch <= mgr_epoch + 1;
+            if mgr_rst_d = '1' and mgr_rst = '0' then
+                mgr_releases <= mgr_releases + 1;
             end if;
             slot_rst_d <= slot_rst;
             for i in 0 to NUM_SLOTS - 1 loop
-                if slot_rst_d(i) /= slot_rst(i) then
-                    slot_epoch((i + 1) * 16 - 1 downto i * 16) <= std_logic_vector(
-                        unsigned(slot_epoch((i + 1) * 16 - 1 downto i * 16)) + 1);
+                if slot_rst_d(i) = '1' and slot_rst(i) = '0' then
+                    slot_releases((i + 1) * 15 - 1 downto i * 15) <= std_logic_vector(
+                        unsigned(slot_releases((i + 1) * 15 - 1 downto i * 15)) + 1);
                 end if;
             end loop;
             tlr_d <= tlr;

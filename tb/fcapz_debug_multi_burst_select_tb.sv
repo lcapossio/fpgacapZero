@@ -41,8 +41,9 @@ module fcapz_debug_multi_burst_select_tb #(
         .SAMPLE_W(SAMPLE_W),
         .DEPTH(DEPTH)
     ) dut (
-        .tck(tck), .tdi(tdi), .tdo(tdo_mon),
+        .tck(tck), .tdi(tdi), .tdo(tdo_mon), .tdo_next(),
         .capture(capture), .shift(shift), .update(update), .sel(sel),
+        .tlr(1'b0), .hub_por(1'b0),
         .ela_sample_clk({2{sample_clk}}),
         .ela_sample_rst(sample_rst),
         .ela_probe_in({2*SAMPLE_W{1'b0}}),

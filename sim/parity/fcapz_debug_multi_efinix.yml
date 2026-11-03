@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "name": "fcapz_debug_multi_efinix_parity",
+  "description": "Verilog/VHDL interface parity for the Efinity JTAG User TAP ports core-manager shell; its parts have their own proofs or cocotb coverage",
+  "golden": {
+    "language": "verilog",
+    "top": "fcapz_debug_multi_efinix",
+    "sources": [
+      "../../rtl/reset_sync.v",
+      "../../rtl/dpram.v",
+      "../../rtl/trig_compare.v",
+      "../../rtl/fcapz_ela.v",
+      "../../rtl/fcapz_eio.v",
+      "../../rtl/fcapz_core_manager.v",
+      "../../rtl/fcapz_debug_multi_core.v",
+      "../../rtl/fcapz_hub_reset.v",
+      "../../rtl/jtag_tap/jtag_tap_efinix.v",
+      "../../rtl/jtag_pipe_iface.v",
+      "../../rtl/fcapz_debug_multi.v",
+      "../../rtl/fcapz_debug_multi_efinix.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "fcapz_debug_multi_efinix",
+    "sources": [
+      "../../rtl/vhdl/pkg/fcapz_pkg.vhd",
+      "../../rtl/vhdl/pkg/fcapz_util_pkg.vhd",
+      "../../rtl/vhdl/core/reset_sync.vhd",
+      "../../rtl/vhdl/core/fcapz_dpram.vhd",
+      "../../rtl/vhdl/core/trig_compare.vhd",
+      "../../rtl/vhdl/core/fcapz_ela.vhd",
+      "../../rtl/vhdl/core/fcapz_eio.vhd",
+      "../../rtl/vhdl/core/fcapz_core_manager.vhd",
+      "../../rtl/vhdl/core/fcapz_debug_multi_core.vhd",
+      "../../rtl/vhdl/core/fcapz_hub_reset.vhd",
+      "../../rtl/vhdl/jtag_tap/jtag_tap_efinix.vhd",
+      "../../rtl/vhdl/core/jtag_pipe_iface.vhd",
+      "../../rtl/vhdl/core/fcapz_debug_multi.vhd",
+      "../../rtl/vhdl/fcapz_debug_multi_efinix.vhd"
+    ]
+  }
+}

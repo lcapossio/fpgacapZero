@@ -12,7 +12,7 @@ Every fcapz core ships in two flavors:
 
 | Flavor | Files | Use when |
 |---|---|---|
-| **Vendor wrapper** | `rtl/fcapz_*_xilinx7.v`, `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v` | **Almost always.** Single instantiation, bundles the TAP primitive + register interface + core internally.  No JTAG knowledge required. |
+| **Vendor wrapper** | `rtl/fcapz_*_xilinx7.v`, `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v`, `_polarfire.v`, `_efinix.v` (not every core exists for every vendor; Efinix has the ELA and the core-manager hub) | **Almost always.** Single instantiation, bundles the TAP primitive + register interface + core internally.  No JTAG knowledge required. |
 | **Vendor-agnostic core** | `rtl/fcapz_ela.v`, `fcapz_eio.v`, `fcapz_ejtagaxi.v`, `fcapz_ejtaguart.v` | Only if you already have your own JTAG TAP plumbing.  Advanced use.  `fcapz_ejtagaxi` and `fcapz_ejtaguart` take the TAP signals (`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel`) directly.  `fcapz_ela` and `fcapz_eio` take a decoded register bus (`jtag_clk`, `jtag_wr_en`, `jtag_addr`, `jtag_wdata`, `jtag_rdata`, ...); put [`jtag_reg_iface`](../rtl/jtag_reg_iface.v) (49-bit register DR) or [`jtag_pipe_iface`](../rtl/jtag_pipe_iface.v) (register DR plus single-chain 256-bit burst) between your TAP and the core, as the wrappers do. |
 
 **99% of users want the wrappers.**  This chapter is about wrappers.
@@ -389,7 +389,13 @@ burst path (`SINGLE_CHAIN_BURST=0`, `BURST_EN=0`) is opened with
 and synthesis flow preserving register initial values at configuration time
 (for example, AMD/Xilinx GSR/INIT behavior). If a target family or flow does not
 guarantee those initial values, configure the registers from the host after
-programming instead of relying on power-up auto-arm behavior.
+programming instead of relying on power-up auto-arm behavior. Libero on
+PolarFire is such a flow: it ignores register initial values, so give the
+design a real power-on reset (`PF_INIT_MONITOR`'s `FABRIC_POR_N`, or
+`CORERESET_PF`) for the sample resets, and drive the PolarFire hub's
+`hub_por` from it; without `hub_por` the hub's registers (`MGR_OWNER`, the
+burst owner) can power up with garbage. The manager's epochs stay correct
+either way: their bit 0 is the reset level, not a count.
 
 The default config is intentionally small and single-chain, while still
 keeping compatibility features such as comparator B and USER1 fallback
@@ -485,7 +491,8 @@ eio.write_outputs(0x1)
   USER chain (two BSCANE2s on one chain).  On another unused chain, such
   as USER3, it works alongside the shared one.
 - For multiple ELAs plus EIO on one chain, prefer the
-  `fcapz_debug_multi_<vendor>` hub (`xilinx7`, `xilinxus`, `intel`); it uses
+  `fcapz_debug_multi_<vendor>` hub (`xilinx7`, `xilinxus`, `intel`, `ecp5`,
+  `polarfire`, `efinix`, `gowin`); it uses
   the descriptor-capable `"CM"` active-slot manager instead of the older fixed
   `0x8000` EIO address window.
 

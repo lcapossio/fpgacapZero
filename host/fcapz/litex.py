@@ -52,14 +52,31 @@ _VENDOR_ELA_SOURCES: dict[str, tuple[str, ...]] = {
         "jtag_tap/jtag_tap_xilinxus.v",
         "jtag_tap/jtag_tap_xilinx7.v",
     ),
-    "ecp5": ("fcapz_ela_ecp5.v", "jtag_tap/jtag_tap_ecp5.v"),
+    "ecp5": (
+        "fcapz_ela_ecp5.v",
+        "fcapz_debug_multi_ecp5.v",
+        "jtag_tap/jtag_tap_ecp5.v",
+    ),
     "intel": (
         "fcapz_ela_intel.v",
         "fcapz_debug_multi_intel.v",
         "jtag_tap/jtag_tap_intel.v",
     ),
-    "gowin": ("fcapz_ela_gowin.v", "jtag_tap/jtag_tap_gowin.v"),
-    "polarfire": ("fcapz_ela_polarfire.v", "jtag_tap/jtag_tap_polarfire.v"),
+    "gowin": (
+        "fcapz_ela_gowin.v",
+        "fcapz_debug_multi_gowin.v",
+        "jtag_reg_iface_gowin.v",
+        "jtag_tap/jtag_tap_gowin.v",
+        "dff_reg_sync.v",
+        "dff_sync.v",
+        # GW_JTAG's synthesis declaration, for builds without GAO.
+        "gowin/gw_jtag.v",
+    ),
+    "polarfire": (
+        "fcapz_ela_polarfire.v",
+        "fcapz_debug_multi_polarfire.v",
+        "jtag_tap/jtag_tap_polarfire.v",
+    ),
 }
 
 _WRAPPER_MODULES = {

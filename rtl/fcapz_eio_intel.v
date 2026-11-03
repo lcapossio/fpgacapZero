@@ -43,7 +43,7 @@ module fcapz_eio_intel #(
     // ---- Register interface ----
     jtag_reg_iface u_reg (
         .arst(1'b0),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo), .tdo_next(),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .reg_clk(jtag_clk), .reg_rst(jtag_rst),

@@ -28,6 +28,8 @@
 // The first scan of a burst only primes the pipeline: its data were not loaded
 // yet.  With HEADER_EN it carries burst_header instead, sampled at that scan's
 // Capture-DR, so the host can check which burst it is about to read.
+//
+// tdo_next is the value tdo takes at the next tck edge (see jtag_reg_iface).
 
 module jtag_pipe_iface #(
     parameter SAMPLE_W = 8,
@@ -44,6 +46,7 @@ module jtag_pipe_iface #(
     input  wire        tck,
     input  wire        tdi,
     output wire        tdo,
+    output wire        tdo_next,
     input  wire        capture,
     input  wire        shift_en,
     input  wire        update,
@@ -144,6 +147,34 @@ module jtag_pipe_iface #(
 `endif
 
     assign tdo = sr[0];
+    assign tdo_next = arst ? 1'b0 :
+                      sel && capture ?
+                          ((burst_start ^ burst_start_seen) ?
+                               ((HEADER_EN != 0) ? burst_header[0] : sr[0]) :
+                           burst_mode ? staging[0] : reg_rdata[0]) :
+                      sel && shift_en ? sr[1] :
+                      sr[0];
+
+`ifndef SYNTHESIS
+    // tdo_next has to be the tdo of the next tck edge.
+    reg tdo_next_q, tdo_next_seen;
+    initial begin
+        tdo_next_q = 1'b0;
+        tdo_next_seen = 1'b0;
+    end
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            tdo_next_seen <= 1'b0;
+        end else begin
+            tdo_next_q <= tdo_next;
+            tdo_next_seen <= 1'b1;
+        end
+    end
+    always @(negedge tck) begin
+        if (!arst && tdo_next_seen && tdo !== tdo_next_q)
+            $fatal(1, "jtag_pipe_iface: tdo_next was %b, tdo became %b", tdo_next_q, tdo);
+    end
+`endif
     assign reg_clk = tck;
     assign reg_rst = arst;
     assign mem_active = loading |

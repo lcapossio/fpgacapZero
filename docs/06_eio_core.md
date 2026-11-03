@@ -73,7 +73,9 @@ flowchart LR
 The whole core is in [`../rtl/fcapz_eio.v`](../rtl/fcapz_eio.v) and
 the AMD/Xilinx wrapper is
 [`../rtl/fcapz_eio_xilinx7.v`](../rtl/fcapz_eio_xilinx7.v) (or
-`_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v` for other vendors).
+`_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v`, `_polarfire.v` for other
+vendors).  Efinix has no standalone EIO wrapper: put EIOs behind
+`fcapz_debug_multi_efinix` (chapter 05) instead.
 
 ## Clock domains
 
