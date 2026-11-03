@@ -154,6 +154,27 @@ module jtag_pipe_iface #(
                            burst_mode ? staging[0] : reg_rdata[0]) :
                       sel && shift_en ? sr[1] :
                       sr[0];
+
+`ifndef SYNTHESIS
+    // tdo_next has to be the tdo of the next tck edge.
+    reg tdo_next_q, tdo_next_seen;
+    initial begin
+        tdo_next_q = 1'b0;
+        tdo_next_seen = 1'b0;
+    end
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            tdo_next_seen <= 1'b0;
+        end else begin
+            tdo_next_q <= tdo_next;
+            tdo_next_seen <= 1'b1;
+        end
+    end
+    always @(negedge tck) begin
+        if (!arst && tdo_next_seen && tdo !== tdo_next_q)
+            $fatal(1, "jtag_pipe_iface: tdo_next was %b, tdo became %b", tdo_next_q, tdo);
+    end
+`endif
     assign reg_clk = tck;
     assign reg_rst = arst;
     assign mem_active = loading |
