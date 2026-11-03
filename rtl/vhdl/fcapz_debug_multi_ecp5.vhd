@@ -73,7 +73,7 @@ entity fcapz_debug_multi_ecp5 is
 end entity fcapz_debug_multi_ecp5;
 
 architecture rtl of fcapz_debug_multi_ecp5 is
-    signal tap_tck, tap_tdi, tap_tdo : std_logic;
+    signal tap_tck, tap_tdi, tap_tdo_next : std_logic;
     signal tap_capture, tap_shift, tap_update, tap_sel : std_logic;
 begin
     assert CTRL_CHAIN = 1 or CTRL_CHAIN = 2
@@ -83,7 +83,7 @@ begin
     u_tap_ctrl : entity work.jtag_tap_ecp5
         generic map (CHAIN => CTRL_CHAIN)
         port map (
-            tck => tap_tck, tdi => tap_tdi, tdo => tap_tdo,
+            tck => tap_tck, tdi => tap_tdi, tdo_next => tap_tdo_next,
             capture => tap_capture, shift => tap_shift,
             update => tap_update, sel => tap_sel
         );
@@ -134,7 +134,7 @@ begin
             EIO_OUT_WS => EIO_OUT_WS
         )
         port map (
-            tck => tap_tck, tdi => tap_tdi, tdo => tap_tdo,
+            tck => tap_tck, tdi => tap_tdi, tdo => open, tdo_next => tap_tdo_next,
             capture => tap_capture, shift => tap_shift,
             update => tap_update, sel => tap_sel,
             tlr => '0',

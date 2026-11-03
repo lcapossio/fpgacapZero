@@ -72,6 +72,8 @@ module fcapz_debug_multi #(
     input  wire tck,
     input  wire tdi,
     output wire tdo,
+    // tdo at the next tck edge; only jtag_tap_ecp5 uses it
+    output wire tdo_next,
     input  wire capture,
     input  wire shift,
     input  wire update,
@@ -143,7 +145,7 @@ module fcapz_debug_multi #(
         .HEADER_EN(1)
     ) u_pipe (
         .arst(proto_rst),
-        .tck(tck), .tdi(tdi), .tdo(tdo),
+        .tck(tck), .tdi(tdi), .tdo(tdo), .tdo_next(tdo_next),
         .capture(capture), .shift_en(shift),
         .update(update), .sel(sel),
         .reg_clk(jtag_clk), .reg_rst(pipe_reg_rst),

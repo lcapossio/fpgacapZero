@@ -59,11 +59,11 @@ module fcapz_ela_ecp5 #(
     localparam PTR_W = $clog2(DEPTH);
 
     // TAP signals — control (ER1)
-    wire tap1_tck, tap1_tdi, tap1_tdo;
+    wire tap1_tck, tap1_tdi, tap1_tdo_next;
     wire tap1_capture, tap1_shift, tap1_update, tap1_sel;
 
     // TAP signals — burst data (ER2)
-    wire tap2_tck, tap2_tdi, tap2_tdo;
+    wire tap2_tck, tap2_tdi, tap2_tdo_next;
     wire tap2_capture, tap2_shift, tap2_update, tap2_sel;
 
     // Register bus (from jtag_reg_iface)
@@ -87,13 +87,13 @@ module fcapz_ela_ecp5 #(
 
     // ---- TAP wrappers ----
     jtag_tap_ecp5 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
-        .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+        .tck(tap1_tck), .tdi(tap1_tdi), .tdo_next(tap1_tdo_next),
         .capture(tap1_capture), .shift(tap1_shift),
         .update(tap1_update), .sel(tap1_sel)
     );
 
     jtag_tap_ecp5 #(.CHAIN(DATA_CHAIN)) u_tap_data (
-        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+        .tck(tap2_tck), .tdi(tap2_tdi), .tdo_next(tap2_tdo_next),
         .capture(tap2_capture), .shift(tap2_shift),
         .update(tap2_update), .sel(tap2_sel)
     );
@@ -113,7 +113,7 @@ module fcapz_ela_ecp5 #(
     // ---- Register interface ----
     jtag_reg_iface u_reg (
         .arst(jtag_rst_ctrl),
-        .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+        .tck(tap1_tck), .tdi(tap1_tdi), .tdo(), .tdo_next(tap1_tdo_next),
         .capture(tap1_capture), .shift_en(tap1_shift),
         .update(tap1_update), .sel(tap1_sel),
         .reg_clk(jtag_clk), .reg_rst(jtag_rst),
@@ -211,7 +211,7 @@ module fcapz_ela_ecp5 #(
         .DEPTH(DEPTH), .BURST_W(BURST_W)
     ) u_burst (
         .arst(jtag_rst_data),
-        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+        .tck(tap2_tck), .tdi(tap2_tdi), .tdo(), .tdo_next(tap2_tdo_next),
         .capture(tap2_capture), .shift_en(tap2_shift),
         .update(tap2_update), .sel(tap2_sel),
         .mem_addr(burst_rd_addr),

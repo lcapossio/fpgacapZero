@@ -101,7 +101,7 @@ module fcapz_debug_multi_xilinx7 #(
         .ELA_USER1_DATA_ENS(ELA_USER1_DATA_ENS), .EIO_IN_WS(EIO_IN_WS),
         .EIO_OUT_WS(EIO_OUT_WS)
     ) u_multi (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo), .tdo_next(),
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .tlr(tap_tlr),

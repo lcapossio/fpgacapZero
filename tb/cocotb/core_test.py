@@ -1430,7 +1430,7 @@ def _debug_multi_primitive(dut):
     """Return (primitive, pin names, chain parameter name or None, select level)
     for the shell's TAP stub.  A pin named None does not exist on that TAP."""
     target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
-    vendor = next(v for v in ("xilinx7", "xilinxus", "intel", "ecp5", "polarfire", "efinix")
+    vendor = next(v for v in ("xilinx7", "xilinxus", "intel", "polarfire", "efinix")
                   if f"_{v}" in target)
     if vendor == "intel":
         # sld_virtual_jtag has no sel; jtag_tap_intel ties it high.
@@ -1438,12 +1438,6 @@ def _debug_multi_primitive(dut):
                     shift="virtual_state_sdr", update="virtual_state_udr", sel=None,
                     tlr="jtag_state_tlr")
         return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index", 1
-    if vendor == "ecp5":
-        # JTAGG has no CAPTURE pin: jtag_tap_ecp5 derives capture from the
-        # rise of JCE<n>, the chain's select.  The shell does not use JRSTN.
-        pins = dict(tck="JTCK", tdi="JTDI", capture=None, shift="JSHIFT",
-                    update="JUPDATE", sel=f"JCE{_DEBUG_MULTI_ER_CHAIN}", tlr=None)
-        return dut.u_tap_ctrl.u_jtagg, pins, None, 1
     if vendor == "polarfire":
         # UJTAG selects the chain by the user instruction in UIREG.
         pins = dict(tck="UDRCK", tdi="UTDI", capture="UDRCAP", shift="UDRSH",
@@ -1485,9 +1479,8 @@ class _DebugMultiBench:
         self.prim, pins, self.chain_param, self.sel_on = _debug_multi_primitive(dut)
         self.pin = {role: getattr(self.prim, name) for role, name in pins.items() if name}
         self.intel = pins["sel"] is None
-        # JTAGG's JCE<n> covers Capture-DR and Shift-DR only: it is low again
-        # in Exit1-DR and Update-DR, where JUPDATE rises for any instruction.
-        self.ce_drops = self.prim is not dut and pins["sel"] == f"JCE{_DEBUG_MULTI_ER_CHAIN}"
+        # Whether scan(ours=False) scans another instruction's register.
+        self.foreign_scans = False
         self.rng = random.Random(0x5EED)
         # A probe value per ELA that replaces its count while not None.
         self.hold: list[int | None] = [None, None]
@@ -1556,17 +1549,12 @@ class _DebugMultiBench:
             await self.tck_tick()
         pin["tdi"].value = 0
 
-    async def scan(self, bits: int, frame: int = 0, ours: bool = True) -> int:
-        """One DR scan; *ours* False scans another instruction's register
-        (ECP5 only: JCE stays low and JUPDATE still rises)."""
+    async def scan(self, bits: int, frame: int = 0) -> int:
+        """One DR scan of this shell's register."""
         pin = self.pin
         captured = 0
-        if "capture" not in pin:
-            # Select-DR-Scan with the select low, so its rise marks Capture-DR.
-            pin["sel"].value = 0
-            await self.tck_tick()
         if "sel" in pin:
-            pin["sel"].value = self.sel_on if ours else 0
+            pin["sel"].value = self.sel_on
         if "capture" in pin:
             pin["capture"].value = 1
         await self.tck_tick()
@@ -1580,9 +1568,6 @@ class _DebugMultiBench:
             await self.tck_tick()
         pin["shift"].value = 0
         pin["tdi"].value = 0
-        if self.ce_drops:
-            pin["sel"].value = 0
-            await self.tck_tick()  # Exit1-DR
         pin["update"].value = 1
         await self.tck_tick()
         pin["update"].value = 0
@@ -1657,9 +1642,88 @@ class _DebugMultiBench:
         await self.burst(slot, capture_len, step)
 
 
+class _Ecp5DebugMultiBench(_DebugMultiBench):
+    """Drives fcapz_debug_multi_ecp5 through the JTAG pins of its JTAGG model.
+
+    sim/jtagg_stub.v models JTAGG's timing (TDI registered on the rising edge,
+    TDO on the falling edge), so a full TAP walk is the only way in: each scan
+    selects ER<CTRL_CHAIN> with an instruction scan first.
+    """
+
+    _IR_ER = {1: 0x32, 2: 0x38}
+    _IR_BYPASS = 0xFF
+
+    def __init__(self, dut) -> None:
+        self.dut = dut
+        self.prim = dut.u_tap_ctrl.u_jtagg
+        self.pin = {}
+        self.chain_param = None
+        self.intel = False
+        self.foreign_scans = True
+        self.ir: int | None = None
+        self.rng = random.Random(0x5EED)
+        self.hold = [None, None]
+
+    def _tap_init(self) -> None:
+        self.prim.tck_pin.value = 0
+        self.prim.tms_pin.value = 1
+        self.prim.tdi_pin.value = 0
+
+    async def tck_tick(self, tms: int = 0, tdi: int = 0) -> int:
+        """One TCK period; returns TDO as sampled before the rising edge."""
+        prim = self.prim
+        prim.tms_pin.value = tms
+        prim.tdi_pin.value = tdi
+        await Timer(5, unit="ns")
+        tdo = int(prim.tdo_pin.value)
+        prim.tck_pin.value = 1
+        await Timer(5, unit="ns")
+        prim.tck_pin.value = 0
+        return tdo
+
+    async def idle(self, n: int) -> None:
+        # Run-Test/Idle (the first tick leaves Test-Logic-Reset).
+        for _ in range(n):
+            await self.tck_tick()
+
+    async def _load_ir(self, ir: int) -> None:
+        for tms in (1, 1, 0, 0):  # Select-DR, Select-IR, Capture-IR, Shift-IR
+            await self.tck_tick(tms)
+        for i in range(8):
+            await self.tck_tick(int(i == 7), (ir >> i) & 1)
+        await self.tck_tick(1)  # Update-IR
+        await self.tck_tick(0)  # Run-Test/Idle
+        self.ir = ir
+
+    async def scan(self, bits: int, frame: int = 0, ours: bool = True) -> int:
+        """One DR scan; *ours* False scans BYPASS instead, whose Update-DR
+        JTAGG still flags on JUPDATE."""
+        ir = self._IR_ER[_DEBUG_MULTI_ER_CHAIN] if ours else self._IR_BYPASS
+        if self.ir != ir:
+            await self._load_ir(ir)
+        for tms in (1, 0, 0):  # Select-DR, Capture-DR, Shift-DR
+            await self.tck_tick(tms)
+        captured = 0
+        for i in range(bits):
+            if await self.tck_tick(int(i == bits - 1), (frame >> i) & 1):
+                captured |= 1 << i
+        await self.tck_tick(1)  # Exit1-DR -> Update-DR
+        await self.tck_tick(0)  # Run-Test/Idle
+        return captured
+
+
+def _debug_multi_bench(dut) -> _DebugMultiBench:
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    if "_gowin" in target:
+        return _GowinDebugMultiBench(dut)
+    if "_ecp5" in target:
+        return _Ecp5DebugMultiBench(dut)
+    return _DebugMultiBench(dut)
+
+
 @cocotb.test()
 async def fcapz_debug_multi_wrapper(dut):
-    tb = _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
 
     # Manager identity and slot descriptors
@@ -1671,7 +1735,7 @@ async def fcapz_debug_multi_wrapper(dut):
         assert await tb.read(0xF018) == core, f"slot {slot} core id"
         assert await tb.read(0xF01C) == burst, f"slot {slot} burst capability"
 
-    if tb.ce_drops:
+    if tb.foreign_scans:
         # BUG-275: a write commits at Update-DR with JCE already low, and the
         # Update-DR of another instruction's scan does not repeat it
         # (MGR_SELECT_COUNT counts every MGR_ACTIVE write).
@@ -1714,8 +1778,7 @@ async def fcapz_debug_multi_wrapper(dut):
 @cocotb.test()
 async def fcapz_debug_multi_resets(dut):
     """Each slot resets alone; MGR_CTRL resets the hub or slots (BUG-229)."""
-    gowin = os.environ.get("FCAPZ_COCOTB_TARGET", "").endswith("_gowin")
-    tb = _GowinDebugMultiBench(dut) if gowin else _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
 
     # The hub resets only at power-up, and the counters never: tests that ran
@@ -1793,7 +1856,7 @@ async def fcapz_debug_multi_hub_por(dut):
     set never saw its power-up reset; hub_por, held while TCK is still
     idle, must give it one anyway.
     """
-    tb = _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
     mgr_epoch = await tb.read(0xF020)
     e0, e1, e2 = await tb.slot_epochs()
@@ -1831,7 +1894,7 @@ async def fcapz_debug_multi_hub_por(dut):
 @cocotb.test()
 async def fcapz_debug_multi_tlr(dut):
     """Test-Logic-Reset is counted; with TLR_RESET_EN it also cancels a burst."""
-    tb = _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
     tlr_reset = os.environ.get("FCAPZ_COCOTB_TARGET", "").endswith("_tlr")
     caps = await tb.read(0xF010)
@@ -1875,7 +1938,7 @@ async def fcapz_debug_multi_tlr_powerup(dut):
     that residency is not an entry.
     """
     target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
-    tb = (_GowinDebugMultiBench if "_gowin" in target else _DebugMultiBench)(dut)
+    tb = _debug_multi_bench(dut)
     has_tlr = "tlr" in getattr(tb, "pin", {})
     start_high = target.endswith("_tlrhigh")
     assert has_tlr or not start_high

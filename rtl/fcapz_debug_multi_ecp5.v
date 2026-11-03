@@ -69,7 +69,7 @@ module fcapz_debug_multi_ecp5 #(
     output wire [((NUM_EIOS > 0) ? NUM_EIOS : 1)*EIO_OUT_W-1:0] eio_probe_out
 );
 
-    wire tap_tck, tap_tdi, tap_tdo;
+    wire tap_tck, tap_tdi, tap_tdo_next;
     wire tap_capture, tap_shift, tap_update, tap_sel;
 
     initial begin
@@ -80,7 +80,7 @@ module fcapz_debug_multi_ecp5 #(
     end
 
     jtag_tap_ecp5 #(.CHAIN(CTRL_CHAIN)) u_tap_ctrl (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo_next(tap_tdo_next),
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel)
     );
@@ -107,7 +107,7 @@ module fcapz_debug_multi_ecp5 #(
         .ELA_USER1_DATA_ENS(ELA_USER1_DATA_ENS), .EIO_IN_WS(EIO_IN_WS),
         .EIO_OUT_WS(EIO_OUT_WS)
     ) u_multi (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(), .tdo_next(tap_tdo_next),
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .tlr(1'b0),

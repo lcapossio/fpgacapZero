@@ -67,6 +67,8 @@ entity fcapz_debug_multi is
         tck     : in  std_logic;
         tdi     : in  std_logic;
         tdo     : out std_logic;
+        -- tdo at the next tck edge; only jtag_tap_ecp5 uses it
+        tdo_next : out std_logic;
         capture : in  std_logic;
         shift   : in  std_logic;
         update  : in  std_logic;
@@ -135,7 +137,7 @@ begin
         )
         port map (
             arst => proto_rst,
-            tck => tck, tdi => tdi, tdo => tdo,
+            tck => tck, tdi => tdi, tdo => tdo, tdo_next => tdo_next,
             capture => capture, shift_en => shift,
             update => update, sel => sel,
             reg_clk => jtag_clk, reg_rst => pipe_reg_rst,

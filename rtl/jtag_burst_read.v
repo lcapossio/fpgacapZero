@@ -18,6 +18,8 @@
 //
 // Timing: the staging buffer is pre-loaded during the SHIFT phase of
 // the current scan, so data is ready before the next CAPTURE.
+//
+// tdo_next is the value tdo takes at the next tck edge (see jtag_reg_iface).
 
 module jtag_burst_read #(
     parameter SAMPLE_W = 8,
@@ -33,6 +35,7 @@ module jtag_burst_read #(
     input  wire        tck,
     input  wire        tdi,
     output wire        tdo,
+    output wire        tdo_next,
     input  wire        capture,
     input  wire        shift_en,
     input  wire        update,
@@ -95,6 +98,12 @@ module jtag_burst_read #(
     endgenerate
 
     assign tdo      = sr[0];
+    // The priming capture of a burst leaves sr as it is.
+    assign tdo_next = arst                ? 1'b0 :
+                      sel && capture      ? ((burst_start ^ burst_start_seen) ? sr[0]
+                                                                              : staging[0]) :
+                      sel && shift_en     ? sr[1] :
+                                            sr[0];
     assign mem_active = loading | (sel && capture);
     generate
         if (SEG_DEPTH >= DEPTH) begin : g_mem_addr_flat

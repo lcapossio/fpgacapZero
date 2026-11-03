@@ -120,7 +120,7 @@ module fcapz_axi_mon_intel #(
         .BURST_PTR_ADDR(16'h002C)
     ) u_pipe (
         .arst(jtag_rst_ctrl),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo), .tdo_next(),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .reg_clk(jtag_clk), .reg_rst(jtag_rst),
