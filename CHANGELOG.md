@@ -59,6 +59,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reset's level: the parity is right whatever the counter powers up to, and
   the value is unchanged where initial values are kept.
 
+- **ECP5: the TAP adapter ignored JTAGG's registered TDI and TDO.** `JTAGG`
+  registers TDI on the rising edge of TCK and TDO on the falling edge (not in
+  Lattice's documentation; LiteX and the Hazard3 ECP5 debug module rely on it
+  on hardware), but `jtag_tap_ecp5` sampled `JTDI` on the rising edge that
+  loads it, so every ECP5 wrapper would have taken each scan one bit late and
+  lost its last bit. The adapter now runs the scan logic on the falling edge,
+  delays JTAGG's state outputs by one TCK and drives `JTDO` from a new
+  `tdo_next` output of `jtag_reg_iface`, `jtag_burst_read` and
+  `jtag_pipe_iface` (the value `tdo` takes at the next edge; other vendors
+  leave it open). A design that instantiates `jtag_tap_ecp5` directly
+  connects the interface's `tdo_next` to it instead of `tdo`. The `JTAGG`
+  simulation model is now a TAP with that timing, and the ECP5 hub tests walk
+  it through instruction and data scans. Simulation only; ECP5 has not run on
+  a board.
+
 - **ECP5: register writes at Update-DR.** `jtag_tap_ecp5` passed JTAGG's
   `JCE1`/`JCE2` on as the chain select, but they cover Capture-DR and
   Shift-DR only, and the register and pipe adapters act at Update-DR only

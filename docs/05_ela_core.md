@@ -615,9 +615,13 @@ The ECP5, PolarFire, Efinix and Gowin hubs pass the same simulations as the
 others.  The PolarFire hub also passes on the PolarFire SoC Discovery Kit
 (`examples/mpfs_disco_kit`, manager variant), and the Gowin hub on the
 BRS-100 (`examples/brs_100_gw1nr9`, manager variant).  The ECP5 and Efinix
-hubs have run in simulation only.  The ECP5 TAP adapter holds the chain
-select from Capture-DR through Update-DR, because `JCE1`/`JCE2` are low again
-by Update-DR; a board test still has to confirm that timing.  UltraScale
+hubs have run in simulation only.  ECP5's `JTAGG` registers TDI on the
+rising edge of TCK and TDO on the falling edge, so the ECP5 TAP adapter runs
+the scan logic on the falling edge and feeds TDO from the `tdo_next`
+lookahead of the shared JTAG interfaces; it also holds the chain select from
+Capture-DR through Update-DR, because `JCE1`/`JCE2` are low again by
+Update-DR.  The simulations model that timing; a board test still has to
+confirm it.  UltraScale
 reuses the Xilinx 7 TAP code; its board validation is recorded in the
 [vendor support matrix](01_overview.md#vendor-support-matrix).  The lower-level
 `fcapz_core_manager` is still available if you want to wire the manager and
