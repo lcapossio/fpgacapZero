@@ -342,7 +342,7 @@ begin
         port map (
             wr_clk => tck,
             wr_rst => tck_rst or cmdq_rst_tck,
-            wr_en => cmdq_wr_en_i,
+            wr_en => cmdq_wr_en_i and not tck_rst,
             wr_data => cmdq_wr_data,
             wr_full => cmdq_full,
             wr_rst_busy => cmdq_wr_rst_busy,
