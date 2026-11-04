@@ -20,7 +20,9 @@
 // state.  Both are active-high async.  For clean CDC, each reset
 // should be synchronous to its respective clock domain.  The XPM
 // version has a single reset: either input resets the whole FIFO,
-// synchronized to wr_clk inside, and wr_rst_busy covers it.
+// synchronized to wr_clk inside.  wr_rst_busy / rd_rst_busy cover it
+// (rd_rst_busy from rd_rst on, even if wr_clk is stopped), and the FIFO
+// reads full / empty on a busy side.
 //
 // Parameters:
 //   DATA_W  - data width in bits (default 32)
@@ -93,30 +95,72 @@ if (ASYNC_FIFO_IMPL == 1) begin : gen_xpm
     wire [AW:0] xpm_wr_count;
     wire        xpm_wr_rst_busy;
     wire        xpm_rd_rst_busy;
+    wire        xpm_full;
+    wire        xpm_empty;
 
     // XPM has one rst, which must be synchronous to wr_clk, while wr_rst and
-    // rd_rst come from different domains. Catch either (a pulse of the other
-    // clock included) with a preset synchronizer, then retime it on wr_clk so
-    // XPM sees both edges on wr_clk. Writes wait out that reset and XPM's
-    // busy, and wr_rst_busy reports both; reads wait out rd_rst_busy.
-    (* ASYNC_REG = "TRUE" *) reg [1:0] xpm_rst_sync;
+    // rd_rst come from different domains. Either one (a pulse of the other
+    // clock included) sets xpm_req_cap at once; a plain synchronizer turns
+    // that into xpm_req, and xpm_rst is a two-cycle wr_clk pulse started from
+    // it. XPM ignores a reset that starts while it is still busy with the
+    // previous one, so the request waits (and stays captured) until XPM's
+    // busy falls. Everything writers see is registered on wr_clk.
+    reg xpm_req_cap;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] xpm_req_sync;
     reg xpm_rst;
+    reg xpm_rst_d;
+    // High from the reset request until XPM's reset sequence is over; XPM
+    // keeps its wr_rst_busy up until its read side is out of reset too.
+    reg xpm_rst_pend;
     initial begin
-        xpm_rst_sync = 2'b11;
+        xpm_req_cap = 1'b1;
+        xpm_req_sync = 2'b11;
         xpm_rst = 1'b1;
+        xpm_rst_d = 1'b0;
+        xpm_rst_pend = 1'b1;
     end
     wire xpm_arst = wr_rst | rd_rst;
+    wire xpm_req = xpm_req_sync[1];
+    wire xpm_rst_start = xpm_req && !xpm_rst && !xpm_rst_d && !xpm_wr_rst_busy;
     always @(posedge wr_clk or posedge xpm_arst) begin
-        if (xpm_arst)
-            xpm_rst_sync <= 2'b11;
-        else
-            xpm_rst_sync <= {xpm_rst_sync[0], 1'b0};
+        if (xpm_arst) begin
+            xpm_req_cap  <= 1'b1;
+            xpm_rst_pend <= 1'b1;
+        end else begin
+            if (xpm_rst)
+                xpm_req_cap <= 1'b0;
+            xpm_rst_pend <= xpm_req_cap | xpm_req | xpm_rst | xpm_wr_rst_busy;
+        end
     end
-    always @(posedge wr_clk)
-        xpm_rst <= xpm_rst_sync[1];
+    always @(posedge wr_clk) begin
+        xpm_req_sync <= {xpm_req_sync[0], xpm_req_cap};
+        xpm_rst_d    <= xpm_rst;
+        if (xpm_rst_start)
+            xpm_rst <= 1'b1;
+        else if (xpm_rst_d)
+            xpm_rst <= 1'b0;
+    end
 
-    assign wr_rst_busy = xpm_rst | xpm_wr_rst_busy;
-    assign rd_rst_busy = xpm_rd_rst_busy;
+    // wr_clk can stop (TCK between scans) before XPM has seen the reset, so
+    // the read side keeps its own view: rd_rst stops reads at once, and they
+    // resume only once xpm_rst_pend has fallen, seen through rd_clk.
+    (* ASYNC_REG = "TRUE" *) reg [1:0] rd_rst_pend_sync;
+    initial rd_rst_pend_sync = 2'b11;
+    always @(posedge rd_clk or posedge rd_rst) begin
+        if (rd_rst)
+            rd_rst_pend_sync <= 2'b11;
+        else
+            rd_rst_pend_sync <= {rd_rst_pend_sync[0], xpm_rst_pend};
+    end
+
+    // Writes stop once the request is through the synchronizer and stay
+    // stopped until XPM is out of reset. Each side reads full / empty while
+    // busy, so callers that check only wr_full / rd_empty neither lose writes
+    // nor read stale words.
+    assign wr_rst_busy = xpm_req | xpm_rst | xpm_rst_d | xpm_wr_rst_busy;
+    assign rd_rst_busy = rd_rst_pend_sync[1] | xpm_rd_rst_busy;
+    assign wr_full     = xpm_full | wr_rst_busy;
+    assign rd_empty    = xpm_empty | rd_rst_busy;
 
     xpm_fifo_async #(
         .CDC_SYNC_STAGES     (2),
@@ -135,12 +179,12 @@ if (ASYNC_FIFO_IMPL == 1) begin : gen_xpm
         .rst            (xpm_rst),
         .wr_en          (wr_en && !wr_rst_busy),
         .din            (wr_data),
-        .full           (wr_full),
+        .full           (xpm_full),
 
         .rd_clk         (rd_clk),
-        .rd_en          (rd_en && !xpm_rd_rst_busy),
+        .rd_en          (rd_en && !rd_rst_busy),
         .dout           (rd_data),
-        .empty          (rd_empty),
+        .empty          (xpm_empty),
         .rd_data_count  (xpm_rd_count),
 
         .wr_data_count  (xpm_wr_count),

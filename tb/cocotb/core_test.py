@@ -123,6 +123,7 @@ ASYNC_FIFO_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "read_drain_data_match",
         "mixed_read_write_match",
         "post_idle_stable",
+        "stopped_wr_clk_reset_blocks_reads",
     ),
 )
 
@@ -2073,7 +2074,7 @@ async def fcapz_debug_multi_gowin(dut):
 
 @cocotb.test()
 async def fcapz_async_fifo_equiv(dut):
-    cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
+    wr_clk_task = cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
     cocotb.start_soon(Clock(dut.rd_clk, 14, unit="ns").start())
     dut.rst.value = 1
     dut.wr_en.value = 0
@@ -2092,13 +2093,13 @@ async def fcapz_async_fifo_equiv(dut):
     for _ in range(3):
         await RisingEdge(dut.wr_clk)
     dut.rst.value = 0
+    # The XPM branch holds its reset a few wr_clk cycles after rst falls,
+    # reading full and empty until then; compare once it is out of reset.
     await RisingEdge(dut.wr_clk)
-    await check_stable()
-    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("reset_empty_flags_match")
-    # The XPM branch holds its reset a few wr_clk cycles after rst falls and
-    # drops writes until then; start traffic once it is out of reset.
     while int(dut.wr_rst_busy_b.value) or int(dut.rd_rst_busy_b.value):
         await RisingEdge(dut.wr_clk)
+    await check_stable()
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("reset_empty_flags_match")
 
     for i in range(16):
         await RisingEdge(dut.wr_clk)
@@ -2136,6 +2137,38 @@ async def fcapz_async_fifo_equiv(dut):
     for _ in range(8):
         await check_stable()
     ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("post_idle_stable")
+
+    # Reset with wr_clk stopped (TCK between scans) and a word queued: the
+    # XPM branch must stop reads at once and never hand out that word.
+    await RisingEdge(dut.wr_clk)
+    dut.wr_data.value = 0x5A
+    dut.wr_en.value = 1
+    await RisingEdge(dut.wr_clk)
+    dut.wr_en.value = 0
+    while int(dut.rd_empty_b.value):
+        await RisingEdge(dut.rd_clk)
+    await FallingEdge(dut.wr_clk)
+    wr_clk_task.cancel()
+    dut.wr_clk.value = 0
+    await RisingEdge(dut.rd_clk)
+    dut.rst.value = 1
+    await RisingEdge(dut.rd_clk)
+    dut.rst.value = 0
+    dut.rd_en.value = 1
+    for _ in range(10):
+        await RisingEdge(dut.rd_clk)
+        await ReadOnly()
+        assert int(dut.rd_empty_b.value) and int(dut.rd_rst_busy_b.value), (
+            "XPM read side open after reset with wr_clk stopped")
+    await FallingEdge(dut.rd_clk)
+    cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
+    while int(dut.wr_rst_busy_b.value) or int(dut.rd_rst_busy_b.value):
+        await RisingEdge(dut.rd_clk)
+    for _ in range(4):
+        await RisingEdge(dut.rd_clk)
+    assert int(dut.rd_empty_b.value), "stale word survived the reset"
+    dut.rd_en.value = 0
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("stopped_wr_clk_reset_blocks_reads")
 
 
 CMD_NOP = 0x0

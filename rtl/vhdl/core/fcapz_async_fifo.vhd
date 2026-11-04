@@ -121,39 +121,75 @@ begin
         signal unused_dbiterr      : std_logic;
         -- XPM's single rst, synchronous to wr_clk; see fcapz_async_fifo.v.
         signal xpm_arst        : std_logic;
-        signal xpm_rst_sync    : std_logic_vector(1 downto 0) := "11";
+        signal xpm_req_cap     : std_logic := '1';
+        signal xpm_req_sync    : std_logic_vector(1 downto 0) := "11";
+        signal xpm_req         : std_logic;
         signal xpm_rst         : std_logic := '1';
+        signal xpm_rst_d       : std_logic := '0';
+        signal xpm_rst_start   : std_logic;
+        signal xpm_rst_pend    : std_logic := '1';
+        signal rd_rst_pend_sync : std_logic_vector(1 downto 0) := "11";
         signal xpm_wr_rst_busy : std_logic;
         signal xpm_rd_rst_busy : std_logic;
+        signal xpm_full        : std_logic;
+        signal xpm_empty       : std_logic;
         signal wr_busy_i       : std_logic;
+        signal rd_busy_i       : std_logic;
         attribute ASYNC_REG : string;
-        attribute ASYNC_REG of xpm_rst_sync : signal is "TRUE";
+        attribute ASYNC_REG of xpm_req_sync : signal is "TRUE";
+        attribute ASYNC_REG of rd_rst_pend_sync : signal is "TRUE";
     begin
         assert DEPTH >= 16
             report "fcapz_async_fifo: XPM FIFO depth must be >= 16"
             severity failure;
 
         xpm_arst <= wr_rst or rd_rst;
+        xpm_req <= xpm_req_sync(1);
+        xpm_rst_start <= xpm_req and not xpm_rst and not xpm_rst_d and
+                         not xpm_wr_rst_busy;
 
-        p_xpm_rst_sync : process(wr_clk, xpm_arst)
+        p_xpm_req_cap : process(wr_clk, xpm_arst)
         begin
             if xpm_arst = '1' then
-                xpm_rst_sync <= "11";
+                xpm_req_cap <= '1';
+                xpm_rst_pend <= '1';
             elsif rising_edge(wr_clk) then
-                xpm_rst_sync <= xpm_rst_sync(0) & '0';
+                if xpm_rst = '1' then
+                    xpm_req_cap <= '0';
+                end if;
+                xpm_rst_pend <= xpm_req_cap or xpm_req or xpm_rst or
+                                xpm_wr_rst_busy;
             end if;
         end process;
 
         p_xpm_rst : process(wr_clk)
         begin
             if rising_edge(wr_clk) then
-                xpm_rst <= xpm_rst_sync(1);
+                xpm_req_sync <= xpm_req_sync(0) & xpm_req_cap;
+                xpm_rst_d <= xpm_rst;
+                if xpm_rst_start = '1' then
+                    xpm_rst <= '1';
+                elsif xpm_rst_d = '1' then
+                    xpm_rst <= '0';
+                end if;
             end if;
         end process;
 
-        wr_busy_i   <= xpm_rst or xpm_wr_rst_busy;
+        p_rd_rst_pend : process(rd_clk, rd_rst)
+        begin
+            if rd_rst = '1' then
+                rd_rst_pend_sync <= "11";
+            elsif rising_edge(rd_clk) then
+                rd_rst_pend_sync <= rd_rst_pend_sync(0) & xpm_rst_pend;
+            end if;
+        end process;
+
+        wr_busy_i   <= xpm_req or xpm_rst or xpm_rst_d or xpm_wr_rst_busy;
+        rd_busy_i   <= rd_rst_pend_sync(1) or xpm_rd_rst_busy;
         wr_rst_busy <= wr_busy_i;
-        rd_rst_busy <= xpm_rd_rst_busy;
+        rd_rst_busy <= rd_busy_i;
+        wr_full     <= xpm_full or wr_busy_i;
+        rd_empty    <= xpm_empty or rd_busy_i;
 
         u_xpm_fifo : xpm_fifo_async
             generic map (
@@ -174,11 +210,11 @@ begin
                 rst           => xpm_rst,
                 wr_en         => wr_en and not wr_busy_i,
                 din           => wr_data,
-                full          => wr_full,
+                full          => xpm_full,
                 rd_clk        => rd_clk,
-                rd_en         => rd_en and not xpm_rd_rst_busy,
+                rd_en         => rd_en and not rd_busy_i,
                 dout          => rd_data,
-                empty         => rd_empty,
+                empty         => xpm_empty,
                 rd_data_count => rd_count,
                 wr_data_count => wr_count,
                 wr_rst_busy   => xpm_wr_rst_busy,

@@ -50,10 +50,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   synchronous to `wr_clk`, with `wr_rst | rd_rst`, so a reset from the read
   domain (the bridges' `CMD_RESET`, or `axi_rst` on a TCK-written FIFO)
   reached it asynchronously. The two resets are now caught by a preset
-  synchronizer and retimed on `wr_clk`; writes wait out that reset and
-  XPM's `wr_rst_busy`, which `wr_rst_busy` now reports, and reads wait out
-  `rd_rst_busy`. The behavioral FIFO is unchanged. Verilog and VHDL;
-  regression in `tests/test_async_fifo_xpm_rst_rtl.py`.
+  synchronizer and retimed on `wr_clk`. A request that arrives while XPM is
+  still busy with the previous reset (which XPM would ignore) waits for it.
+  The read side keeps its own view of the pending reset: `rd_rst` stops
+  reads at once, even if `wr_clk` is stopped (TCK between scans), and they
+  resume only after XPM's reset sequence is over, so a word queued before
+  the reset is never read. `wr_rst_busy` / `rd_rst_busy` report all of
+  this, and the FIFO reads full / empty on a busy side, so callers that
+  check only `wr_full` / `rd_empty` (the burst FIFO, EJTAG-UART) stay safe;
+  an EJTAG-UART RX byte arriving during a reset now sets the overflow flag
+  instead of vanishing. The behavioral FIFO is unchanged. Verilog and VHDL;
+  regression in `tests/test_async_fifo_xpm_rst_rtl.py` (also run against
+  the real Vivado XPM) and the async FIFO cocotb test.
 
 - **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
   Test-Logic-Reset synchroniser powered up asserted, so on flows that keep

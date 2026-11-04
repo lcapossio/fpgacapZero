@@ -6,9 +6,9 @@
 // Instantiates both USE_BEHAV_ASYNC_FIFO=1 (behavioral) and
 // USE_BEHAV_ASYNC_FIFO=0 (vendor/XPM, backed by the stub) side-by-side
 // with identical stimulus.  Asserts that rd_data, rd_empty, and wr_full
-// match between the two instances at every clock edge.  Traffic starts
-// once both report out of reset busy: the XPM branch holds its reset a
-// few wr_clk cycles after rst falls and drops writes until then.
+// match between the two instances at every clock edge once both are out
+// of reset busy: the XPM branch holds its reset a few wr_clk cycles after
+// rst falls, reading full and empty until then, so traffic waits for it.
 //
 // Run with:
 //   iverilog -g2012 -o fifo_equiv_tb.vvp \
@@ -147,7 +147,7 @@ module fcapz_async_fifo_equiv_tb;
 
     // Sample both DUTs on rd_clk negedge (stable after posedge transitions)
     always @(negedge rd_clk) begin
-        if (!rst)
+        if (!rst && !wr_rst_busy_b && !rd_rst_busy_b)
             check($time);
     end
 
