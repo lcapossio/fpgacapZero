@@ -44,6 +44,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to TCK. No port changes. Verilog and VHDL; regression in
   `tests/test_ejtagaxi_stale_stage_rtl.py`.
 
+- **XPM async FIFO reset crossed clock domains.** With
+  `ASYNC_FIFO_IMPL=1` (the default in the Xilinx EJTAG-AXI and EJTAG-UART
+  wrappers), `fcapz_async_fifo` drove XPM's single `rst`, which must be
+  synchronous to `wr_clk`, with `wr_rst | rd_rst`, so a reset from the read
+  domain (the bridges' `CMD_RESET`, or `axi_rst` on a TCK-written FIFO)
+  reached it asynchronously. The two resets are now caught by a preset
+  synchronizer and retimed on `wr_clk`; writes wait out that reset and
+  XPM's `wr_rst_busy`, which `wr_rst_busy` now reports, and reads wait out
+  `rd_rst_busy`. The behavioral FIFO is unchanged. Verilog and VHDL;
+  regression in `tests/test_async_fifo_xpm_rst_rtl.py`.
+
 - **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
   Test-Logic-Reset synchroniser powered up asserted, so on flows that keep
   initial values the count read 1 after configuration with no

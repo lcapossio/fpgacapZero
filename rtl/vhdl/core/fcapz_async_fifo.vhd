@@ -119,10 +119,41 @@ begin
         signal unused_prog_empty   : std_logic;
         signal unused_sbiterr      : std_logic;
         signal unused_dbiterr      : std_logic;
+        -- XPM's single rst, synchronous to wr_clk; see fcapz_async_fifo.v.
+        signal xpm_arst        : std_logic;
+        signal xpm_rst_sync    : std_logic_vector(1 downto 0) := "11";
+        signal xpm_rst         : std_logic := '1';
+        signal xpm_wr_rst_busy : std_logic;
+        signal xpm_rd_rst_busy : std_logic;
+        signal wr_busy_i       : std_logic;
+        attribute ASYNC_REG : string;
+        attribute ASYNC_REG of xpm_rst_sync : signal is "TRUE";
     begin
         assert DEPTH >= 16
             report "fcapz_async_fifo: XPM FIFO depth must be >= 16"
             severity failure;
+
+        xpm_arst <= wr_rst or rd_rst;
+
+        p_xpm_rst_sync : process(wr_clk, xpm_arst)
+        begin
+            if xpm_arst = '1' then
+                xpm_rst_sync <= "11";
+            elsif rising_edge(wr_clk) then
+                xpm_rst_sync <= xpm_rst_sync(0) & '0';
+            end if;
+        end process;
+
+        p_xpm_rst : process(wr_clk)
+        begin
+            if rising_edge(wr_clk) then
+                xpm_rst <= xpm_rst_sync(1);
+            end if;
+        end process;
+
+        wr_busy_i   <= xpm_rst or xpm_wr_rst_busy;
+        wr_rst_busy <= wr_busy_i;
+        rd_rst_busy <= xpm_rd_rst_busy;
 
         u_xpm_fifo : xpm_fifo_async
             generic map (
@@ -140,18 +171,18 @@ begin
             )
             port map (
                 wr_clk        => wr_clk,
-                rst           => wr_rst or rd_rst,
-                wr_en         => wr_en,
+                rst           => xpm_rst,
+                wr_en         => wr_en and not wr_busy_i,
                 din           => wr_data,
                 full          => wr_full,
                 rd_clk        => rd_clk,
-                rd_en         => rd_en,
+                rd_en         => rd_en and not xpm_rd_rst_busy,
                 dout          => rd_data,
                 empty         => rd_empty,
                 rd_data_count => rd_count,
                 wr_data_count => wr_count,
-                wr_rst_busy   => wr_rst_busy,
-                rd_rst_busy   => rd_rst_busy,
+                wr_rst_busy   => xpm_wr_rst_busy,
+                rd_rst_busy   => xpm_rd_rst_busy,
                 almost_full   => unused_almost_full,
                 almost_empty  => unused_almost_empty,
                 data_valid    => unused_data_valid,

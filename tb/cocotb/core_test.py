@@ -2095,6 +2095,10 @@ async def fcapz_async_fifo_equiv(dut):
     await RisingEdge(dut.wr_clk)
     await check_stable()
     ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("reset_empty_flags_match")
+    # The XPM branch holds its reset a few wr_clk cycles after rst falls and
+    # drops writes until then; start traffic once it is out of reset.
+    while int(dut.wr_rst_busy_b.value) or int(dut.rd_rst_busy_b.value):
+        await RisingEdge(dut.wr_clk)
 
     for i in range(16):
         await RisingEdge(dut.wr_clk)

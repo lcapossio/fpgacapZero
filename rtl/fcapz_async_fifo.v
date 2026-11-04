@@ -18,7 +18,9 @@
 //
 // Reset: wr_rst resets write-domain state, rd_rst resets read-domain
 // state.  Both are active-high async.  For clean CDC, each reset
-// should be synchronous to its respective clock domain.
+// should be synchronous to its respective clock domain.  The XPM
+// version has a single reset: either input resets the whole FIFO,
+// synchronized to wr_clk inside, and wr_rst_busy covers it.
 //
 // Parameters:
 //   DATA_W  - data width in bits (default 32)
@@ -89,6 +91,32 @@ if (ASYNC_FIFO_IMPL == 1) begin : gen_xpm
 
     wire [AW:0] xpm_rd_count;
     wire [AW:0] xpm_wr_count;
+    wire        xpm_wr_rst_busy;
+    wire        xpm_rd_rst_busy;
+
+    // XPM has one rst, which must be synchronous to wr_clk, while wr_rst and
+    // rd_rst come from different domains. Catch either (a pulse of the other
+    // clock included) with a preset synchronizer, then retime it on wr_clk so
+    // XPM sees both edges on wr_clk. Writes wait out that reset and XPM's
+    // busy, and wr_rst_busy reports both; reads wait out rd_rst_busy.
+    (* ASYNC_REG = "TRUE" *) reg [1:0] xpm_rst_sync;
+    reg xpm_rst;
+    initial begin
+        xpm_rst_sync = 2'b11;
+        xpm_rst = 1'b1;
+    end
+    wire xpm_arst = wr_rst | rd_rst;
+    always @(posedge wr_clk or posedge xpm_arst) begin
+        if (xpm_arst)
+            xpm_rst_sync <= 2'b11;
+        else
+            xpm_rst_sync <= {xpm_rst_sync[0], 1'b0};
+    end
+    always @(posedge wr_clk)
+        xpm_rst <= xpm_rst_sync[1];
+
+    assign wr_rst_busy = xpm_rst | xpm_wr_rst_busy;
+    assign rd_rst_busy = xpm_rd_rst_busy;
 
     xpm_fifo_async #(
         .CDC_SYNC_STAGES     (2),
@@ -104,20 +132,20 @@ if (ASYNC_FIFO_IMPL == 1) begin : gen_xpm
         .USE_ADV_FEATURES    ("0404")   // enable rd_data_count + wr_data_count
     ) u_xpm_fifo (
         .wr_clk         (wr_clk),
-        .rst            (wr_rst | rd_rst),
-        .wr_en          (wr_en),
+        .rst            (xpm_rst),
+        .wr_en          (wr_en && !wr_rst_busy),
         .din            (wr_data),
         .full           (wr_full),
 
         .rd_clk         (rd_clk),
-        .rd_en          (rd_en),
+        .rd_en          (rd_en && !xpm_rd_rst_busy),
         .dout           (rd_data),
         .empty          (rd_empty),
         .rd_data_count  (xpm_rd_count),
 
         .wr_data_count  (xpm_wr_count),
-        .wr_rst_busy    (wr_rst_busy),
-        .rd_rst_busy    (rd_rst_busy),
+        .wr_rst_busy    (xpm_wr_rst_busy),
+        .rd_rst_busy    (xpm_rd_rst_busy),
         .almost_full    (),
         .almost_empty   (),
         .data_valid     (),
