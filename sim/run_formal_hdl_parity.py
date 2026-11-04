@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -89,48 +90,104 @@ def run(
 ) -> tuple[int, str]:
     """Run a tool, echoing its log as it arrives (stderr only with ``output``)."""
 
-    print(f"[formal-parity] {' '.join(cmd)}", flush=True)
+    def echo(line: str) -> None:
+        try:
+            print(line, end="", flush=True)
+        except UnicodeEncodeError:
+            enc = sys.stdout.encoding or "ascii"
+            print(line.encode(enc, "backslashreplace").decode(enc), end="", flush=True)
+
+    echo(f"[formal-parity] {' '.join(cmd)}\n")
     handle = output.open("w", encoding="utf-8") if output is not None else None
+    lines: list[str] = []
+    errors: list[BaseException] = []
+
+    def pump(log: Any) -> None:
+        try:
+            for line in log:
+                echo(line)
+                lines.append(line)
+        except BaseException as exc:  # handed back to run()
+            errors.append(exc)
+
+    def feed(stdin: Any) -> None:
+        try:
+            stdin.write(input_text)
+        except (BrokenPipeError, OSError):
+            pass  # the tool exited without reading all of it
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            try:
+                stdin.close()
+            except OSError:
+                pass
+
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=handle if handle is not None else subprocess.PIPE,
             stderr=subprocess.PIPE if handle is not None else subprocess.STDOUT,
+            # Own process group, so a timeout can stop the tool's children too.
+            start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
-        log = proc.stderr if handle is not None else proc.stdout
-        lines: list[str] = []
-
-        def pump() -> None:
-            for line in log:
-                print(line, end="", flush=True)
-                lines.append(line)
-
-        reader = threading.Thread(target=pump, daemon=True)
-        reader.start()
-        if input_text is not None:
-            try:
-                proc.stdin.write(input_text)
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
+    except BaseException:
+        if handle is not None:
+            handle.close()
+        raise
+    threads = [threading.Thread(
+        target=pump, args=(proc.stderr if handle is not None else proc.stdout,), daemon=True
+    )]
+    if input_text is not None:
+        threads.append(threading.Thread(target=feed, args=(proc.stdin,), daemon=True))
+    try:
+        for thread in threads:
+            thread.start()
         try:
             proc.wait(timeout=STEP_TIMEOUT)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
             raise StepTimeout(f"{Path(cmd[0]).name} ran over {STEP_TIMEOUT:g} s") from None
-        finally:
-            reader.join()
     finally:
+        if proc.poll() is None:
+            kill_tree(proc)
+        for thread in threads:
+            # A descendant can keep the pipe open after the tool is killed.
+            thread.join(timeout=10)
         if handle is not None:
             handle.close()
+    if errors:
+        raise RuntimeError(f"reading {Path(cmd[0]).name} output failed") from errors[0]
     text = "".join(lines)
     if text and not text.endswith("\n"):
         print()
     return proc.returncode, text
+
+
+def kill_tree(proc: subprocess.Popen[str]) -> None:
+    """Stop a tool and everything it started, then reap it."""
+
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    proc.wait()
 
 
 def require_tools(*names: str) -> bool:
@@ -669,12 +726,12 @@ def prove_config(
             "equiv_status",
         ]
     ) + "\n"
-    _, output = run([yosys, "-"], input_text=script)
-    if "Equivalence successfully proven" in output:
-        return "PASS", "equiv_induct closed"
+    code, output = run([yosys, "-"], input_text=script)
     if "ERROR:" in output:
         error = next(line for line in output.splitlines() if "ERROR:" in line)
         return "FAIL", error
+    if code == 0 and "Equivalence successfully proven" in output:
+        return "PASS", "equiv_induct closed"
 
     unproven = re.search(r"Found a total of (\d+) unproven", output) or re.search(
         r"(\d+) are unproven",
@@ -692,8 +749,8 @@ def prove_config(
     for cycle in range(1, bounded_depth + 1):
         for clock in clock_inputs:
             reset_args.extend(["-set-at", str(cycle), f"in_{clock}", "1"])
-        for signal in zero_inputs:
-            reset_args.extend(["-set-at", str(cycle), f"in_{signal}", "0"])
+        for zero in zero_inputs:
+            reset_args.extend(["-set-at", str(cycle), f"in_{zero}", "0"])
     for cycle in range(1, reset_cycles + 1):
         for reset in reset_inputs:
             reset_args.extend(["-set-at", str(cycle), f"in_{reset}", "1"])
@@ -783,6 +840,8 @@ def run_manifest(manifest_path: Path) -> bool:
                     )
                 except StepTimeout as exc:
                     status, detail = "TIMEOUT", str(exc)
+                except RuntimeError as exc:
+                    status, detail = "FAIL", f"{exc}: {exc.__cause__!r}"
                 print(
                     f"[formal-parity] {manifest['name']} {module['name']}[{tag}]: "
                     f"{status} - {detail}"
