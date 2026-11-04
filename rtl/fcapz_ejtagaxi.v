@@ -1181,9 +1181,11 @@ module fcapz_ejtagaxi #(
 
         // tck_rst (axi_rst, synchronized to TCK) clears the same TCK state as
         // CMD_RESET. Last in the block, so it overrides every assignment above.
-        // The FIFOs' TCK sides are held by tck_rst directly, and the AXI side
-        // clears its end of the reset handshake on axi_rst, so the toggle and
-        // its acknowledge synchronizers go to 0 here instead of toggling.
+        // The FIFOs' TCK sides are held by tck_rst directly. The CMD_RESET
+        // request toggle is left alone: this block only runs on TCK edges, so
+        // clearing it here could flip it after the AXI side is out of reset
+        // and request a second reset; the AXI side rejoins the handshake
+        // from its own axi_rst.
         if (tck_rst) begin
             error_sticky       <= 1'b0;
             prev_valid         <= 1'b0;
@@ -1211,9 +1213,6 @@ module fcapz_ejtagaxi #(
             stream_bitpos      <= 6'd0;
             stream_tdi_one     <= 1'b0;
             stream_hdr_zero    <= 1'b0;
-            reset_req_toggle   <= 1'b0;
-            reset_ack_sync1_tck <= 1'b0;
-            reset_ack_sync2_tck <= 1'b0;
         end
     end
 

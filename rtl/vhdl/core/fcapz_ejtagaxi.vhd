@@ -620,9 +620,10 @@ begin
             -- tck_rst (axi_rst, synchronized to TCK) clears the same TCK
             -- state as CMD_RESET. Last in the process, so it overrides every
             -- assignment above. The FIFOs' TCK sides are held by tck_rst
-            -- directly, and the AXI side clears its end of the reset
-            -- handshake on axi_rst, so the toggle and its acknowledge
-            -- synchronizers go to '0' here instead of toggling.
+            -- directly. The CMD_RESET request toggle is left alone: this
+            -- process only runs on TCK edges, so clearing it here could flip
+            -- it after the AXI side is out of reset and request a second
+            -- reset; the AXI side rejoins the handshake from its own axi_rst.
             if tck_rst = '1' then
                 cmdq_wr_en_i <= '0';
                 respq_rd_en_i <= '0';
@@ -640,9 +641,6 @@ begin
                 burst_rdata_ready <= '0';
                 config_rdata <= (others => '0');
                 last_cmd <= CMD_NOP;
-                reset_req_toggle <= '0';
-                reset_ack_sync1_tck <= '0';
-                reset_ack_sync2_tck <= '0';
             end if;
         end if;
     end process;
