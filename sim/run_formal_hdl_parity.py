@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -145,23 +146,46 @@ def run(
     )]
     if input_text is not None:
         threads.append(threading.Thread(target=feed, args=(proc.stdin,), daemon=True))
+    tool = Path(cmd[0]).name
+    deadline = None if STEP_TIMEOUT is None else time.monotonic() + STEP_TIMEOUT
+
+    def remaining() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def alive() -> bool:
+        return any(thread.is_alive() for thread in threads)
+
     try:
         for thread in threads:
             thread.start()
-        try:
-            proc.wait(timeout=STEP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            raise StepTimeout(f"{Path(cmd[0]).name} ran over {STEP_TIMEOUT:g} s") from None
+        # Poll, so a failed reader or feeder ends the wait at once.
+        while not errors:
+            left = remaining()
+            if left == 0.0:
+                raise StepTimeout(f"{tool} ran over {STEP_TIMEOUT:g} s")
+            try:
+                proc.wait(timeout=0.2 if left is None else min(0.2, left))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        # A descendant can keep the pipe open after the tool exits; the log
+        # isn't complete until every reader has finished.
+        for thread in threads:
+            if not errors:
+                thread.join(timeout=remaining())
+        if not errors and alive():
+            raise StepTimeout(f"{tool} output still open after {STEP_TIMEOUT:g} s")
     finally:
-        if proc.poll() is None:
+        if proc.poll() is None or alive():
             kill_tree(proc)
         for thread in threads:
-            # A descendant can keep the pipe open after the tool is killed.
             thread.join(timeout=10)
         if handle is not None:
             handle.close()
     if errors:
-        raise RuntimeError(f"reading {Path(cmd[0]).name} output failed") from errors[0]
+        raise RuntimeError(f"reading {tool} output failed") from errors[0]
+    if alive():
+        raise RuntimeError(f"{tool} output still open after its tree was killed")
     text = "".join(lines)
     if text and not text.endswith("\n"):
         print()
