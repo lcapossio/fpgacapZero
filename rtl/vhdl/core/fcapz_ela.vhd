@@ -767,8 +767,11 @@ begin
                             (AUX_W > 0 and to_integer(unsigned(jtag_addr)) >= ADDR_TS_DATA_BASE)) else '0';
     datawin_req_now <= jtag_rd_en and jtag_rd_data_window;
     rb_meta_sample_busy <= rb_meta_toggle_sample xor rb_meta_ack_sync2;
+    -- As in rtl/fcapz_ela.v: seg_count wraps to 0 on the last segment, so a
+    -- finished segmented capture refreshes on done falling.
     rb_meta_event_sample <= '1' when (done = '1' and rb_done_d = '0') or
-                                     (NUM_SEGMENTS > 1 and seg_count /= rb_seg_count_d) else '0';
+                                     (NUM_SEGMENTS > 1 and seg_count /= rb_seg_count_d) or
+                                     (NUM_SEGMENTS > 1 and done = '0' and rb_done_d = '1') else '0';
     mem_we_a <= '1' when (done = '0' and triggered = '0' and
                          (comb_store_ok = '1' or comb_trigger_commit_now = '1')) or
                          (armed = '1' and done = '0' and triggered = '1' and

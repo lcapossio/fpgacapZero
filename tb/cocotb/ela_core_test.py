@@ -671,6 +671,27 @@ async def segmented_capture(dut):
 
 
 @cocotb.test()
+async def soft_reset_clears_segment_metadata(dut):
+    """A soft reset after a finished segmented capture refreshes CAPTURE_LEN
+    and SEG_START. seg_count wraps to 0 on the last segment, so the reset
+    doesn't change it; the refresh comes from done falling."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+    await ela.configure_value_capture(pre=0, post=1, value=3, mask=0x03)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.arm()
+    assert await ela.wait_done(300) & 0x4
+    counter.cancel()
+    await ela.write(ADDR_SEG_SEL, NUM_SEGMENTS - 1)
+    assert await ela.read(ADDR_CAPTURE_LEN) == 2
+    assert await ela.read(ADDR_SEG_START) != 0
+    await ela.reset_core()
+    await ela.wait_jtag(10)
+    assert await ela.read(ADDR_CAPTURE_LEN) == 0
+    assert await ela.read(ADDR_SEG_START) == 0
+
+
+@cocotb.test()
 async def capture_gen_counts_restarts(dut):
     """CAPTURE_GEN counts the CTRL writes that arm or reset the core and the
     releases of the register-side reset, nothing else: not the capture, not
