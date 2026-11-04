@@ -96,6 +96,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`core.json` lists what the new hubs need:** the PolarFire and Efinix TAP
   adapters, the Gowin register adapter, its synchronisers and the `GW_JTAG`
   declaration.
+- **Formal parity runner with GHDL 4.x.** GHDL now names hidden state
+  registers `nNNN_q`, which the runner's alias pass didn't recognise, so
+  their VHDL state never lined up with the Verilog. `fcapz_ela` induction
+  left points open and the bounded fallback ran for hours. The pass accepts
+  the new names. A `--timeout` (default 7200 s per GHDL/yosys run) reports a
+  stuck parameter set as `TIMEOUT` and stops the tool's whole process tree,
+  tool output is shown as it runs, and a proof only passes if yosys exits
+  cleanly.
+- **VHDL ELA register widths match the Verilog.** The trigger-mode and
+  storage-qualifier snapshots and `seg_count` were wider in VHDL, which
+  kept those registers out of the formal proof. `seg_count` now wraps to 0
+  on the last segment, as in Verilog. `fcapz_ela`'s first formal parameter
+  set now closes by induction.
+- **ELA: stale segment metadata after a soft reset.** After a finished
+  segmented capture, an arm or soft reset left `CAPTURE_LEN` and
+  `SEG_START` showing the old capture in Verilog: `seg_count` had wrapped
+  to 0, so the reset didn't change it and the readback snapshot wasn't
+  refreshed. Both HDLs now also refresh it when `done` falls.
 
 ## [0.5.1] — 2026-11-02
 

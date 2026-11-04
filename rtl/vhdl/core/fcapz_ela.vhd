@@ -330,8 +330,8 @@ architecture rtl of fcapz_ela is
     signal pretrig_len_stage      : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal posttrig_len_hold     : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal posttrig_len_stage     : unsigned(LEN_W - 1 downto 0) := (others => '0');
-    signal trig_mode_hold        : std_logic_vector(31 downto 0) := (others => '0');
-    signal trig_mode_stage        : std_logic_vector(31 downto 0) := (others => '0');
+    signal trig_mode_hold        : std_logic_vector(1 downto 0) := (others => '0');
+    signal trig_mode_stage        : std_logic_vector(1 downto 0) := (others => '0');
     -- Widened to SAMPLE_W so the full comparator-A value/mask can cross the CDC
     -- (WIDE_TRIG).  For WIDE_TRIG=0 the upper bits are constant 0 and optimize
     -- away, leaving the legacy 32-bit behaviour bit-identical.
@@ -341,7 +341,6 @@ architecture rtl of fcapz_ela is
     signal trig_mask_stage        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal pretrig_len            : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal posttrig_len           : unsigned(LEN_W - 1 downto 0) := (others => '0');
-    signal cap_trig_mode          : std_logic_vector(31 downto 0) := x"00000001";
     signal cap_trig_value         : std_logic_vector(31 downto 0) := (others => '0');
     signal cap_trig_mask          : std_logic_vector(31 downto 0) := x"FFFFFFFF";
     signal trig_delay             : unsigned(15 downto 0) := (others => '0');
@@ -384,12 +383,12 @@ architecture rtl of fcapz_ela is
     signal trig_delay_stage       : unsigned(15 downto 0) := (others => '0');
     signal trig_holdoff_hold     : unsigned(15 downto 0) := (others => '0');
     signal trig_holdoff_stage     : unsigned(15 downto 0) := (others => '0');
-    signal sq_mode_hold          : std_logic_vector(31 downto 0) := (others => '0');
-    signal sq_mode_stage          : std_logic_vector(31 downto 0) := (others => '0');
-    signal sq_value_hold         : std_logic_vector(31 downto 0) := (others => '0');
-    signal sq_value_stage         : std_logic_vector(31 downto 0) := (others => '0');
-    signal sq_mask_hold          : std_logic_vector(31 downto 0) := (others => '0');
-    signal sq_mask_stage          : std_logic_vector(31 downto 0) := (others => '0');
+    signal sq_mode_hold          : std_logic_vector(3 downto 0) := (others => '0');
+    signal sq_mode_stage          : std_logic_vector(3 downto 0) := (others => '0');
+    signal sq_value_hold         : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal sq_value_stage         : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal sq_mask_hold          : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+    signal sq_mask_stage          : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal seq_cfg_hold          : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_cfg_stage          : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_value_a_hold      : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
@@ -458,7 +457,7 @@ architecture rtl of fcapz_ela is
     signal decim_count       : unsigned(23 downto 0) := (others => '0');
     signal timestamp_counter : unsigned(TS_WIDTH - 1 downto 0) := (others => '0');
     signal cur_segment       : natural range 0 to NUM_SEGMENTS - 1 := 0;
-    signal seg_count         : natural range 0 to NUM_SEGMENTS := 0;
+    signal seg_count         : natural range 0 to 2 ** SEG_IDX_W - 1 := 0;  -- wraps like the Verilog
     signal all_seg_done      : std_logic := '0';
     signal seg_start_ptr     : seg_ptr_t := (others => 0);
     signal segment_wrapped   : std_logic := '0';
@@ -542,7 +541,7 @@ architecture rtl of fcapz_ela is
     signal burst_start_ptr_i  : std_logic_vector(PTR_W - 1 downto 0) := (others => '0');
 
     signal rb_done_d              : std_logic := '0';
-    signal rb_seg_count_d         : natural range 0 to NUM_SEGMENTS := 0;
+    signal rb_seg_count_d         : natural range 0 to 2 ** SEG_IDX_W - 1 := 0;
     signal rb_meta_toggle_sample  : std_logic := '0';
     signal rb_capture_len_sample  : unsigned(PTR_W downto 0) := (others => '0');
     signal rb_start_ptr_sample    : natural range 0 to DEPTH - 1 := 0;
@@ -768,8 +767,11 @@ begin
                             (AUX_W > 0 and to_integer(unsigned(jtag_addr)) >= ADDR_TS_DATA_BASE)) else '0';
     datawin_req_now <= jtag_rd_en and jtag_rd_data_window;
     rb_meta_sample_busy <= rb_meta_toggle_sample xor rb_meta_ack_sync2;
+    -- As in rtl/fcapz_ela.v: seg_count wraps to 0 on the last segment, so a
+    -- finished segmented capture refreshes on done falling.
     rb_meta_event_sample <= '1' when (done = '1' and rb_done_d = '0') or
-                                     (NUM_SEGMENTS > 1 and seg_count /= rb_seg_count_d) else '0';
+                                     (NUM_SEGMENTS > 1 and seg_count /= rb_seg_count_d) or
+                                     (NUM_SEGMENTS > 1 and done = '0' and rb_done_d = '1') else '0';
     mem_we_a <= '1' when (done = '0' and triggered = '0' and
                          (comb_store_ok = '1' or comb_trigger_commit_now = '1')) or
                          (armed = '1' and done = '0' and triggered = '1' and
@@ -1227,7 +1229,6 @@ begin
         if sample_rst = '1' then
             pretrig_len <= (others => '0');
             posttrig_len <= (others => '0');
-            cap_trig_mode <= x"00000001";
             cap_trig_value <= (others => '0');
             cap_trig_mask <= x"FFFFFFFF";
             trig_delay <= (others => '0');
@@ -1265,7 +1266,6 @@ begin
             if arm_now then
                 pretrig_len <= pretrig_len_stage;
                 posttrig_len <= posttrig_len_stage;
-                cap_trig_mode <= trig_mode_stage;
                 cap_trig_value <= low_u32(trig_value_stage);
                 cap_trig_mask <= low_u32(trig_mask_stage);
                 trig_delay <= trig_delay_stage;
@@ -1329,8 +1329,8 @@ begin
                     else
                         sq_cmp_mode <= (others => '0');
                     end if;
-                    sq_value <= expand32(sq_value_stage);
-                    sq_mask <= expand32(sq_mask_stage);
+                    sq_value <= sq_value_stage;
+                    sq_mask <= sq_mask_stage;
                 else
                     sq_enable <= '0';
                     sq_cmp_mode <= (others => '0');
@@ -1776,7 +1776,7 @@ begin
                (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
                 pretrig_len_hold <= cfg_len(jtag_pretrig_len);
                 posttrig_len_hold <= cfg_len(jtag_posttrig_len);
-                trig_mode_hold <= jtag_trig_mode;
+                trig_mode_hold <= jtag_trig_mode(1 downto 0);
                 trig_value_hold <= jtag_trig_value_w;
                 trig_mask_hold <= jtag_trig_mask_w;
                 decim_hold <= unsigned(jtag_decim);
@@ -1792,9 +1792,15 @@ begin
                 else
                     rle_post_clks_hold <= (others => '0');
                 end if;
-                sq_mode_hold <= jtag_sq_mode;
-                sq_value_hold <= jtag_sq_value;
-                sq_mask_hold <= jtag_sq_mask;
+                if STOR_QUAL /= 0 then
+                    sq_mode_hold <= jtag_sq_mode(3 downto 0);
+                    sq_value_hold <= expand32(jtag_sq_value);
+                    sq_mask_hold <= expand32(jtag_sq_mask);
+                else
+                    sq_mode_hold <= (others => '0');
+                    sq_value_hold <= (others => '0');
+                    sq_mask_hold <= (others => '0');
+                end if;
                 seq_cfg_hold <= jtag_seq_cfg;
                 for i in 0 to TRIG_STAGES - 1 loop
                     if TRIG_STAGES > 1 then
@@ -2250,7 +2256,7 @@ begin
                                 armed <= '0';
                                 all_seg_done <= '1';
                                 start_ptr <= seg_start_ptr(0);
-                                seg_count <= NUM_SEGMENTS;
+                                seg_count <= NUM_SEGMENTS mod 2 ** SEG_IDX_W;
                             else
                                 next_segment := cur_segment + 1;
                                 cur_segment <= next_segment;
@@ -2361,7 +2367,7 @@ begin
                 r := (others => '0');
                 if NUM_SEGMENTS > 1 then
                     r(31) := all_seg_done;
-                    r(SEG_IDX_W - 1 downto 0) := std_logic_vector(to_unsigned(seg_count mod (2 ** SEG_IDX_W), SEG_IDX_W));
+                    r(SEG_IDX_W - 1 downto 0) := std_logic_vector(to_unsigned(seg_count, SEG_IDX_W));
                 else
                     r := x"80000000";
                 end if;
