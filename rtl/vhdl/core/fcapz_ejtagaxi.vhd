@@ -251,6 +251,17 @@ architecture rtl of fcapz_ejtagaxi is
     signal reset_ack_sync2_tck : std_logic := '0';
     signal reset_busy_tck : std_logic;
 
+    -- TCK-domain reset: axi_rst asserts it at once, and it releases on the
+    -- second TCK edge after axi_rst ends. It resets the TCK sides of the async
+    -- FIFOs (so their release is synchronous to TCK) and the TCK command
+    -- state, so no queued command outlives a reset. That includes power-up on
+    -- devices that drop register initial values (PolarFire), where axi_rst
+    -- comes from the device power-on reset.
+    signal tck_rst_sync : std_logic_vector(1 downto 0) := "11";
+    signal tck_rst : std_logic;
+    attribute ASYNC_REG : string;
+    attribute ASYNC_REG of tck_rst_sync : signal is "TRUE";
+
 begin
     assert DATA_W = 32 and ADDR_W = 32
         report "fcapz_ejtagaxi VHDL translation currently supports ADDR_W=32 DATA_W=32"
@@ -308,6 +319,16 @@ begin
     debug_axi_edge <= (others => '0');
 
     reset_busy_tck <= '1' when reset_req_toggle /= reset_ack_sync2_tck else '0';
+
+    p_tck_rst : process(tck, axi_rst)
+    begin
+        if axi_rst = '1' then
+            tck_rst_sync <= "11";
+        elsif rising_edge(tck) then
+            tck_rst_sync <= tck_rst_sync(0) & '0';
+        end if;
+    end process;
+    tck_rst <= tck_rst_sync(1);
     fifo_rd_count8 <= std_logic_vector(resize(unsigned(fifo_rd_count), 8));
 
     u_cmd_fifo : entity work.fcapz_async_fifo
@@ -320,7 +341,7 @@ begin
         )
         port map (
             wr_clk => tck,
-            wr_rst => axi_rst or cmdq_rst_tck,
+            wr_rst => tck_rst or cmdq_rst_tck,
             wr_en => cmdq_wr_en_i,
             wr_data => cmdq_wr_data,
             wr_full => cmdq_full,
@@ -351,7 +372,7 @@ begin
             wr_full => respq_full,
             wr_rst_busy => respq_wr_rst_busy,
             rd_clk => tck,
-            rd_rst => axi_rst or respq_rst_tck,
+            rd_rst => tck_rst or respq_rst_tck,
             rd_en => respq_rd_en_i,
             rd_data => respq_rd_data,
             rd_empty => respq_empty,
@@ -376,7 +397,7 @@ begin
             wr_full => fifo_full,
             wr_rst_busy => open,
             rd_clk => tck,
-            rd_rst => axi_rst or fifo_rst_tck,
+            rd_rst => tck_rst or fifo_rst_tck,
             rd_en => fifo_rd_en_i,
             rd_data => fifo_rdata,
             rd_empty => fifo_empty,
@@ -594,6 +615,34 @@ begin
                             null;
                     end case;
                 end if;
+            end if;
+
+            -- tck_rst (axi_rst, synchronized to TCK) clears the same TCK
+            -- state as CMD_RESET. Last in the process, so it overrides every
+            -- assignment above. The FIFOs' TCK sides are held by tck_rst
+            -- directly, and the AXI side clears its end of the reset
+            -- handshake on axi_rst, so the toggle and its acknowledge
+            -- synchronizers go to '0' here instead of toggling.
+            if tck_rst = '1' then
+                cmdq_wr_en_i <= '0';
+                respq_rd_en_i <= '0';
+                fifo_rd_en_i <= '0';
+                error_sticky <= '0';
+                prev_valid <= '0';
+                pending_count <= (others => '0');
+                auto_inc_addr <= (others => '0');
+                burst_awlen <= (others => '0');
+                burst_awsize <= "010";
+                burst_awburst <= "01";
+                burst_addr <= (others => '0');
+                burst_cfg_valid <= '0';
+                burst_w_beats_left <= (others => '0');
+                burst_rdata_ready <= '0';
+                config_rdata <= (others => '0');
+                last_cmd <= CMD_NOP;
+                reset_req_toggle <= '0';
+                reset_ack_sync1_tck <= '0';
+                reset_ack_sync2_tck <= '0';
             end if;
         end if;
     end process;

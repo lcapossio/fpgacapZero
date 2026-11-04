@@ -31,6 +31,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **EJTAG-AXI could issue a stale command after reset.** The bridge's TCK
+  logic had no reset: the command staging register was cleared only by its
+  initial value or by the host's `CMD_RESET`, and it enqueues whether or not
+  the chain is selected. On flows that drop initial values (PolarFire, which
+  also keeps register contents across a reprogram), a command left there was
+  executed on the AXI bus on the first TCK edges after `axi_rst` ended,
+  before the host could reset the bridge. `axi_rst` is now synchronized to
+  TCK inside `fcapz_ejtagaxi` (asserted at once, released on TCK); it clears
+  the same TCK state as `CMD_RESET` and holds the TCK sides of the command,
+  response and burst FIFOs, whose reset release was previously asynchronous
+  to TCK. No port changes. Verilog and VHDL; regression in
+  `tests/test_ejtagaxi_stale_stage_rtl.py`.
+
 - **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
   Test-Logic-Reset synchroniser powered up asserted, so on flows that keep
   initial values the count read 1 after configuration with no
