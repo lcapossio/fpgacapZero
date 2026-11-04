@@ -14,7 +14,8 @@ This is the repo-local Layer 0/Layer 2 slice of the translateHDL parity ladder:
   miter distinguishes a shallow counterexample from a proof-depth limitation.
   Induction assumes both sides start in the same state, so the state of
   same-named registers after the manifest's reset (power-up values included)
-  is compared separately.
+  is compared separately. A GHDL or yosys run that exceeds ``--timeout``
+  reports its parameter set as TIMEOUT, which fails like any other non-PASS.
 
 Manifest files are JSON documents with a ``.yml`` suffix so they stay compatible
 with the translateHDL parity-manifest convention without adding PyYAML as a CI
@@ -32,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +72,14 @@ class Port:
     direction: str
 
 
+class StepTimeout(Exception):
+    """A tool ran longer than --timeout allows."""
+
+
+# Seconds one tool invocation may run; None waits forever (--timeout 0).
+STEP_TIMEOUT: float | None = None
+
+
 def run(
     cmd: list[str],
     *,
@@ -77,31 +87,50 @@ def run(
     input_text: str | None = None,
     output: Path | None = None,
 ) -> tuple[int, str]:
+    """Run a tool, echoing its log as it arrives (stderr only with ``output``)."""
+
     print(f"[formal-parity] {' '.join(cmd)}", flush=True)
-    stdout = subprocess.PIPE
-    handle = None
-    if output is not None:
-        handle = output.open("w", encoding="utf-8")
-        stdout = handle
+    handle = output.open("w", encoding="utf-8") if output is not None else None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            input=input_text,
             text=True,
-            stdout=stdout,
-            stderr=subprocess.PIPE if output is not None else subprocess.STDOUT,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=handle if handle is not None else subprocess.PIPE,
+            stderr=subprocess.PIPE if handle is not None else subprocess.STDOUT,
         )
+        log = proc.stderr if handle is not None else proc.stdout
+        lines: list[str] = []
+
+        def pump() -> None:
+            for line in log:
+                print(line, end="", flush=True)
+                lines.append(line)
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        if input_text is not None:
+            try:
+                proc.stdin.write(input_text)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            proc.wait(timeout=STEP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise StepTimeout(f"{Path(cmd[0]).name} ran over {STEP_TIMEOUT:g} s") from None
+        finally:
+            reader.join()
     finally:
         if handle is not None:
             handle.close()
-    if output is not None:
-        text = result.stderr or ""
-    else:
-        text = result.stdout or ""
-    if text:
-        print(text, end="" if text.endswith("\n") else "\n")
-    return result.returncode, text
+    text = "".join(lines)
+    if text and not text.endswith("\n"):
+        print()
+    return proc.returncode, text
 
 
 def require_tools(*names: str) -> bool:
@@ -302,7 +331,8 @@ def normalize_ghdl_isignal_aliases(netlist: Path) -> None:
     """Rename GHDL's hidden ``nNNN`` state registers back to signal names.
 
     GHDL emits many VHDL signals as a public combinational alias driven by an
-    anonymous state register, e.g. ``foo = n1234; // (isignal)``. Yosys then
+    anonymous state register, e.g. ``foo = n1234; // (isignal)`` (newer GHDL
+    names it ``n1234_q``). Yosys then
     sees the real flop as ``n1234`` and cannot line it up with the Verilog
     state named ``foo`` during induction. This pass keeps the synthesized logic
     identical while restoring those state names for SEC.
@@ -320,7 +350,7 @@ def normalize_ghdl_isignal_aliases(netlist: Path) -> None:
     alias_re = re.compile(
         r"^\s*always @\*\n"
         r"\s*(?P<public>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*"
-        r"(?P<hidden>n\d+)\s*;\s*// \(isignal\)\n",
+        r"(?P<hidden>n\d+(?:_q)?)\s*;\s*// \(isignal\)\n",
         re.M,
     )
 
@@ -741,15 +771,18 @@ def run_manifest(manifest_path: Path) -> bool:
         for module in formal["modules"]:
             for params in module.get("param_sets") or [{}]:
                 tag = ", ".join(f"{name}={value}" for name, value in params.items()) or "default"
-                status, detail = prove_config(
-                    manifest_path,
-                    manifest,
-                    params,
-                    work,
-                    induct_depth,
-                    bounded_depth,
-                    yosys,
-                )
+                try:
+                    status, detail = prove_config(
+                        manifest_path,
+                        manifest,
+                        params,
+                        work,
+                        induct_depth,
+                        bounded_depth,
+                        yosys,
+                    )
+                except StepTimeout as exc:
+                    status, detail = "TIMEOUT", str(exc)
                 print(
                     f"[formal-parity] {manifest['name']} {module['name']}[{tag}]: "
                     f"{status} - {detail}"
@@ -767,7 +800,16 @@ def main() -> None:
         action="store_true",
         help="only run Layer 0 manifest/interface checks",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=7200,
+        help="seconds one GHDL/yosys run may take before its parameter set is "
+        "reported as TIMEOUT; 0 waits forever (default: 7200)",
+    )
     args = parser.parse_args()
+    global STEP_TIMEOUT
+    STEP_TIMEOUT = args.timeout if args.timeout > 0 else None
 
     manifests = tuple(args.manifest) if args.manifest else DEFAULT_MANIFESTS
     try:
