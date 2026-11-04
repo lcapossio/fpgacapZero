@@ -176,7 +176,7 @@ def run(
         if not errors and alive():
             raise StepTimeout(f"{tool} output still open after {STEP_TIMEOUT:g} s")
     finally:
-        if proc.poll() is None or alive():
+        if errors or proc.poll() is None or alive():
             kill_tree(proc)
         for thread in threads:
             thread.join(timeout=10)
