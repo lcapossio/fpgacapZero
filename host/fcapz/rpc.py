@@ -314,9 +314,10 @@ class RpcServer:
         (reusing an already-attached controller, else a read-only probe that
         restores chain 1). When the connected chain is a core manager, the
         manager and its other slots are listed too, each with its ``instance``.
-        Bridges are not scanned here; the ``discover`` command scans every
-        chain. Each entry: ``{type, name, core_id, chain, base_addr,
-        version_major, version_minor, info}``.
+        A core on another chain is listed once, with the slot a ``rebind`` to
+        that chain binds. Bridges are not scanned here; the ``discover``
+        command scans every chain. Each entry: ``{type, name, core_id, chain,
+        base_addr, instance, version_major, version_minor, info}``.
         """
         cores: list[Dict[str, Any]] = []
         try:
@@ -330,7 +331,7 @@ class RpcServer:
                 "core_id": ela["core_id"],
                 "chain": analyzer.bscan_chain,
                 "base_addr": 0,
-                "instance": analyzer.instance,
+                "instance": self._bound_slot(analyzer),
                 "version_major": ela["version_major"],
                 "version_minor": ela["version_minor"],
                 "info": ela,
@@ -415,6 +416,7 @@ class RpcServer:
                     "core_id": ident["core_id"],
                     "chain": chain,
                     "base_addr": 0,
+                    "instance": other.instance,
                     "version_major": ident["version_major"],
                     "version_minor": ident["version_minor"],
                     "info": ident,
@@ -448,6 +450,7 @@ class RpcServer:
             "core_id": AXI_MON_MAGIC,
             "chain": analyzer.bscan_chain,
             "base_addr": 0,
+            "instance": RpcServer._bound_slot(analyzer),
             "version_major": ela_ident["version_major"],
             "version_minor": ela_ident["version_minor"],
             "info": {
@@ -556,6 +559,23 @@ class RpcServer:
             raise ValueError(f"unknown ir_table: {name!r}")
         table = cls._IR_TABLES[key]
         return dict(table) if table is not None else None
+
+    @staticmethod
+    def _bound_slot(analyzer: Analyzer) -> int | None:
+        """The core-manager slot *analyzer* reaches, or ``None`` for a core
+        reached directly.
+
+        An analyzer keeps a slot it was given even on a chain without a
+        manager, where the transport ignores it; report none there.  The
+        manager block is read only once ``0x0000`` has answered as an ELA or
+        EIO: on a bridge chain a ``0xF000`` read is a burst command.  A failed
+        read raises rather than report a slot nobody confirmed.
+        """
+        if analyzer.instance is None:
+            return None
+        if not analyzer.speaks_register_protocol():
+            return None
+        return analyzer.instance if analyzer._behind_manager() else None  # noqa: SLF001
 
     @staticmethod
     def _pin_manager_slot(analyzer: Analyzer) -> None:
@@ -1126,6 +1146,7 @@ class RpcServer:
                         if alt.probe_optional() is not None:
                             analyzer = alt
                             break
+                bound = self._bound_slot(analyzer)
             except BaseException:
                 # Nothing owns this transport until it lands in self._analyzer,
                 # so a failure here (wrong port, board unplugged mid-probe,
@@ -1160,6 +1181,7 @@ class RpcServer:
                 transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
                 link=link,
                 chain=analyzer.bscan_chain,
+                instance=bound,
                 device=getattr(analyzer.transport, "opened_device", None),
             )
 
@@ -1172,9 +1194,13 @@ class RpcServer:
             # untouched — a chain hop on the ELA control interface is unrelated.
             analyzer = self._ensure_analyzer()
             requested = req.get("chain")
-            if requested is None:
-                raise ValueError("rebind requires a chain")
-            new_chain = int(requested)
+            if requested is not None:
+                new_chain = int(requested)
+            elif "instance" in req:
+                # Only a slot: switch slots on the session's chain.
+                new_chain = analyzer.bscan_chain
+            else:
+                raise ValueError("rebind requires a chain or an instance")
             # ``instance`` names the core-manager slot on the new chain; left
             # out, a rebind to the same chain keeps the slot and one to
             # another chain binds that chain's first ELA slot, if it has a
@@ -1188,13 +1214,19 @@ class RpcServer:
                 new_instance = None
             if new_chain != analyzer.bscan_chain or new_instance != analyzer.instance:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
-                self._analyzer = Analyzer(
+                # It replaces the session only once it probes as an ELA, so a
+                # rebind to an EIO slot or an empty chain keeps the old one.
+                candidate = Analyzer(
                     analyzer.transport, chain=new_chain, instance=new_instance
                 )
-                self._pin_manager_slot(self._analyzer)
-            return self._ok(
-                chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
-            )
+                self._pin_manager_slot(candidate)
+                ident = candidate.probe()
+                bound = self._bound_slot(candidate)
+                self._analyzer = analyzer = candidate
+            else:
+                ident = analyzer.probe()
+                bound = self._bound_slot(analyzer)
+            return self._ok(chain=analyzer.bscan_chain, instance=bound, probe=ident)
 
         if cmd == "close":
             self._close_all()
