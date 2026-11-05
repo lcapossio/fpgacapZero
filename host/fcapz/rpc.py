@@ -331,7 +331,7 @@ class RpcServer:
                 "core_id": ela["core_id"],
                 "chain": analyzer.bscan_chain,
                 "base_addr": 0,
-                "instance": analyzer.instance,
+                "instance": self._bound_slot(analyzer),
                 "version_major": ela["version_major"],
                 "version_minor": ela["version_minor"],
                 "info": ela,
@@ -450,7 +450,7 @@ class RpcServer:
             "core_id": AXI_MON_MAGIC,
             "chain": analyzer.bscan_chain,
             "base_addr": 0,
-            "instance": analyzer.instance,
+            "instance": RpcServer._bound_slot(analyzer),
             "version_major": ela_ident["version_major"],
             "version_minor": ela_ident["version_minor"],
             "info": {
@@ -559,6 +559,22 @@ class RpcServer:
             raise ValueError(f"unknown ir_table: {name!r}")
         table = cls._IR_TABLES[key]
         return dict(table) if table is not None else None
+
+    @staticmethod
+    def _bound_slot(analyzer: Analyzer) -> int | None:
+        """The core-manager slot *analyzer* reaches, or ``None`` for a core
+        reached directly.
+
+        An analyzer keeps a slot it was given even on a chain without a
+        manager, where the transport ignores it; report none there.
+        """
+        if analyzer.instance is None:
+            return None
+        try:
+            behind = analyzer._behind_manager()  # noqa: SLF001
+        except Exception:  # noqa: BLE001 - report what the session asked for
+            return analyzer.instance
+        return analyzer.instance if behind else None
 
     @staticmethod
     def _pin_manager_slot(analyzer: Analyzer) -> None:
@@ -1163,7 +1179,7 @@ class RpcServer:
                 transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
                 link=link,
                 chain=analyzer.bscan_chain,
-                instance=analyzer.instance,
+                instance=self._bound_slot(analyzer),
                 device=getattr(analyzer.transport, "opened_device", None),
             )
 
@@ -1196,14 +1212,20 @@ class RpcServer:
                 new_instance = None
             if new_chain != analyzer.bscan_chain or new_instance != analyzer.instance:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
-                self._analyzer = Analyzer(
+                # It replaces the session only once it probes as an ELA, so a
+                # rebind to an EIO slot or an empty chain keeps the old one.
+                candidate = Analyzer(
                     analyzer.transport, chain=new_chain, instance=new_instance
                 )
-                self._pin_manager_slot(self._analyzer)
+                self._pin_manager_slot(candidate)
+                ident = candidate.probe()
+                self._analyzer = analyzer = candidate
+            else:
+                ident = analyzer.probe()
             return self._ok(
-                chain=self._analyzer.bscan_chain,
-                instance=self._analyzer.instance,
-                probe=self._analyzer.probe(),
+                chain=analyzer.bscan_chain,
+                instance=self._bound_slot(analyzer),
+                probe=ident,
             )
 
         if cmd == "close":

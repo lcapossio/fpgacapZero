@@ -230,7 +230,8 @@ session, e.g. to reach an AXI monitor directly.
 it before every access, so an EIO in another slot of the same hub cannot move
 it.  Without it the session is bound to the chain's first ELA slot, never to
 whichever slot the hub has active.  The response's `instance` is the slot the
-session bound, or `null` for a core reached directly.
+session bound, or `null` for a core reached directly (a slot named for a chain
+without a manager is ignored).
 
 #### `list_serial_ports`
 
@@ -306,17 +307,20 @@ are left untouched.
 {"cmd": "rebind", "chain": 2}
 ```
 
-`"instance"` selects a core-manager slot (`null` for none).  Left out, a
-rebind to the same chain keeps the session's slot and one to another chain
-binds that chain's first ELA slot when it has a manager.  With `instance` and
-no `chain`, the session switches slots on its current chain:
+`"instance"` selects a core-manager slot; `null` binds the chain's first ELA
+slot when it has a manager.  Left out, a rebind to the same chain keeps the
+session's slot and one to another chain binds that chain's first ELA slot when
+it has a manager.  With `instance` and no `chain`, the session switches slots
+on its current chain.  A target that does not probe as an ELA (an EIO slot, an
+empty chain) is refused and the session stays where it was:
 
 ```json
 {"cmd": "rebind", "instance": 1}
 ```
 
 Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "instance": null, "probe": { ... }}`
-— `instance` is the slot the session bound, and `probe` is the newly-bound
+— `instance` is the slot the session bound (`null` for a core reached
+directly, even if the request named a slot), and `probe` is the newly-bound
 core's identity (same shape as [`probe`](#probe)).
 
 #### `close`

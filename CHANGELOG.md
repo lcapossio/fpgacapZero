@@ -38,6 +38,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **RPC — a failed `rebind` dropped the working session.** A `rebind` to a
+  target that is not an ELA (an EIO slot, an empty chain) raised, but the
+  session already pointed there, so the next `probe` failed and the old
+  capture configuration was gone. The new core now replaces the session only
+  once it probes as an ELA.
+
 - **EJTAG-AXI could issue a stale command after reset.** The bridge's TCK
   logic had no reset: the command staging register was cleared only by its
   initial value or by the host's `CMD_RESET`, and it enqueues whether or not

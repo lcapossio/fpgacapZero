@@ -2024,6 +2024,34 @@ class RpcSharedEioTests(unittest.TestCase):
             server.handle({"cmd": "rebind"})
         self.assertEqual(server._analyzer.instance, 0)
 
+    def test_a_failed_rebind_keeps_the_session(self):
+        # Slot 1 is the EIO: the rebind is refused and the ELA session, with
+        # its slot, stays usable.
+        server, hub, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        analyzer = server._analyzer
+        with self.assertRaisesRegex(RuntimeError, "identity"):
+            server.handle({"cmd": "rebind", "instance": 1})
+        self.assertIs(server._analyzer, analyzer)
+        self.assertEqual(analyzer.instance, 0)
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(hub._manager_regs[0xF008], 0)
+
+    def test_a_slot_named_without_a_manager_is_reported_as_none(self):
+        from fcapz.rpc import RpcServer
+
+        transport = FakeTransport()
+        del transport._manager_regs[0xF000]
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        reply = server.handle({"cmd": "connect", "chain": 1, "instance": 7})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIsNone(reply["instance"])
+        reply = server.handle({"cmd": "rebind", "instance": 3})
+        self.assertIsNone(reply["instance"])
+        cores = server.handle({"cmd": "list_cores"})["cores"]
+        self.assertIsNone(cores[0]["instance"])
+
     def test_managed_eio_on_another_target_gets_its_own_transport(self):
         """A managed EIO on another board must not borrow the analyzer's
         transport (BUG-238)."""
