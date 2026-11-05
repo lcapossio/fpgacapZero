@@ -6,7 +6,9 @@
 // Instantiates both USE_BEHAV_ASYNC_FIFO=1 (behavioral) and
 // USE_BEHAV_ASYNC_FIFO=0 (vendor/XPM, backed by the stub) side-by-side
 // with identical stimulus.  Asserts that rd_data, rd_empty, and wr_full
-// match between the two instances at every clock edge.
+// match between the two instances at every clock edge once both are out
+// of reset busy: the XPM branch holds its reset a few wr_clk cycles after
+// rst falls, reading full and empty until then, so traffic waits for it.
 //
 // Run with:
 //   iverilog -g2012 -o fifo_equiv_tb.vvp \
@@ -52,6 +54,7 @@ module fcapz_async_fifo_equiv_tb;
     // --- DUT B: XPM stub (wraps behavioral) ---
     wire [DATA_W-1:0] rd_data_b;
     wire              rd_empty_b, wr_full_b;
+    wire              wr_rst_busy_b, rd_rst_busy_b;
 
     fcapz_async_fifo #(
         .DATA_W                (DATA_W),
@@ -60,9 +63,11 @@ module fcapz_async_fifo_equiv_tb;
     ) dut_b (
         .wr_clk   (wr_clk), .wr_rst (rst),
         .wr_en    (wr_en),  .wr_data(wr_data), .wr_full (wr_full_b),
+        .wr_rst_busy (wr_rst_busy_b),
         .wr_count (),
         .rd_clk   (rd_clk), .rd_rst (rst),
         .rd_en    (rd_en),  .rd_data(rd_data_b), .rd_empty(rd_empty_b),
+        .rd_rst_busy (rd_rst_busy_b),
         .rd_count ()
     );
 
@@ -89,20 +94,22 @@ module fcapz_async_fifo_equiv_tb;
 
     // --- Stimulus ---
     integer i;
+    // Nonblocking drives so both DUTs see inputs change after the clock edge.
     initial begin
         // Hold reset for several cycles
         @(posedge wr_clk); @(posedge wr_clk); @(posedge wr_clk);
-        rst = 0;
+        rst <= 0;
         @(posedge wr_clk);
+        while (wr_rst_busy_b || rd_rst_busy_b) @(posedge wr_clk);
 
         // Fill FIFO to capacity
         for (i = 0; i < DEPTH; i = i + 1) begin
             @(posedge wr_clk);
-            wr_data = i[DATA_W-1:0];
-            wr_en   = 1;
+            wr_data <= i[DATA_W-1:0];
+            wr_en   <= 1;
         end
         @(posedge wr_clk);
-        wr_en = 0;
+        wr_en <= 0;
 
         // Let read domain settle
         repeat (4) @(posedge rd_clk);
@@ -110,22 +117,22 @@ module fcapz_async_fifo_equiv_tb;
         // Drain FIFO
         for (i = 0; i < DEPTH; i = i + 1) begin
             @(posedge rd_clk);
-            rd_en = 1;
+            rd_en <= 1;
         end
         @(posedge rd_clk);
-        rd_en = 0;
+        rd_en <= 0;
 
         // Interleaved write+read
         repeat (4) @(posedge wr_clk);
         for (i = 0; i < DEPTH / 2; i = i + 1) begin
             @(posedge wr_clk);
-            wr_data = (i + 8'hA0) & 8'hFF;
-            wr_en   = 1;
+            wr_data <= (i + 8'hA0) & 8'hFF;
+            wr_en   <= 1;
             @(posedge rd_clk);
-            rd_en   = 1;
+            rd_en   <= 1;
         end
-        @(posedge wr_clk); wr_en = 0;
-        @(posedge rd_clk); rd_en = 0;
+        @(posedge wr_clk); wr_en <= 0;
+        @(posedge rd_clk); rd_en <= 0;
 
         // Final settle
         repeat (8) @(posedge rd_clk);
@@ -140,7 +147,7 @@ module fcapz_async_fifo_equiv_tb;
 
     // Sample both DUTs on rd_clk negedge (stable after posedge transitions)
     always @(negedge rd_clk) begin
-        if (!rst)
+        if (!rst && !wr_rst_busy_b && !rd_rst_busy_b)
             check($time);
     end
 

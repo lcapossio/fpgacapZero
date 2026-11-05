@@ -414,13 +414,29 @@ module fcapz_ejtagaxi #(
     reg                   cmdq_stage_valid;
     reg [CMDQ_W-1:0]      cmdq_stage_data;
 
+    // TCK-domain reset: axi_rst asserts it at once, and it releases on the
+    // second TCK edge after axi_rst ends. It resets the TCK sides of the async
+    // FIFOs (so their release is synchronous to TCK) and the TCK command state,
+    // so no staged command outlives a reset. That includes power-up on devices
+    // that drop register initial values (PolarFire), where axi_rst comes from
+    // the device power-on reset.
+    (* ASYNC_REG = "TRUE" *) reg [1:0] tck_rst_sync;
+    initial tck_rst_sync = 2'b11;
+    always @(posedge tck or posedge axi_rst) begin
+        if (axi_rst)
+            tck_rst_sync <= 2'b11;
+        else
+            tck_rst_sync <= {tck_rst_sync[0], 1'b0};
+    end
+    wire tck_rst = tck_rst_sync[1];
+
     wire cmdq_wr_ready        = !cmdq_wr_rst_busy;
     wire cmdq_rd_ready        = !cmdq_rd_rst_busy;
     wire respq_wr_ready       = !respq_wr_rst_busy;
     wire respq_rd_ready       = !respq_rd_rst_busy;
     wire cmdq_stage_ready     = !cmdq_stage_valid;
 
-    assign cmdq_wr_en   = cmdq_stage_valid && cmdq_wr_ready && !cmdq_full;
+    assign cmdq_wr_en   = !tck_rst && cmdq_stage_valid && cmdq_wr_ready && !cmdq_full;
     assign cmdq_wr_data = cmdq_stage_data;
 
     // ---- Async FIFO instance (burst read buffer) -----------------------------
@@ -450,7 +466,7 @@ module fcapz_ejtagaxi #(
         .XPM_FIFO_MEMORY_TYPE (CMD_FIFO_MEMORY_TYPE)
     ) u_cmd_fifo (
         .wr_clk   (tck),
-        .wr_rst   (axi_rst | cmdq_rst_tck),
+        .wr_rst   (tck_rst | cmdq_rst_tck),
         .wr_en    (cmdq_wr_en),
         .wr_data  (cmdq_wr_data),
         .wr_full  (cmdq_full),
@@ -479,7 +495,7 @@ module fcapz_ejtagaxi #(
         .wr_full  (respq_full),
         .wr_rst_busy (respq_wr_rst_busy),
         .rd_clk   (tck),
-        .rd_rst   (axi_rst | respq_rst_tck),
+        .rd_rst   (tck_rst | respq_rst_tck),
         .rd_en    (respq_rd_en),
         .rd_data  (respq_rd_data),
         .rd_empty (respq_empty),
@@ -502,7 +518,7 @@ module fcapz_ejtagaxi #(
         .wr_full  (fifo_full),
         .wr_rst_busy (),
         .rd_clk   (tck),
-        .rd_rst   (axi_rst | fifo_rst_tck),
+        .rd_rst   (tck_rst | fifo_rst_tck),
         .rd_en    (fifo_rd_en),
         .rd_data  (fifo_rdata),
         .rd_empty (fifo_empty),
@@ -1161,6 +1177,42 @@ module fcapz_ejtagaxi #(
                         end
                 endcase
             end
+        end
+
+        // tck_rst (axi_rst, synchronized to TCK) clears the same TCK state as
+        // CMD_RESET. Last in the block, so it overrides every assignment above.
+        // The FIFOs' TCK sides are held by tck_rst directly. The CMD_RESET
+        // request toggle is left alone: this block only runs on TCK edges, so
+        // clearing it here could flip it after the AXI side is out of reset
+        // and request a second reset; the AXI side rejoins the handshake
+        // from its own axi_rst.
+        if (tck_rst) begin
+            error_sticky       <= 1'b0;
+            prev_valid         <= 1'b0;
+            respq_head_seen    <= 1'b0;
+            resp_pop_pending   <= 1'b0;
+            pending_count      <= {(CMD_FIFO_AW+1){1'b0}};
+            cmdq_stage_valid   <= 1'b0;
+            cmdq_stage_data    <= {CMDQ_W{1'b0}};
+            auto_inc_addr      <= {ADDR_W{1'b0}};
+            burst_awlen        <= 8'd0;
+            burst_awsize       <= 3'b010;
+            burst_awburst      <= 2'b01;
+            burst_addr         <= {ADDR_W{1'b0}};
+            burst_cfg_valid    <= 1'b0;
+            burst_w_beats_left <= 9'd0;
+            config_rdata       <= 32'h0;
+            last_cmd           <= CMD_NOP;
+            dbg_rec_count      <= 3'd0;
+            dbg_resp_cap_rec_count <= 3'd0;
+            stream_mode        <= 1'b0;
+            stream_left        <= 32'd0;
+            stream_hold_full   <= 1'b0;
+            stream_nxt_valid   <= 1'b0;
+            stream_slot_valid  <= 1'b0;
+            stream_bitpos      <= 6'd0;
+            stream_tdi_one     <= 1'b0;
+            stream_hdr_zero    <= 1'b0;
         end
     end
 

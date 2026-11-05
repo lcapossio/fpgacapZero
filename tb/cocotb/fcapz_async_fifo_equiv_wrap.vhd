@@ -21,15 +21,15 @@ entity fcapz_async_fifo_equiv_wrap is
         rd_empty_a : out std_logic;
         rd_empty_b : out std_logic;
         wr_full_a  : out std_logic;
-        wr_full_b  : out std_logic
+        wr_full_b  : out std_logic;
+        wr_rst_busy_b : out std_logic;
+        rd_rst_busy_b : out std_logic
     );
 end entity fcapz_async_fifo_equiv_wrap;
 
 architecture sim of fcapz_async_fifo_equiv_wrap is
     signal wr_rst_busy_a : std_logic;
-    signal wr_rst_busy_b : std_logic;
     signal rd_rst_busy_a : std_logic;
-    signal rd_rst_busy_b : std_logic;
 begin
     dut_a : entity work.fcapz_async_fifo
         generic map (

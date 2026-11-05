@@ -26,7 +26,9 @@ module fcapz_async_fifo_equiv_wrap #(
     output wire              rd_empty_a,
     output wire              rd_empty_b,
     output wire              wr_full_a,
-    output wire              wr_full_b
+    output wire              wr_full_b,
+    output wire              wr_rst_busy_b,
+    output wire              rd_rst_busy_b
 );
 
     fcapz_async_fifo #(
@@ -60,14 +62,14 @@ module fcapz_async_fifo_equiv_wrap #(
         .wr_en(wr_en),
         .wr_data(wr_data),
         .wr_full(wr_full_b),
-        .wr_rst_busy(),
+        .wr_rst_busy(wr_rst_busy_b),
         .wr_count(),
         .rd_clk(rd_clk),
         .rd_rst(rst),
         .rd_en(rd_en),
         .rd_data(rd_data_b),
         .rd_empty(rd_empty_b),
-        .rd_rst_busy(),
+        .rd_rst_busy(rd_rst_busy_b),
         .rd_count()
     );
 
