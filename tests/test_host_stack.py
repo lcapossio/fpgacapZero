@@ -2052,6 +2052,52 @@ class RpcSharedEioTests(unittest.TestCase):
         cores = server.handle({"cmd": "list_cores"})["cores"]
         self.assertIsNone(cores[0]["instance"])
 
+    def test_a_slot_named_on_a_bridge_chain_never_reads_the_manager_block(self):
+        # USER4's EJTAG-AXI bridge decodes a 0xF000 read frame as burst write
+        # data; reporting the bound slot may send it only the 0x0000 frame.
+        from fcapz.rpc import RpcServer
+
+        class _BridgeChain(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.chain4_reads: list[int] = []
+
+            def read_reg(self, addr):
+                if self._active_chain == 4:
+                    self.chain4_reads.append(addr)
+                    return 0
+                return super().read_reg(addr)
+
+        transport = _BridgeChain()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        reply = server.handle({"cmd": "connect", "chain": 4, "instance": 0})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIsNone(reply["instance"])
+        self.assertTrue(transport.chain4_reads)
+        self.assertEqual(set(transport.chain4_reads), {0x0000})
+
+    def test_a_failed_slot_check_fails_the_connect(self):
+        # The manager read for the report fails: connect raises and closes the
+        # transport rather than report a slot nobody confirmed.
+        from fcapz.rpc import RpcServer
+
+        transport = FakeTransport()
+        del transport._manager_regs[0xF000]
+        transport.closed = 0
+
+        def close():
+            transport.closed += 1
+
+        transport.close = close
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        with mock.patch.object(Analyzer, "_behind_manager", side_effect=OSError("lost")):
+            with self.assertRaises(OSError):
+                server.handle({"cmd": "connect", "chain": 1, "instance": 7})
+        self.assertIsNone(server._analyzer)
+        self.assertEqual(transport.closed, 1)
+
     def test_managed_eio_on_another_target_gets_its_own_transport(self):
         """A managed EIO on another board must not borrow the analyzer's
         transport (BUG-238)."""

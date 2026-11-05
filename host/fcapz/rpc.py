@@ -566,15 +566,16 @@ class RpcServer:
         reached directly.
 
         An analyzer keeps a slot it was given even on a chain without a
-        manager, where the transport ignores it; report none there.
+        manager, where the transport ignores it; report none there.  The
+        manager block is read only once ``0x0000`` has answered as an ELA or
+        EIO: on a bridge chain a ``0xF000`` read is a burst command.  A failed
+        read raises rather than report a slot nobody confirmed.
         """
         if analyzer.instance is None:
             return None
-        try:
-            behind = analyzer._behind_manager()  # noqa: SLF001
-        except Exception:  # noqa: BLE001 - report what the session asked for
-            return analyzer.instance
-        return analyzer.instance if behind else None
+        if not analyzer.speaks_register_protocol():
+            return None
+        return analyzer.instance if analyzer._behind_manager() else None  # noqa: SLF001
 
     @staticmethod
     def _pin_manager_slot(analyzer: Analyzer) -> None:
@@ -1145,6 +1146,7 @@ class RpcServer:
                         if alt.probe_optional() is not None:
                             analyzer = alt
                             break
+                bound = self._bound_slot(analyzer)
             except BaseException:
                 # Nothing owns this transport until it lands in self._analyzer,
                 # so a failure here (wrong port, board unplugged mid-probe,
@@ -1179,7 +1181,7 @@ class RpcServer:
                 transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
                 link=link,
                 chain=analyzer.bscan_chain,
-                instance=self._bound_slot(analyzer),
+                instance=bound,
                 device=getattr(analyzer.transport, "opened_device", None),
             )
 
@@ -1219,14 +1221,12 @@ class RpcServer:
                 )
                 self._pin_manager_slot(candidate)
                 ident = candidate.probe()
+                bound = self._bound_slot(candidate)
                 self._analyzer = analyzer = candidate
             else:
                 ident = analyzer.probe()
-            return self._ok(
-                chain=analyzer.bscan_chain,
-                instance=self._bound_slot(analyzer),
-                probe=ident,
-            )
+                bound = self._bound_slot(analyzer)
+            return self._ok(chain=analyzer.bscan_chain, instance=bound, probe=ident)
 
         if cmd == "close":
             self._close_all()
