@@ -29,6 +29,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and over OpenOCD through `fcapz openocd-bridge`); ECP5 and Efinix have no
   board build.
 
+- **RPC — the bound core-manager slot is reported.** `connect` and `rebind`
+  responses carry `instance`, the slot the session bound (`null` for a core
+  reached directly), so a client that let the server pick the first ELA slot
+  knows which one it got. `rebind` with only `instance` switches slots on the
+  current chain, and every `list_cores` entry has `instance`, including cores
+  on other chains and the AXI monitor.
+
 ### Fixed
 
 - **EJTAG-AXI could issue a stale command after reset.** The bridge's TCK

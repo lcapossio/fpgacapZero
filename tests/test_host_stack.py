@@ -2000,6 +2000,30 @@ class RpcSharedEioTests(unittest.TestCase):
         # The fake answers on every chain: chain 2's first ELA slot.
         self.assertEqual(server._analyzer.instance, 0)
 
+    def test_connect_and_rebind_report_the_bound_slot(self):
+        server, hub, _ = self._server()
+        hub._cores[1], hub._slots[1] = ELA_CORE_ID, dict(hub._slots[0])
+        reply = server.handle({"cmd": "connect", "chain": 1})
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 0))
+        reply = server.handle({"cmd": "rebind", "chain": 1, "instance": 1})
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 1))
+
+    def test_rebind_with_only_an_instance_stays_on_the_chain(self):
+        server, hub, _ = self._server()
+        hub._cores[1], hub._slots[1] = ELA_CORE_ID, dict(hub._slots[0])
+        server.handle({"cmd": "connect", "chain": 1})
+        reply = server.handle({"cmd": "rebind", "instance": 1})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 1))
+        self.assertEqual(hub._manager_regs[0xF008], 1)
+
+    def test_rebind_without_a_chain_or_an_instance_is_refused(self):
+        server, _, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        with self.assertRaisesRegex(ValueError, "chain or an instance"):
+            server.handle({"cmd": "rebind"})
+        self.assertEqual(server._analyzer.instance, 0)
+
     def test_managed_eio_on_another_target_gets_its_own_transport(self):
         """A managed EIO on another board must not borrow the analyzer's
         transport (BUG-238)."""

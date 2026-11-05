@@ -182,7 +182,7 @@ or on the analyzer's chain — shares that transport and works.
 The chain carrying the burst reader's data DR is also excluded from every core
 sweep: it is a streaming interface, not a register one.
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1}`
+Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1, "instance": null}`
 
 `transport_kind` is `"jtag"` for a link that reaches the fabric through a real
 TAP, or `"bytestream"` for one that addresses chains directly by index. IR-table
@@ -229,7 +229,8 @@ session, e.g. to reach an AXI monitor directly.
 `"instance"` binds the session to a core-manager slot: the analyzer selects
 it before every access, so an EIO in another slot of the same hub cannot move
 it.  Without it the session is bound to the chain's first ELA slot, never to
-whichever slot the hub has active.
+whichever slot the hub has active.  The response's `instance` is the slot the
+session bound, or `null` for a core reached directly.
 
 #### `list_serial_ports`
 
@@ -307,10 +308,16 @@ are left untouched.
 
 `"instance"` selects a core-manager slot (`null` for none).  Left out, a
 rebind to the same chain keeps the session's slot and one to another chain
-selects none.
+binds that chain's first ELA slot when it has a manager.  With `instance` and
+no `chain`, the session switches slots on its current chain:
 
-Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
-— `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
+```json
+{"cmd": "rebind", "instance": 1}
+```
+
+Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "instance": null, "probe": { ... }}`
+— `instance` is the slot the session bound, and `probe` is the newly-bound
+core's identity (same shape as [`probe`](#probe)).
 
 #### `close`
 
@@ -431,8 +438,10 @@ connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
 USER chains (1, 2 and 5) for further cores — a plain ELA or an AXI monitor — so
 clients can list everything and offer a switch. When the connected chain is a
 core manager, the manager (`type` `manager`) and its other slots are listed
-too, each with its slot in `instance`. Each entry has `type`, `name`,
-`core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+too, each with its slot in `instance`. A core manager on another chain is
+listed once, by the ELA slot a `rebind` to that chain binds. Each entry has
+`type`, `name`, `core_id`, `chain`, `base_addr`, `instance` (the manager slot,
+`null` for a core reached directly), `version_major`/`version_minor`, and a
 type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, the
 manager's probe dict, or the monitor geometry `{proto, addr_w, data_w, decode,
 sample_width}` for `axi_mon`).
@@ -447,10 +456,12 @@ Response:
   "ok": true,
   "cores": [
     {"type": "ela", "name": "Embedded Logic Analyzer", "core_id": 19521,
-     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 5,
+     "chain": 1, "base_addr": 0, "instance": null, "version_major": 0,
+     "version_minor": 5,
      "info": {"sample_width": 8, "depth": 64, "num_channels": 6}},
     {"type": "eio", "name": "Embedded I/O", "core_id": 18767,
-     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 5,
+     "chain": 1, "base_addr": 32768, "instance": null, "version_major": 0,
+     "version_minor": 5,
      "info": {"in_w": 2, "out_w": 6}}
   ]
 }
