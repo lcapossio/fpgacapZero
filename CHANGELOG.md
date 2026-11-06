@@ -36,7 +36,36 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   current chain, and every `list_cores` entry has `instance`, including cores
   on other chains and the AXI monitor.
 
+- **AXI monitor wrappers for ECP5, PolarFire, Efinix and Gowin.**
+  `fcapz_axi_mon_ecp5` (`JTAGG`, `CTRL_CHAIN` 1 = ER1 / 2 = ER2),
+  `fcapz_axi_mon_polarfire` (`UJTAG`, `IR_USER1`), `fcapz_axi_mon_efinix`
+  (`jtag1_*` ports to an Interface Designer User TAP block) and
+  `fcapz_axi_mon_gowin` (`GW_JTAG`) join the Xilinx and Intel wrappers, with
+  VHDL twins. ECP5, PolarFire and Efinix burst on the monitor's chain;
+  Gowin is register-only. ECP5, PolarFire and Gowin have one TAP primitive per
+  device and the hubs have no AXI monitor slot, so there the monitor is the
+  only fcapz core. A new cocotb test drives all six wrappers through their
+  TAP models in Verilog and VHDL: identity, a capture triggered on a write
+  address, and readback through the register window and the burst path. No
+  hardware build yet.
+
 ### Fixed
+
+- **PolarFire took any `IR_USER1` / `IR_USER2` opcode.** An opcode outside
+  the UJTAG user range (`0x10..0x7F`), such as `0xFF` (BYPASS), built a core
+  the host could never reach. `jtag_tap_polarfire` now flags one, or two equal
+  opcodes, with the same check the wrappers use for `CTRL_CHAIN` (Verilog
+  `$error`, VHDL `assert ... severity failure`). This covers the ELA, EIO, hub
+  and AXI monitor wrappers. `IR_USER2` is checked only where USER2 is used
+  (ELA with `SINGLE_CHAIN_BURST=0`, `BURST_EN=1`); elsewhere the TAP's new
+  `CH2_EN=0` leaves it undecoded, so a single-chain core may still set
+  `IR_USER1` to `0x21` next to the default `IR_USER2`.
+- **The VHDL ELA core failed Libero synthesis with `TRIG_STAGES` > 1.**
+  Synplify maps the sequencer comparator arrays to RAM with a global reset and
+  rejects their initial values (MF682). The arrays no longer have initial
+  values, as in the Verilog core; the reset loads them. This hit the PolarFire
+  VHDL ELA built with more than one stage and the PolarFire VHDL AXI monitor
+  at its default `TRIG_STAGES=4`.
 
 - **RPC — a failed `rebind` dropped the working session.** A `rebind` to a
   target that is not an ELA (an EIO slot, an empty chain) raised, but the

@@ -9,11 +9,13 @@ use ieee.numeric_std.all;
 -- rtl/jtag_tap/jtag_tap_polarfire.v).  UJTAG's TCK/TMS/TDI/TRSTB/TDO pins
 -- must reach top-level ports; they are passed through on the *_pad_* ports.
 -- USER1/USER2 default to 0x20/0x21: on PolarFire SoC the MSS debug module
--- answers at 0x10/0x11.
+-- answers at 0x10/0x11.  CH2_EN = 0 leaves IR_USER2 undecoded and unchecked
+-- for wrappers that use USER1 only.
 entity jtag_tap_polarfire is
     generic (
         IR_USER1 : std_logic_vector(7 downto 0) := x"20";
-        IR_USER2 : std_logic_vector(7 downto 0) := x"21"
+        IR_USER2 : std_logic_vector(7 downto 0) := x"21";
+        CH2_EN   : natural := 1
     );
     port (
         tck_pad_i   : in  std_logic;
@@ -68,8 +70,18 @@ architecture rtl of jtag_tap_polarfire is
     signal is_user2 : std_logic;
     signal utdo     : std_logic;
 begin
+    -- An opcode outside the user range selects a built-in instruction
+    -- (BYPASS for 0xFF) instead, and the chain is unreachable.
+    assert unsigned(IR_USER1) >= 16 and unsigned(IR_USER1) <= 127
+        report "jtag_tap_polarfire: IR_USER1 must be a user opcode 0x10..0x7F"
+        severity failure;
+    assert CH2_EN = 0 or (unsigned(IR_USER2) >= 16 and unsigned(IR_USER2) <= 127
+                          and IR_USER1 /= IR_USER2)
+        report "jtag_tap_polarfire: IR_USER2 must be a user opcode 0x10..0x7F other than IR_USER1"
+        severity failure;
+
     is_user1 <= '1' when uireg = IR_USER1 else '0';
-    is_user2 <= '1' when uireg = IR_USER2 else '0';
+    is_user2 <= '1' when CH2_EN /= 0 and uireg = IR_USER2 else '0';
     utdo <= ch1_tdo when is_user1 = '1' else
             ch2_tdo when is_user2 = '1' else
             '0';

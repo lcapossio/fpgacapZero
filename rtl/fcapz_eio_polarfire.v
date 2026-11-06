@@ -54,7 +54,8 @@ module fcapz_eio_polarfire #(
     // ---- TAP wrapper (USER1 used; USER2 tied off with ch2_tdo=0) ----
     jtag_tap_polarfire #(
         .IR_USER1(IR_USER1),
-        .IR_USER2(IR_USER2)
+        .IR_USER2(IR_USER2),
+        .CH2_EN(0)
     ) u_tap (
         .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
         .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),

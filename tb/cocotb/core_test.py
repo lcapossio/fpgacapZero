@@ -1564,7 +1564,7 @@ class _DebugMultiBench:
         pin["shift"].value = 1
         for i in range(bits):
             pin["tdi"].value = (frame >> i) & 1
-            if int(self.dut.tap_tdo.value):
+            if self._tdo():
                 captured |= 1 << i
             await self.tck_tick()
         pin["shift"].value = 0
@@ -1575,6 +1575,9 @@ class _DebugMultiBench:
         if "sel" in pin:
             pin["sel"].value = 0
         return captured
+
+    def _tdo(self) -> int:
+        return int(self.dut.tap_tdo.value)
 
     async def read(self, addr: int) -> int:
         await self.scan(49, make_frame(addr, 0, False))
@@ -2009,10 +2012,13 @@ class _GowinDebugMultiBench(_DebugMultiBench):
         prim.update_dr_o.value = update
         prim.tdi_o.value = tdi
         await Timer(50, unit="ns")
-        tdo = (int(self.dut.tap_tdo.value) >> self.chain_idx) & 1
+        tdo = self._tdo()
         prim.tck_o.value = 0
         await Timer(50, unit="ns")
         return tdo
+
+    def _tdo(self) -> int:
+        return (int(self.dut.tap_tdo.value) >> self.chain_idx) & 1
 
     async def idle(self, n: int) -> None:
         for _ in range(n):
@@ -2070,6 +2076,159 @@ async def fcapz_debug_multi_gowin(dut):
         dut.eio_probe_in.value = level
         await tb.idle(8)
         assert await tb.read(0x0010) == level
+
+
+# fcapz_axi_mon_<vendor> wrappers as the fcapz_axi_mon_* targets in
+# sim/run_cocotb.py build them: AXI4-Lite 32/32 (152-bit samples), DEPTH 64,
+# one trigger stage (so TRIG_VALUE/TRIG_MASK trigger), on the chain or IR the
+# debug-multi benches drive.
+# The flattened sample, LSB first: (port, width) as fcapz_axi_mon packs it.
+_AXI_MON_FIELDS = (
+    ("AWADDR", 32), ("AWPROT", 3), ("AWVALID", 1), ("AWREADY", 1),
+    ("WDATA", 32), ("WSTRB", 4), ("WVALID", 1), ("WREADY", 1),
+    ("BRESP", 2), ("BVALID", 1), ("BREADY", 1),
+    ("ARADDR", 32), ("ARPROT", 3), ("ARVALID", 1), ("ARREADY", 1),
+    ("RDATA", 32), ("RRESP", 2), ("RVALID", 1), ("RREADY", 1),
+)
+_AXI_MON_SAMPLE_W = sum(width for _, width in _AXI_MON_FIELDS)
+_AXI_MON_WORDS = (_AXI_MON_SAMPLE_W + 31) // 32
+
+
+def _axi_mon_flatten(beat: dict[str, int]) -> int:
+    sample, pos = 0, 0
+    for name, width in _AXI_MON_FIELDS:
+        sample |= beat[name] << pos
+        pos += width
+    return sample
+
+
+class _AxiMonBench:
+    """Starts an fcapz_axi_mon_<vendor> wrapper in place of a debug-multi
+    shell; the vendor bench it is mixed into drives the TAP."""
+
+    async def start(self) -> None:
+        dut = self.dut
+        self._tap_init()
+        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i"):
+            if hasattr(dut, name):
+                getattr(dut, name).value = 0
+        for name, _ in _AXI_MON_FIELDS:
+            getattr(dut, name).value = 0
+        dut.trigger_in.value = 0
+        dut.ARESETN.value = 0
+        cocotb.start_soon(Clock(dut.ACLK, 8, unit="ns").start())
+        await self.idle(8)
+        dut.ARESETN.value = 1
+        await self.idle(12)
+        if isinstance(self, _GowinDebugMultiBench):
+            await self.scan(49)  # sets jtag_tap_gowin's hold and chain flags
+            await self.idle(4)
+
+    def _tdo(self) -> int:
+        """TDO where the TAP primitive takes it (Efinix: the exported port),
+        so a broken return path fails the test."""
+        if isinstance(self, _GowinDebugMultiBench):
+            pin = getattr(self.prim, f"tdo_er{self.chain_idx + 1}_i")
+        elif hasattr(self.dut, "jtag1_tdo"):
+            pin = self.dut.jtag1_tdo
+        else:
+            pin = next(getattr(self.prim, name) for name in ("UTDO", "TDO", "tdo")
+                       if hasattr(self.prim, name))
+        return int(pin.value)
+
+    async def axi_stream(self, beats: list[dict[str, int]]) -> None:
+        """Drive one beat per ACLK on every monitored input, then idle."""
+        dut = self.dut
+        for beat in beats:
+            await RisingEdge(dut.ACLK)
+            for name, value in beat.items():
+                getattr(dut, name).value = value
+        await RisingEdge(dut.ACLK)
+        for name, _ in _AXI_MON_FIELDS:
+            getattr(dut, name).value = 0
+
+
+class _AxiMonDefaultBench(_AxiMonBench, _DebugMultiBench):
+    pass
+
+
+class _AxiMonEcp5Bench(_AxiMonBench, _Ecp5DebugMultiBench):
+    pass
+
+
+class _AxiMonGowinBench(_AxiMonBench, _GowinDebugMultiBench):
+    pass
+
+
+@cocotb.test()
+async def fcapz_axi_mon_vendor(dut):
+    """An fcapz_axi_mon_<vendor> wrapper through its vendor TAP: identity, a
+    capture triggered on an AXI write address, read back through the register
+    window and, except on register-only Gowin, the burst path."""
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    gowin = "_gowin" in target
+    tb = (_AxiMonGowinBench if gowin else
+          _AxiMonEcp5Bench if "_ecp5" in target else _AxiMonDefaultBench)(dut)
+    await tb.start()
+
+    assert await tb.read(0x0000) & 0xFFFF == 0x4C41
+    assert await tb.read(0x000C) == _AXI_MON_SAMPLE_W
+    amid = await tb.read(0x00E8)
+    assert amid >> 16 == 0x414D, f"AXI_MON_ID {amid:#x}"
+    assert (amid >> 8) & 0xFF == 1, f"AXI_MON_ID protocol {amid:#x}"
+
+    # Every field of every beat random, except AWADDR, which steps so the
+    # trigger matches only the third beat: the pretrigger samples are beats
+    # too, and a dropped or crossed field changes the sample.
+    pretrig, posttrig, base, step = 2, 5, 0x4000_0000, 4
+    rng = random.Random(0xA11)
+    beats = [{name: rng.getrandbits(width) for name, width in _AXI_MON_FIELDS}
+             for _ in range(pretrig + posttrig + 8)]
+    for i, beat in enumerate(beats):
+        beat["AWADDR"] = base + i * step
+    await tb.write(0x0014, pretrig)
+    await tb.write(0x0018, posttrig)
+    await tb.write(0x0020, 1)
+    await tb.write(0x0024, base + pretrig * step)  # awaddr is sample[31:0]
+    await tb.write(0x0028, 0xFFFF_FFFF)
+    await tb.write(0x0004, 1)
+    for _ in range(100):
+        if int(dut.armed_out.value):
+            break
+        await tb.idle(4)
+    assert int(dut.armed_out.value), "arm never reached the AXI clock domain"
+
+    await tb.axi_stream(beats)
+    status = 0
+    for _ in range(200):
+        status = await tb.read(0x0008)
+        if status & 0x4:
+            break
+        await tb.idle(8)
+    assert status & 0x4, f"capture never reached DONE (STATUS {status:#x})"
+    capture_len = pretrig + posttrig + 1
+    assert await tb.read(0x001C) == capture_len
+
+    samples = []
+    for i in range(capture_len):
+        sample = 0
+        for w in range(_AXI_MON_WORDS):
+            sample |= await tb.read(0x0100 + 4 * (i * _AXI_MON_WORDS + w)) << (32 * w)
+        samples.append(sample)
+    for i, sample in enumerate(samples):
+        expected = _axi_mon_flatten(beats[i])
+        assert sample == expected, f"sample {i}: {sample:#x}, expected {expected:#x}"
+
+    if gowin:
+        return
+    # One 152-bit sample per 256-bit burst scan, after the priming scan.
+    await tb.write(0x002C, 0)
+    await tb.idle(160)
+    await tb.scan(_DEBUG_MULTI_BURST_W)
+    for i in range(capture_len):
+        packet = await tb.scan(_DEBUG_MULTI_BURST_W)
+        expected = _axi_mon_flatten(beats[i])
+        assert packet & width_mask(_AXI_MON_SAMPLE_W) == expected, f"burst sample {i}"
 
 
 @cocotb.test()

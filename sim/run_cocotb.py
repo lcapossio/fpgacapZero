@@ -144,6 +144,60 @@ def _debug_multi_target(vendor: str, *, tlr_reset: bool = False, powerup: str = 
     )
 
 
+# fcapz_axi_mon_<vendor> on the chain or IR the debug-multi benches drive.
+_AXI_MON_SHAPE = {"DEPTH": 64, "TRIG_STAGES": 1}
+_AXI_MON_PARAMS = {
+    **_DEBUG_MULTI_PARAMS,
+    "gowin": {"CTRL_CHAIN": 2},
+}
+_AXI_MON_TAP_SRC = {
+    **_DEBUG_MULTI_TAP_SRC,
+    "gowin": ((SIM / "gw_jtag_stub.v", RTL / "jtag_tap" / "jtag_tap_gowin.v",
+               RTL / "dff_sync.v", RTL / "dff_reg_sync.v"),
+              (RTL / "vhdl" / "gowin" / "gw_jtag.vhd",
+               RTL / "vhdl" / "core" / "dff_sync.vhd",
+               RTL / "vhdl" / "core" / "dff_reg_sync.vhd",
+               RTL / "vhdl" / "jtag_tap" / "jtag_tap_gowin.vhd")),
+}
+
+
+def _axi_mon_target(vendor: str) -> Target:
+    """One fcapz_axi_mon_<vendor> wrapper driven at its TAP primitive's pins.
+
+    Gowin is register-only (jtag_reg_iface_gowin); the others share the
+    single-chain register/burst pipe.
+    """
+    tap_v, tap_vhdl = _AXI_MON_TAP_SRC[vendor]
+    iface = "jtag_reg_iface_gowin" if vendor == "gowin" else "jtag_pipe_iface"
+    return Target(
+        f"fcapz_axi_mon_{vendor}",
+        f"fcapz_axi_mon_{vendor}",
+        (*tap_v,
+         RTL / "reset_sync.v",
+         RTL / "dpram.v",
+         RTL / "trig_compare.v",
+         RTL / "fcapz_ela.v",
+         RTL / f"{iface}.v",
+         RTL / "fcapz_axi_mon.v",
+         RTL / f"fcapz_axi_mon_{vendor}.v"),
+        "fcapz_axi_mon_vendor",
+        # One trigger stage, so TRIG_VALUE/TRIG_MASK trigger.  Neither
+        # generic has dependents, so GHDL can override them too.
+        {**_AXI_MON_PARAMS[vendor], **_AXI_MON_SHAPE},
+        (*_VHDL_CORE_PKGS,
+         *tap_vhdl,
+         RTL / "vhdl" / "core" / "reset_sync.vhd",
+         RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+         RTL / "vhdl" / "core" / "trig_compare.vhd",
+         RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+         RTL / "vhdl" / "core" / f"{iface}.vhd",
+         RTL / "vhdl" / "core" / "fcapz_axi_mon.vhd",
+         RTL / "vhdl" / f"fcapz_axi_mon_{vendor}.vhd"),
+        # The VHDL PolarFire wrapper keeps its default IR_USER1, as the hub does.
+        vhdl_parameters=_AXI_MON_SHAPE if vendor == "polarfire" else None,
+    )
+
+
 TARGETS: tuple[Target, ...] = (
     Target("trig_compare_light", "trig_compare", _TRIG_COMPARE_SRC,
            "trig_compare_light", {"W": 8, "REL_COMPARE": 0},
@@ -346,6 +400,12 @@ TARGETS: tuple[Target, ...] = (
          RTL / "vhdl" / "core" / "fcapz_hub_reset.vhd",
          RTL / "vhdl" / "fcapz_debug_multi_gowin.vhd"),
     ),
+    _axi_mon_target("xilinx7"),
+    _axi_mon_target("intel"),
+    _axi_mon_target("ecp5"),
+    _axi_mon_target("polarfire"),
+    _axi_mon_target("efinix"),
+    _axi_mon_target("gowin"),
     _debug_multi_target("xilinx7", tlr_reset=True),
     _debug_multi_target("xilinxus", tlr_reset=True),
     _debug_multi_target("intel", tlr_reset=True),
