@@ -311,10 +311,12 @@ architecture rtl of fcapz_ela is
     signal jtag_sq_value     : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_sq_mask      : std_logic_vector(31 downto 0) := (others => '0');
     signal jtag_seq_cfg      : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal jtag_seq_value_a  : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal jtag_seq_mask_a   : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
-    signal jtag_seq_value_b  : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal jtag_seq_mask_b   : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
+    -- No initializers on the comparator arrays (as in rtl/fcapz_ela.v): Libero
+    -- maps them to RAM with a global reset and rejects initial values (MF682).
+    signal jtag_seq_value_a  : reg32_array_t(0 to TRIG_STAGES - 1);
+    signal jtag_seq_mask_a   : reg32_array_t(0 to TRIG_STAGES - 1);
+    signal jtag_seq_value_b  : reg32_array_t(0 to TRIG_STAGES - 1);
+    signal jtag_seq_mask_b   : reg32_array_t(0 to TRIG_STAGES - 1);
     signal jtag_decim        : std_logic_vector(23 downto 0) := (others => '0');
     signal jtag_trig_ext     : std_logic_vector(1 downto 0) := std_logic_vector(to_unsigned(DEFAULT_TRIG_EXT mod 4, 2));
     signal jtag_probe_sel    : natural range 0 to 255 := 0;

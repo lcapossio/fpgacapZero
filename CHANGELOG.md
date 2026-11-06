@@ -57,6 +57,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   opcodes, with the same check the wrappers use for `CTRL_CHAIN` (Verilog
   `$error`, VHDL `assert ... severity failure`). This covers the ELA, EIO, hub
   and AXI monitor wrappers.
+- **The VHDL ELA core failed Libero synthesis with `TRIG_STAGES` > 1.**
+  Synplify maps the sequencer comparator arrays to RAM with a global reset and
+  rejects their initial values (MF682). The arrays no longer have initial
+  values, as in the Verilog core; the reset loads them. This hit the PolarFire
+  VHDL ELA built with more than one stage and the PolarFire VHDL AXI monitor
+  at its default `TRIG_STAGES=4`.
 
 - **RPC — a failed `rebind` dropped the working session.** A `rebind` to a
   target that is not an ELA (an EIO slot, an empty chain) raised, but the
