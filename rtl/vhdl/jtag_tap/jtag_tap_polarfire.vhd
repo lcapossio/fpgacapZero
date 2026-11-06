@@ -68,6 +68,14 @@ architecture rtl of jtag_tap_polarfire is
     signal is_user2 : std_logic;
     signal utdo     : std_logic;
 begin
+    -- An opcode outside the user range selects a built-in instruction
+    -- (BYPASS for 0xFF) instead, and the chain is unreachable.
+    assert unsigned(IR_USER1) >= 16 and unsigned(IR_USER1) <= 127
+        and unsigned(IR_USER2) >= 16 and unsigned(IR_USER2) <= 127
+        and IR_USER1 /= IR_USER2
+        report "jtag_tap_polarfire: IR_USER1 / IR_USER2 must be distinct user opcodes 0x10..0x7F"
+        severity failure;
+
     is_user1 <= '1' when uireg = IR_USER1 else '0';
     is_user2 <= '1' when uireg = IR_USER2 else '0';
     utdo <= ch1_tdo when is_user1 = '1' else

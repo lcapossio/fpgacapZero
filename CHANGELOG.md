@@ -51,6 +51,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **PolarFire took any `IR_USER1` / `IR_USER2` opcode.** An opcode outside
+  the UJTAG user range (`0x10..0x7F`), such as `0xFF` (BYPASS), built a core
+  the host could never reach. `jtag_tap_polarfire` now flags one, or two equal
+  opcodes, with the same check the wrappers use for `CTRL_CHAIN` (Verilog
+  `$error`, VHDL `assert ... severity failure`). This covers the ELA, EIO, hub
+  and AXI monitor wrappers.
+
 - **RPC — a failed `rebind` dropped the working session.** A `rebind` to a
   target that is not an ELA (an EIO slot, an empty chain) raised, but the
   session already pointed there, so the next `probe` failed and the old

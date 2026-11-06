@@ -55,6 +55,16 @@ module jtag_tap_polarfire #(
     output wire ch2_sel
 );
 
+    // An opcode outside the user range selects a built-in instruction
+    // (BYPASS for 0xFF) instead, and the chain is unreachable.
+    initial begin
+        if (IR_USER1 < 8'h10 || IR_USER1 > 8'h7F || IR_USER2 < 8'h10 || IR_USER2 > 8'h7F
+                || IR_USER1 == IR_USER2) begin
+            $error("jtag_tap_polarfire: IR_USER1 %h / IR_USER2 %h must be distinct user opcodes 10..7f",
+                   IR_USER1, IR_USER2);
+        end
+    end
+
     wire [7:0] uireg;
     wire       utdi, udrck, udrcap, udrsh, udrupd;
     wire       urstb_unused;
