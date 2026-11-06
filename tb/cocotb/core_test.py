@@ -2072,6 +2072,132 @@ async def fcapz_debug_multi_gowin(dut):
         assert await tb.read(0x0010) == level
 
 
+# fcapz_axi_mon_<vendor> wrappers as the fcapz_axi_mon_* targets in
+# sim/run_cocotb.py build them: AXI4-Lite 32/32 (152-bit samples), DEPTH 64,
+# one trigger stage (so TRIG_VALUE/TRIG_MASK trigger), on the chain or IR the
+# debug-multi benches drive.
+_AXI_MON_SAMPLE_W = 152
+_AXI_MON_WORDS = (_AXI_MON_SAMPLE_W + 31) // 32
+_AXI_MON_INPUTS = (
+    "AWADDR", "AWPROT", "AWVALID", "AWREADY", "WDATA", "WSTRB", "WVALID", "WREADY",
+    "BRESP", "BVALID", "BREADY", "ARADDR", "ARPROT", "ARVALID", "ARREADY",
+    "RDATA", "RRESP", "RVALID", "RREADY", "trigger_in",
+)
+
+
+class _AxiMonBench:
+    """Starts an fcapz_axi_mon_<vendor> wrapper in place of a debug-multi
+    shell; the vendor bench it is mixed into drives the TAP."""
+
+    async def start(self) -> None:
+        dut = self.dut
+        self._tap_init()
+        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i"):
+            if hasattr(dut, name):
+                getattr(dut, name).value = 0
+        for name in _AXI_MON_INPUTS:
+            getattr(dut, name).value = 0
+        dut.ARESETN.value = 0
+        cocotb.start_soon(Clock(dut.ACLK, 8, unit="ns").start())
+        await self.idle(8)
+        dut.ARESETN.value = 1
+        await self.idle(12)
+        if isinstance(self, _GowinDebugMultiBench):
+            await self.scan(49)  # sets jtag_tap_gowin's hold and chain flags
+            await self.idle(4)
+
+    async def axi_write_stream(self, base: int, count: int, step: int) -> None:
+        """One AW+W+B handshake per ACLK, the address advancing by *step*."""
+        dut = self.dut
+        await RisingEdge(dut.ACLK)
+        for name in ("AWVALID", "AWREADY", "WVALID", "WREADY", "BVALID", "BREADY"):
+            getattr(dut, name).value = 1
+        dut.WSTRB.value = 0xF
+        for i in range(count):
+            dut.AWADDR.value = base + i * step
+            dut.WDATA.value = 0xD000_0000 + i
+            await RisingEdge(dut.ACLK)
+        for name in ("AWADDR", "AWVALID", "AWREADY", "WVALID", "WREADY", "BVALID", "BREADY"):
+            getattr(dut, name).value = 0
+
+
+class _AxiMonDefaultBench(_AxiMonBench, _DebugMultiBench):
+    pass
+
+
+class _AxiMonEcp5Bench(_AxiMonBench, _Ecp5DebugMultiBench):
+    pass
+
+
+class _AxiMonGowinBench(_AxiMonBench, _GowinDebugMultiBench):
+    pass
+
+
+@cocotb.test()
+async def fcapz_axi_mon_vendor(dut):
+    """An fcapz_axi_mon_<vendor> wrapper through its vendor TAP: identity, a
+    capture triggered on an AXI write address, read back through the register
+    window and, except on register-only Gowin, the burst path."""
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    gowin = "_gowin" in target
+    tb = (_AxiMonGowinBench if gowin else
+          _AxiMonEcp5Bench if "_ecp5" in target else _AxiMonDefaultBench)(dut)
+    await tb.start()
+
+    assert await tb.read(0x0000) & 0xFFFF == 0x4C41
+    assert await tb.read(0x000C) == _AXI_MON_SAMPLE_W
+    amid = await tb.read(0x00E8)
+    assert amid >> 16 == 0x414D, f"AXI_MON_ID {amid:#x}"
+    assert (amid >> 8) & 0xFF == 1, f"AXI_MON_ID protocol {amid:#x}"
+
+    # Trigger on the third write of a stream, so the pretrigger samples are
+    # writes too and every sample differs.
+    pretrig, posttrig, base, step = 2, 5, 0x4000_0000, 4
+    await tb.write(0x0014, pretrig)
+    await tb.write(0x0018, posttrig)
+    await tb.write(0x0020, 1)
+    await tb.write(0x0024, base + pretrig * step)  # awaddr is sample[31:0]
+    await tb.write(0x0028, 0xFFFF_FFFF)
+    await tb.write(0x0004, 1)
+    for _ in range(100):
+        if int(dut.armed_out.value):
+            break
+        await tb.idle(4)
+    assert int(dut.armed_out.value), "arm never reached the AXI clock domain"
+
+    await tb.axi_write_stream(base, pretrig + posttrig + 8, step)
+    status = 0
+    for _ in range(200):
+        status = await tb.read(0x0008)
+        if status & 0x4:
+            break
+        await tb.idle(8)
+    assert status & 0x4, f"capture never reached DONE (STATUS {status:#x})"
+    capture_len = pretrig + posttrig + 1
+    assert await tb.read(0x001C) == capture_len
+
+    samples = []
+    for i in range(capture_len):
+        sample = 0
+        for w in range(_AXI_MON_WORDS):
+            sample |= await tb.read(0x0100 + 4 * (i * _AXI_MON_WORDS + w)) << (32 * w)
+        samples.append(sample)
+    for i, sample in enumerate(samples):
+        assert sample & 0xFFFF_FFFF == base + i * step, (
+            f"sample {i} awaddr {sample & 0xFFFF_FFFF:#x}")
+        assert (sample >> 35) & 1, f"sample {i} awvalid clear"
+
+    if gowin:
+        return
+    # One 152-bit sample per 256-bit burst scan, after the priming scan.
+    await tb.write(0x002C, 0)
+    await tb.idle(160)
+    await tb.scan(_DEBUG_MULTI_BURST_W)
+    for i in range(capture_len):
+        packet = await tb.scan(_DEBUG_MULTI_BURST_W)
+        assert packet & width_mask(_AXI_MON_SAMPLE_W) == samples[i], f"burst sample {i}"
+
+
 @cocotb.test()
 async def fcapz_async_fifo_equiv(dut):
     wr_clk_task = cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
