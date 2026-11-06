@@ -232,7 +232,7 @@ changes needed.  See [chapter 14](14_transports.md) and
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ✅ DE25-Nano (Agilex 5) / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC | `UJTAG` | [`fcapz_*_polarfire.v`](../rtl/) | ✅ PolarFire SoC Discovery Kit (MPFS095T) |
-| Efinix Trion / Titanium | Efinity JTAG User TAP (×2, Interface Designer) | [`fcapz_ela_efinix.v`](../rtl/), [`fcapz_debug_multi_efinix.v`](../rtl/) | ⏳ Synthesized, placed and routed in Efinity (T20F256, Ti60F225) — hardware validation pending |
+| Efinix Trion / Titanium | Efinity JTAG User TAP (×2, Interface Designer) | [`fcapz_ela_efinix.v`](../rtl/), [`fcapz_debug_multi_efinix.v`](../rtl/), [`fcapz_axi_mon_efinix.v`](../rtl/) | ⏳ Synthesized, placed and routed in Efinity (T20F256, Ti60F225) — hardware validation pending |
 | Any FPGA without fabric JTAG | none: UART TAP bridge on two pins | [`fcapz_ela_uart.v`](../rtl/) | ✅ Forgix (Efinix Trion T8F49) |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 

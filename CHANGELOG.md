@@ -36,6 +36,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   current chain, and every `list_cores` entry has `instance`, including cores
   on other chains and the AXI monitor.
 
+- **AXI monitor wrappers for ECP5, PolarFire, Efinix and Gowin.**
+  `fcapz_axi_mon_ecp5` (`JTAGG`, `CTRL_CHAIN` 1 = ER1 / 2 = ER2),
+  `fcapz_axi_mon_polarfire` (`UJTAG`, `IR_USER1`), `fcapz_axi_mon_efinix`
+  (`jtag1_*` ports to an Interface Designer User TAP block) and
+  `fcapz_axi_mon_gowin` (`GW_JTAG`) join the Xilinx and Intel wrappers, with
+  VHDL twins. ECP5, PolarFire and Efinix burst on the monitor's chain;
+  Gowin is register-only. ECP5, PolarFire and Gowin have one TAP primitive per
+  device and the hubs have no AXI monitor slot, so there the monitor is the
+  only fcapz core. A new cocotb test drives all six wrappers through their
+  TAP models in Verilog and VHDL: identity, a capture triggered on a write
+  address, and readback through the register window and the burst path. No
+  hardware build yet.
+
 ### Fixed
 
 - **RPC — a failed `rebind` dropped the working session.** A `rebind` to a

@@ -48,10 +48,28 @@ fcapz_axi_mon_xilinx7 #(
 );
 ```
 
-Wire the same signals the slave sees. The wrapper bundles the BSCANE2 TAP, the
+Wire the same signals the slave sees. The wrapper bundles the vendor TAP, the
 register/burst pipe, and the monitor core. Most ELA parameters
 (`STOR_QUAL`, `NUM_SEGMENTS`, `TIMESTAMP_W`, `INPUT_PIPE`, …) pass straight
 through — see [chapter 05](05_ela_core.md).
+
+Every vendor has a wrapper with the same parameters and AXI ports, plus the
+TAP ports and chain selection noted here. Each has a VHDL twin under
+`rtl/vhdl/` with the same generics.
+
+| Wrapper | TAP | Chain selection | Differences |
+|---|---|---|---|
+| `fcapz_axi_mon_xilinx7` | `BSCANE2` | `CTRL_CHAIN`: USER chain 1..4 | |
+| `fcapz_axi_mon_intel` | `sld_virtual_jtag` | `CTRL_CHAIN`: `sld_instance_index` | |
+| `fcapz_axi_mon_ecp5` | `JTAGG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | Only fcapz core on the device (see below). |
+| `fcapz_axi_mon_polarfire` | `UJTAG` | `IR_USER1` opcode (default `0x20`) instead of `CTRL_CHAIN` | JTAG pad ports `tck_pad_i`, `tms_pad_i`, `tdi_pad_i`, `trstb_pad_i`, `tdo_pad_o` to top-level ports. Libero drops register initial values, so hold `ARESETN` low until the fabric is up. Only fcapz core on the device. |
+| `fcapz_axi_mon_efinix` | Efinity JTAG User TAP (Interface Designer) | Whichever User TAP block the `jtag1_*` ports are wired to | `jtag1_*` ports to an Interface Designer JTAG User TAP block. The other User TAP block stays free for another fcapz core. |
+| `fcapz_axi_mon_gowin` | `GW_JTAG` | `CTRL_CHAIN`: 1 = ER1, 2 = ER2 | **Register-only**: no `BURST_W`, and the host reads each 152-bit sample as five register reads, so keep `DEPTH` modest. A `clk` input that oversamples the TAP (at least ~10x TCK), a `jtag_activity` output and the JTAG pad ports. Only fcapz core on the device. |
+
+ECP5, PolarFire and Gowin allow one TAP primitive per device, and the
+manager hubs (`fcapz_debug_multi_*`) have no AXI monitor slot yet. On those
+three vendors the monitor therefore cannot share the device with an ELA, EIO
+or hub wrapper.
 
 ## What gets captured
 
@@ -237,6 +255,9 @@ uses the lossless VCD/CSV paths (JSON download is disabled to avoid rounding).
   above bit 32 are refused with a clear message rather than silently matching the
   low word. Runtime address-range/ID match filters and a protocol checker are the
   next phases.
+- **One core per device on ECP5, PolarFire and Gowin.** Their wrappers take the
+  device's only TAP primitive, and the manager hubs have no AXI monitor slot
+  yet, so the monitor cannot sit beside an ELA or EIO there.
 - **Bundled probe maps** ship for `ADDR_W=DATA_W=32` only; other geometries need
   a matching `.prob` (the layout is in [What gets captured](#what-gets-captured)).
 

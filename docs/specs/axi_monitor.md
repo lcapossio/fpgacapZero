@@ -101,8 +101,8 @@ module fcapz_axi_mon #(
 );
 ```
 
-Vendor wrappers (`fcapz_axi_mon_xilinx7`, `…_xilinxus`, `…_intel`, …) bundle the
-JTAG plumbing exactly like the other cores. For IP-integrator flows the wrapper
+Vendor wrappers (`fcapz_axi_mon_xilinx7`, `…_intel`, `…_ecp5`, `…_polarfire`,
+`…_efinix`, `…_gowin`) bundle the JTAG plumbing exactly like the other cores. For IP-integrator flows the wrapper
 can expose an AXI4 **monitor** interface so it drops onto a block-design
 connection as a passive monitor.
 
