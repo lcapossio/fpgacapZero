@@ -128,7 +128,8 @@ module fcapz_ela_polarfire #(
     // ---- TAP wrapper (single UJTAG, dual-chain view) ----
     jtag_tap_polarfire #(
         .IR_USER1(IR_USER1),
-        .IR_USER2(IR_USER2)
+        .IR_USER2(IR_USER2),
+        .CH2_EN((BURST_EN != 0 && SINGLE_CHAIN_BURST == 0) ? 1 : 0)
     ) u_tap (
         .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
         .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),

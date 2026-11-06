@@ -126,7 +126,7 @@ module fcapz_axi_mon_polarfire #(
     wire                jtag_rst_ctrl;
 
     jtag_tap_polarfire #(
-        .IR_USER1(IR_USER1), .IR_USER2(IR_USER2)
+        .IR_USER1(IR_USER1), .IR_USER2(IR_USER2), .CH2_EN(0)
     ) u_tap_ctrl (
         .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
         .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),

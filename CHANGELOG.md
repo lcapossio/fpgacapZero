@@ -56,7 +56,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the host could never reach. `jtag_tap_polarfire` now flags one, or two equal
   opcodes, with the same check the wrappers use for `CTRL_CHAIN` (Verilog
   `$error`, VHDL `assert ... severity failure`). This covers the ELA, EIO, hub
-  and AXI monitor wrappers.
+  and AXI monitor wrappers. `IR_USER2` is checked only where USER2 is used
+  (ELA with `SINGLE_CHAIN_BURST=0`, `BURST_EN=1`); elsewhere the TAP's new
+  `CH2_EN=0` leaves it undecoded, so a single-chain core may still set
+  `IR_USER1` to `0x21` next to the default `IR_USER2`.
 - **The VHDL ELA core failed Libero synthesis with `TRIG_STAGES` > 1.**
   Synplify maps the sequencer comparator arrays to RAM with a global reset and
   rejects their initial values (MF682). The arrays no longer have initial
