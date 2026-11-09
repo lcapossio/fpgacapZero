@@ -2136,6 +2136,14 @@ Write *value* (32-bit) to the register at *addr*.
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.
 
+#### `FtdiMpsseTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run as one scan batch.
+
 #### `FtdiMpsseTransport.read_block`
 
 ```python

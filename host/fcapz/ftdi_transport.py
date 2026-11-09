@@ -18,7 +18,9 @@ AMD/Xilinx 7-series FPGA (:meth:`FtdiMpsseTransport.program`).
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import functools
 import os
 import sys
 import threading
@@ -411,6 +413,30 @@ def _find_open_channel(device: str | None) -> _OpenChannel | None:
     return None
 
 
+def _in_one_session(method):
+    """Bind a top-level transport call to the session it started under.
+
+    A call that runs several batches (a window read, a burst after its
+    ``SAMPLE_W`` read in :meth:`read_block`) must not finish on a session that :meth:`connect`
+    started after a :meth:`~FtdiMpsseTransport.cancel` while it sat between
+    batches: it fails at its next write instead.  Nested calls keep the
+    outermost call's session.
+    """
+
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        local = self._call_local
+        if getattr(local, "session", None) is not None:
+            return method(self, *args, **kwargs)
+        local.session = self._session_count
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            local.session = None
+
+    return call
+
+
 class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     """fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
 
@@ -489,6 +515,9 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         #: cancelled.
         self._cancel_count = 0
         self._session_count = 0
+        #: The session count a thread's top-level call started under (see
+        #: :func:`_in_one_session`).
+        self._call_local = threading.local()
         self._active_chain = 1
         self._handle: ctypes.c_void_p | None = None
         self._lib = None
@@ -510,6 +539,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        with self._new_session():
+            self._connect()
+
+    def _connect(self) -> None:
         count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
@@ -519,7 +552,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 # at its next write; a read already waiting ends within the
                 # D2XX timeout, as close() may wait), then start a new one.
                 with self._io_lock:
-                    self._detach()
+                    self._detach(retire=False)  # already cancelled
             self._session_count = count
             ch = _find_open_channel(self.device)
             opened = ch is None
@@ -597,11 +630,17 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         releases it.  Returns the ``(ADBUS value, direction)`` layout in
         force, and sets :attr:`gpio`.  For ``fcapz openocd-bridge``.
         """
+        with self._new_session():
+            return self._open_pins()
+
+    def _open_pins(self) -> tuple[int, int]:
         count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
                 raise RuntimeError("this transport already holds its channel")
             self._session_count = count
+            # A pin session reaches no core: nothing to claim or release.
+            self._forget_hub_state()
             lib, handle, dev, layout = self._open_mpsse()
             ch = _OpenChannel(lib, handle, dev)
             ch.users = 1
@@ -627,21 +666,49 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             return self._read(reply_bytes)
 
     def close(self) -> None:
+        ch = self._channel
+        if ch is not None and not self._cancelled:
+            # Clear this session's MGR_OWNER token, as the other backends do.
+            # Under the channel lock, so the owner check and the clear are one
+            # unit against a peer's claim and against program(), which
+            # forgets the claims it voids.  Bounded: a close does not wait
+            # out a hung call.
+            if ch.lock.acquire(timeout=max(1.0, self.timeout_ms / 1000)):
+                try:
+                    if self._channel is ch:
+                        self._release_ownership_on_close()
+                finally:
+                    ch.lock.release()
+        else:
+            # A cancelled session can no longer write: its token stays.
+            self.__dict__.pop("_fcapz_owned_managers", None)
         with _OPEN_CHANNELS_LOCK:
             self._detach()
 
-    def _detach(self) -> None:
-        """:meth:`close`, with ``_OPEN_CHANNELS_LOCK`` held."""
-        ch, self._channel = self._channel, None
-        self._handle = None
+    def _detach(self, *, retire: bool = True) -> None:
+        """:meth:`close`, with ``_OPEN_CHANNELS_LOCK`` held.
+
+        With *retire* the session ends too, in the same locked step: a call
+        in flight on another thread fails at its next write instead of
+        carrying on after a later :meth:`connect` (which takes the same
+        lock).  Waits for the channel lock before the handle goes, so a
+        write/read pair in flight ends first: a reply left unread would be
+        taken by the next transport on the channel.
+        """
+        if retire:
+            self._cancel_count += 1
+        ch = self._channel
         if ch is None:
+            self._handle = None
             return
-        ch.users -= 1
-        if ch.users > 0:
-            return
-        if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
-            _OPEN_CHANNELS.remove(ch)
         with ch.lock:
+            self._channel = None
+            self._handle = None
+            ch.users -= 1
+            if ch.users > 0:
+                return
+            if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
+                _OPEN_CHANNELS.remove(ch)
             _release(ch.lib, ch.handle)
 
     def cancel(self) -> None:
@@ -655,9 +722,32 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         """
         self._cancel_count += 1
 
+    @contextlib.contextmanager
+    def _new_session(self):
+        """Run a connect outside any call of the calling thread bound by
+        :func:`_in_one_session`: its I/O belongs to the session it starts."""
+        local = self._call_local
+        outer = getattr(local, "session", None)
+        local.session = None
+        try:
+            yield
+        finally:
+            local.session = outer
+
     @property
     def _cancelled(self) -> bool:
+        """Whether the current session has been cancelled."""
         return self._session_count != self._cancel_count
+
+    @property
+    def _call_cancelled(self) -> bool:
+        """Whether the session the calling thread's top-level call started
+        under (see :func:`_in_one_session`) has been cancelled; outside such
+        a call, :attr:`_cancelled`."""
+        count = getattr(self._call_local, "session", None)
+        if count is None:
+            count = self._session_count
+        return count != self._cancel_count
 
     @property
     def opened_device(self) -> str | None:
@@ -749,7 +839,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         return reply[0] & mask == both and reply[1] & mask == 0
 
     def _write(self, data: bytes) -> None:
-        if self._cancelled:
+        if self._call_cancelled:
             raise RuntimeError("FTDI transport cancelled; reconnect")
         written = ctypes.c_ulong()
         self._call("FT_Write", data, len(data), ctypes.byref(written))
@@ -855,11 +945,16 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     # -- scans -----------------------------------------------------------------
 
+    @_in_one_session
     def _run_scans(self, ops: list[ScanOp]) -> list[int]:
         if self.ir_length is None:
             raise RuntimeError("not connected — call connect() first")
         out: list[int] = []
-        with self._io_lock:
+        lock = self._io_lock
+        with lock:
+            if lock is not self._io_lock:
+                # Waited on a channel that a reconnect has since replaced.
+                raise RuntimeError("FTDI transport reconnected; call again")
             batch = _Batch(self.sample_falling)
             for op in ops:
                 kind = op[0]
@@ -886,6 +981,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     # -- configuration -----------------------------------------------------------
 
+    @_in_one_session
     def program(self, bitfile: str, *, timeout_s: float = 2.0) -> None:
         """Configure an AMD/Xilinx 7-series FPGA with *bitfile* over JTAG.
 
@@ -912,6 +1008,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     "the transport disconnected or reconnected while the "
                     "bitstream loaded; call program() again"
                 )
+            if self._call_cancelled:
+                raise RuntimeError("FTDI transport cancelled; reconnect")
             if ch.users > 1:
                 raise RuntimeError(
                     f"cannot program: {ch.users - 1} other transport(s) share "
@@ -1059,6 +1157,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     def _frame(addr: int, data: int, write: bool) -> int:
         return (int(write) << 48) | ((addr & 0xFFFF) << 32) | (data & 0xFFFFFFFF)
 
+    @_in_one_session
     def read_reg(self, addr: int) -> int:
         frame = self._frame(addr, 0, False)
         (value,) = self._run_scans([
@@ -1069,6 +1168,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         ])
         return value & 0xFFFFFFFF
 
+    @_in_one_session
     def write_reg(self, addr: int, value: int) -> None:
         self._run_scans([
             ("ir", self._active_chain),
@@ -1076,6 +1176,30 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             ("idle", self.WRITE_IDLE_CYCLES),
         ])
 
+    @_in_one_session
+    def read_regs_after_write(
+        self, write_addr: int, value: int, addrs: List[int]
+    ) -> List[int]:
+        """The write and the reads run as one scan batch."""
+        # The chain is read under the transaction lock, as the base
+        # implementation does: another controller may hold it with another
+        # chain selected.
+        with self.transaction_lock():
+            ops: list[ScanOp] = [
+                ("ir", self._active_chain),
+                ("dr", self._frame(write_addr, value, True), self.DR_BITS, False),
+                ("idle", self.WRITE_IDLE_CYCLES),
+            ]
+            for addr in addrs:
+                frame = self._frame(addr, 0, False)
+                ops += [
+                    ("dr", frame, self.DR_BITS, False),
+                    ("idle", self.READ_IDLE_CYCLES),
+                    ("dr", frame, self.DR_BITS, True),
+                ]
+            return [v & 0xFFFFFFFF for v in self._run_scans(ops)]
+
+    @_in_one_session
     def read_block(self, addr: int, words: int) -> List[int]:
         """Read *words* registers; the DATA window of a narrow core goes
         through the burst DR when ``burst`` is on."""
@@ -1084,6 +1208,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             return burst
         return self.read_window_block(addr, words)
 
+    @_in_one_session
     def read_window_block(self, addr: int, words: int) -> List[int]:
         """Pipelined register-window read, one batch per 512 words.
 
@@ -1117,10 +1242,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             results.extend(v & 0xFFFFFFFF for v in captured[prime:])
         return results
 
+    @_in_one_session
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         (value,) = self.raw_dr_scan_batch([(bits, width)], chain=chain)
         return value
 
+    @_in_one_session
     def raw_dr_scan_batch(
         self, scans: list[tuple[int, int]], *, chain: int | None = None
     ) -> list[int]:
@@ -1128,3 +1255,4 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         for bits, width in scans:
             ops += [("dr", bits, width, True), ("idle", self.RAW_DR_IDLE_CYCLES)]
         return self._run_scans(ops)
+

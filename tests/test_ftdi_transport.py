@@ -691,6 +691,25 @@ class ProgramTests(_FtdiTestCase):
                 a.program(self._file(self.data, "design.bin"))
         self.assertEqual(self.lib.dev.programs, 0)
 
+    def test_cancel_and_reconnect_while_loading_is_refused(self):
+        a = self._transport()
+        peer = self._transport()  # keeps the channel object alive
+        real = a._load_bitstream
+
+        def cancel_and_rejoin(path):
+            data = real(path)
+            worker = threading.Thread(target=lambda: (a.cancel(), a.connect()))
+            worker.start()
+            worker.join(2.0)
+            peer.close()  # a is alone on the same channel again
+            return data
+
+        with mock.patch.object(a, "_load_bitstream", cancel_and_rejoin):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                a.program(self._file(self.data, "design.bin"))
+        self.assertEqual(self.lib.dev.programs, 0)
+        self.assertEqual(a.read_reg(0x0000) & 0xFFFF, self.lib.dev.regs[0] & 0xFFFF)
+
     def test_cancel_stops_programming_without_waiting(self):
         t = self._transport()
         real = t._idle
@@ -787,6 +806,170 @@ class ProgramTests(_FtdiTestCase):
         self.assertEqual(ft._OPEN_CHANNELS, [])
         with self.assertRaisesRegex(RuntimeError, "not connected"):
             t.read_reg(0)
+        # The session ended too: a call bound to it fails after a reconnect.
+        self.assertTrue(t._cancelled)
+
+
+class SessionTests(_FtdiTestCase):
+    """Owner tokens and session binding across close / cancel / connect."""
+
+    MGR = 0xF000
+
+    def _manager(self) -> None:
+        self.lib.dev.regs[self.MGR + 0x10] = 0x08  # MGR_CAPS: MGR_OWNER
+
+    def test_close_clears_the_owner_token(self):  # BUG-283
+        self._manager()
+        t = self._transport()
+        t._claim_manager(1, self.MGR)
+        self.assertNotEqual(self.lib.dev.regs[self.MGR + 0x24], 0)
+        t.close()
+        self.assertEqual(self.lib.dev.regs[self.MGR + 0x24], 0)
+        nxt = self._transport()
+        with self.assertNoLogs("fcapz.transport", level="WARNING"):
+            nxt._claim_manager(1, self.MGR)
+
+    def test_close_spares_a_peer_token(self):
+        self._manager()
+        a = self._transport()
+        b = self._transport()
+        a._claim_manager(1, self.MGR)
+        with self.assertLogs("fcapz.transport", level="WARNING"):
+            b._claim_manager(1, self.MGR)
+        token = self.lib.dev.regs[self.MGR + 0x24]
+        a.close()
+        self.assertEqual(self.lib.dev.regs[self.MGR + 0x24], token)
+        b.close()
+        self.assertEqual(self.lib.dev.regs[self.MGR + 0x24], 0)
+
+    def test_cancelled_close_skips_the_release(self):
+        self._manager()
+        t = self._transport()
+        t._claim_manager(1, self.MGR)
+        t.cancel()
+        with self.assertNoLogs("fcapz.transport", level="WARNING"):
+            t.close()
+        self.assertNotEqual(self.lib.dev.regs[self.MGR + 0x24], 0)
+        self.assertEqual(self.lib.closes, 1)
+
+    def test_multi_batch_read_does_not_resume_on_a_new_session(self):  # BUG-284
+        a = self._transport()
+        self._transport()  # a peer keeps the channel open
+        a.burst = False
+        real = a._run_scans
+        batches = itertools.count()
+
+        def cancel_and_reconnect_between_batches(ops):
+            out = real(ops)
+            if next(batches) == 0:
+                a.cancel()
+                worker = threading.Thread(target=a.connect)  # another thread
+                worker.start()
+                worker.join(2.0)
+            return out
+
+        with mock.patch.object(a, "_run_scans", cancel_and_reconnect_between_batches):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                a.read_window_block(0x0100, 700)  # two batches
+        # The new session works, for calls that start under it.
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
+        self.assertEqual(len(a.read_window_block(0x0100, 700)), 700)
+
+    def test_call_session_is_cleared_after_each_call(self):
+        t = self._transport()
+        t.read_reg(0x0000)
+        self.assertIsNone(getattr(t._call_local, "session", None))
+        t.cancel()
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            t.read_reg(0x0000)
+        self.assertIsNone(getattr(t._call_local, "session", None))
+        t.connect()
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+
+
+    def test_close_and_reconnect_also_end_a_multi_batch_read(self):
+        a = self._transport()
+        self._transport()  # a peer keeps the channel open
+        a.burst = False
+        real = a._run_scans
+        batches = itertools.count()
+
+        def close_and_reconnect_between_batches(ops):
+            out = real(ops)
+            if next(batches) == 0:
+                worker = threading.Thread(target=lambda: (a.close(), a.connect()))
+                worker.start()
+                worker.join(2.0)
+            return out
+
+        with mock.patch.object(a, "_run_scans", close_and_reconnect_between_batches):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                a.read_window_block(0x0100, 700)
+        self.assertEqual(len(a.read_window_block(0x0100, 700)), 700)
+
+    def test_close_waits_for_the_call_in_flight(self):
+        a = self._transport()
+        self._transport()  # a peer: a's close leaves the channel open
+        held, release = threading.Event(), threading.Event()
+
+        def call_in_flight():
+            with a._io_lock:
+                held.set()
+                release.wait(2.0)
+
+        flight = threading.Thread(target=call_in_flight)
+        flight.start()
+        held.wait(2.0)
+        a.cancel()  # skips the token release: only the detach waits
+        closer = threading.Thread(target=a.close)
+        closer.start()
+        closer.join(0.2)
+        self.assertTrue(closer.is_alive())
+        self.assertIsNotNone(a._handle)  # still there for the pending read
+        release.set()
+        flight.join(2.0)
+        closer.join(2.0)
+        self.assertFalse(closer.is_alive())
+        self.assertIsNone(a._handle)
+
+    def test_open_pins_forgets_unreleased_claims(self):
+        self._manager()
+        t = self._transport()
+        t._claim_manager(1, self.MGR)
+        t.cancel()
+        t.close()
+        t.open_pins()
+        self.assertNotIn("_fcapz_owned_managers", t.__dict__)
+        before = self.lib.writes
+        t.close()
+        self.assertEqual(self.lib.writes, before)  # no register scans
+
+    def test_read_regs_after_write_is_one_batch(self):
+        t = self._transport()
+        self.lib.dev.regs[0x0104] = 0x1234
+        before = self.lib.writes
+        self.assertEqual(
+            t.read_regs_after_write(0x0024, 7, [0x0024, 0x0104]), [7, 0x1234]
+        )
+        self.assertEqual(self.lib.writes - before, 1)
+        self.assertEqual(t.read_regs_after_write(0x0028, 9, []), [])
+        self.assertEqual(self.lib.dev.regs[0x0028], 9)
+
+    def test_scan_waiting_on_a_replaced_channel_fails(self):
+        t = self._transport()
+        stale = t._io_lock
+        t.close()
+        t.connect()  # a new channel and lock
+        current = t._io_lock
+        self.assertIsNot(current, stale)
+        # _run_scans reads the old lock, then a reconnect replaces it.
+        lock_reads = iter([stale, current])
+        with mock.patch.object(
+            type(t), "_io_lock", property(lambda self: next(lock_reads)), create=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reconnected"):
+                t.read_reg(0x0000)
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
 
 
 class BitstreamFileTests(unittest.TestCase):
