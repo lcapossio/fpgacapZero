@@ -925,6 +925,12 @@ class RpcServer:
         return self._build_config(req, hw)
 
     @staticmethod
+    def _validated_probe_sel(sel: int) -> int:
+        if not (0 <= sel <= 0xFFFF_FFFF):
+            raise ValueError(f"probe_sel must be 0..0xFFFFFFFF, got {sel}")
+        return sel
+
+    @staticmethod
     def _validated_post_clocks(clocks: int) -> int:
         if clocks < 0:
             raise ValueError(f"post_clocks must be >= 0, got {clocks}")
@@ -1000,6 +1006,7 @@ class RpcServer:
             sample_clock_hz=int(req.get("sample_clock_hz", file_sample_clock_hz)),
             probes=probes,
             channel=int(req.get("channel", 0)),
+            probe_sel=cls._validated_probe_sel(int(req.get("probe_sel", 0))),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
             sequence=cls._parse_sequence(

@@ -285,6 +285,8 @@ class CaptureConfigDict(TypedDict, total=False):
     probes: list[ProbeEntry] | str
     probe_file: str
     channel: int
+    # Runtime probe-mux slice (cores with probe_mux_w > 0 in fcapz_probe).
+    probe_sel: int
     decimation: int
     ext_trigger_mode: ExtTriggerMode
     stor_qual_mode: StorQualMode

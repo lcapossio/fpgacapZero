@@ -782,6 +782,12 @@ class RpcBooleanValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RpcServer._build_config({"post_clocks": -1})
 
+    def test_probe_sel(self):
+        self.assertEqual(RpcServer._build_config({}).probe_sel, 0)
+        self.assertEqual(RpcServer._build_config({"probe_sel": 5}).probe_sel, 5)
+        with self.assertRaises(ValueError):
+            RpcServer._build_config({"probe_sel": -1})
+
 
 class CliSerialTests(unittest.TestCase):
     def test_serial_backend_builds_the_bridge_transport(self):

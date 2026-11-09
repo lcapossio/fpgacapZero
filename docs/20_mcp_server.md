@@ -404,7 +404,8 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
 | `probes` | Probe definitions, matching the RPC/Python probe schema. |
 | `probe_file` | Name of a probe definition file directly inside `--probe-root`. |
-| `channel` | Input channel of the channel mux (`0`..`NUM_CHANNELS`-1). The runtime probe mux slice (`probe_sel`) is not exposed over MCP or RPC and stays at `0`; select another slice from Python (`CaptureConfig(probe_sel=...)`) or the CLI (`--probe-sel`). |
+| `channel` | Input channel of the channel mux (`0`..`NUM_CHANNELS`-1). |
+| `probe_sel` | Runtime probe mux slice, on a core with `probe_mux_w > 0` in `fcapz_probe` (default `0`). |
 | `decimation` | Sample decimation factor. |
 | `ext_trigger_mode` | External trigger mode. |
 | `stor_qual_mode` | Storage qualification: `0` off, `1` store only matching samples, `2` store only non-matching ones. `1` needs a core reporting `COMPARE_CAPS` bit 22; older cores have only `2`. |
