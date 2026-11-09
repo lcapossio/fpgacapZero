@@ -1644,7 +1644,7 @@ class RpcServer:
             data = [int(d, 16) if isinstance(d, str) else int(d) for d in data_raw]
             burst = bool(req.get("burst", False))
             if burst:
-                self._axi.burst_write(addr, data)
+                self._axi.burst_write_range(addr, data)
             else:
                 self._axi.write_block(addr, data)
             return self._ok(count=len(data))
@@ -1656,7 +1656,7 @@ class RpcServer:
             count = int(req["count"])
             burst = bool(req.get("burst", False))
             if burst:
-                words = self._axi.burst_read(addr, count)
+                words = self._axi.burst_read_range(addr, count)
             else:
                 words = self._axi.read_block(addr, count)
             return self._ok(words=[f"0x{w:08X}" for w in words])

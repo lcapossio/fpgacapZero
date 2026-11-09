@@ -2932,6 +2932,26 @@ fifo[0]. So we need a priming scan before the data scans.
 
 - `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES. The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
 
+#### `EjtagAxiController.burst_read_range`
+
+```python
+burst_read_range(base_addr: int, count: int) -> list[int]
+```
+
+Read *count* consecutive words with as many `burst_read`
+calls as it takes: bursts of at most 256 beats and `FIFO_DEPTH`,
+none crossing a 4 KiB boundary.
+
+#### `EjtagAxiController.burst_write_range`
+
+```python
+burst_write_range(base_addr: int, data: list[int], wstrb: int = 15) -> None
+```
+
+Write *data* to consecutive words with as many
+`burst_write` calls as it takes (split as
+`burst_read_range`).
+
 #### `EjtagAxiController.stream_read`
 
 ```python

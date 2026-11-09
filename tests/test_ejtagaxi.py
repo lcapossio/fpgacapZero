@@ -419,6 +419,43 @@ class EjtagAxiTests(unittest.TestCase):
         result = ctrl.burst_read(0x0000, 4)
         self.assertEqual(result, [0xBB00 + i for i in range(4)])
 
+    def test_burst_chunks_respect_fifo_depth_and_4k(self):
+        ctrl, _ = self._make_ctrl()  # FIFO_DEPTH=16
+        self.assertEqual(
+            ctrl._burst_chunks(0x0000, 40), [(0, 0x0, 16), (16, 0x40, 16), (32, 0x80, 8)]
+        )
+        # 0xFF8: two words left before the 4 KiB boundary.
+        self.assertEqual(
+            ctrl._burst_chunks(0x0FF8, 5), [(0, 0x0FF8, 2), (2, 0x1000, 3)]
+        )
+        ctrl._fifo_depth = 512  # the AXI4 256-beat limit still applies
+        self.assertEqual(
+            [n for _, _, n in ctrl._burst_chunks(0x0000, 600)], [256, 256, 88]
+        )
+
+    def test_burst_range_read_and_write(self):
+        class _BigMemory(FakeBridgeTransport):  # 64 words, no wrap at 16
+            def __init__(self):
+                super().__init__()
+                self.regs = [0] * 64
+
+            def _addr_to_idx(self, addr):
+                return (addr >> 2) & 0x3F
+
+        ctrl, t = self._make_ctrl(_BigMemory())
+        data = [0xC000 + i for i in range(40)]
+        calls = []
+        real = ctrl.burst_write
+        ctrl.burst_write = lambda a, d, wstrb=0xF: (calls.append((a, len(d))), real(a, d, wstrb))
+        ctrl.burst_write_range(0x0000, data)
+        self.assertEqual(calls, [(0x0, 16), (0x40, 16), (0x80, 8)])
+        self.assertEqual([t.regs[i] for i in range(40)], data)
+        self.assertEqual(ctrl.burst_read_range(0x0000, 40), data)
+        with self.assertRaises(ValueError):
+            ctrl.burst_read_range(0x0000, 0)
+        with self.assertRaises(ValueError):
+            ctrl.burst_write_range(0x0000, [])
+
     def test_connect_caches_fifo_depth(self):
         ctrl, _ = self._make_ctrl()
         self.assertEqual(ctrl._fifo_depth, 16)

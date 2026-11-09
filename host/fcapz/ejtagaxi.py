@@ -583,6 +583,42 @@ class EjtagAxiController:
             f"Burst read still unresolved after {len(out)}/{count} beats"
         )
 
+    def _burst_chunks(self, base_addr: int, count: int) -> list[tuple[int, int, int]]:
+        """``(offset, addr, n)`` pieces of a *count*-word transfer from
+        *base_addr*: each at most 256 beats (AXI4) and ``FIFO_DEPTH``, and
+        none crossing a 4 KiB boundary (AXI4 forbids it for INCR bursts)."""
+        limit = min(256, self._fifo_depth or 256)
+        chunks: list[tuple[int, int, int]] = []
+        done = 0
+        while done < count:
+            addr = base_addr + 4 * done
+            to_boundary = (0x1000 - (addr & 0xFFF)) // 4 or 1
+            n = min(limit, count - done, to_boundary)
+            chunks.append((done, addr, n))
+            done += n
+        return chunks
+
+    def burst_read_range(self, base_addr: int, count: int) -> list[int]:
+        """Read *count* consecutive words with as many :meth:`burst_read`
+        calls as it takes: bursts of at most 256 beats and ``FIFO_DEPTH``,
+        none crossing a 4 KiB boundary."""
+        if count <= 0:
+            raise ValueError(f"burst_read_range: count must be > 0, got {count}")
+        out: list[int] = []
+        for _, addr, n in self._burst_chunks(base_addr, count):
+            out.extend(self.burst_read(addr, n))
+        return out
+
+    def burst_write_range(self, base_addr: int, data: list[int],
+                          wstrb: int = 0xF) -> None:
+        """Write *data* to consecutive words with as many
+        :meth:`burst_write` calls as it takes (split as
+        :meth:`burst_read_range`)."""
+        if not data:
+            raise ValueError("burst_write_range: data must not be empty")
+        for offset, addr, n in self._burst_chunks(base_addr, len(data)):
+            self.burst_write(addr, data[offset:offset + n], wstrb=wstrb)
+
     def stream_read(self, base_addr: int, count: int, *,
                     slots_per_scan: int | None = None,
                     retries: int = 2) -> list[int]:
