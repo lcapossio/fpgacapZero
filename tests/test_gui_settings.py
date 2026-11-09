@@ -33,6 +33,11 @@ class TestIrTablePreset(unittest.TestCase):
     def test_ultrascale_aliases(self) -> None:
         self.assertEqual(ir_table_preset("us"), OpenOcdTransport.IR_TABLE_US)
 
+    def test_ecp5_and_efinix(self) -> None:
+        self.assertEqual(ir_table_preset("ecp5"), OpenOcdTransport.IR_TABLE_ECP5)
+        self.assertEqual(ir_table_preset("lattice"), OpenOcdTransport.IR_TABLE_ECP5)
+        self.assertEqual(ir_table_preset("efinix"), OpenOcdTransport.IR_TABLE_EFINIX)
+
     def test_unknown(self) -> None:
         with self.assertRaises(ValueError):
             ir_table_preset("nosuch")

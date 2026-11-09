@@ -1101,10 +1101,17 @@ def test_discovery_infers_polarfire_from_tap_name():
 
     for tap in ("MPFS095T.tap", "mpf300t.tap"):
         assert _infer_ir_table_name(tap) == "polarfire"
+    assert _infer_ir_table_name("ecp5.tap") == "ecp5"
+    assert _infer_ir_table_name("LFE5U-25F.tap") == "ecp5"
+    assert _infer_ir_table_name("trion-t20.tap") == "efinix"
+    assert _infer_ir_table_name("xc7a100t.tap") == "xilinx7"
+    assert _DISCOVERY_IR_TABLES["ecp5"] == OpenOcdTransport.IR_TABLE_ECP5
     assert _DISCOVERY_IR_TABLES["polarfire"] == OpenOcdTransport.IR_TABLE_POLARFIRE
     assert RpcServer._ir_table("ultrascale") is not None
     assert RpcServer._ir_table("efinix") == OpenOcdTransport.IR_TABLE_EFINIX
     assert RpcServer._ir_table("trion") == OpenOcdTransport.IR_TABLE_EFINIX
+    assert RpcServer._ir_table("ecp5") == OpenOcdTransport.IR_TABLE_ECP5
+    assert RpcServer._ir_table("lattice") == OpenOcdTransport.IR_TABLE_ECP5
     with pytest.raises(ValueError):
         RpcServer._ir_table("bogus")
 

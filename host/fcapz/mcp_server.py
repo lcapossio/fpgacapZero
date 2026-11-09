@@ -82,7 +82,7 @@ JsonDict = dict[str, Any]
 # server's guarantee.
 Backend = Literal["hw_server", "openocd", "usb_blaster", "ftdi", "serial"]
 # JTAG IR-code presets; omitted, RPC infers one from the tap name.
-IrTable = Literal["xilinx7", "ultrascale", "gowin", "polarfire", "efinix"]
+IrTable = Literal["xilinx7", "ultrascale", "gowin", "polarfire", "efinix", "ecp5"]
 # The debug cores one fcapz_connect can open. RPC `close` tears the whole
 # board session down, so the ELA has no close of its own: "all" is it.
 Core = Literal["ela", "eio", "axi", "uart"]

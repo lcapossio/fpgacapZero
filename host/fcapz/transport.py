@@ -1545,6 +1545,9 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     # T20F256 (4-bit IR) and Ti60F225 (5-bit IR).  The IR length comes from the
     # OpenOCD tap definition (-irlen 4 for Trion, 5 for Titanium), not from here.
     IR_TABLE_EFINIX: dict[int, int] = {1: 0x08, 2: 0x09}
+    # Lattice ECP5 JTAGG ER1/ER2 opcodes (8-bit IR), as in
+    # rtl/jtag_tap/jtag_tap_ecp5.v.  Not yet hardware-validated.
+    IR_TABLE_ECP5: dict[int, int] = {1: 0x32, 2: 0x38}
     # Zynq UltraScale+ MPSoC PL TAP opcodes.  OpenOCD's TCL listener
     # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
     # bits) to the openocd config file rather than to host code, so this

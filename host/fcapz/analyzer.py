@@ -2317,6 +2317,10 @@ def _infer_ir_table_name(tap: str) -> str:
         return "polarfire"
     if t.startswith(("xcku", "xcvu", "xcau")):
         return "ultrascale"
+    if t.startswith(("trion", "titanium", "efinix")):
+        return "efinix"
+    if t.startswith(("ecp5", "lfe5")):
+        return "ecp5"
     return "xilinx7"
 
 
@@ -2330,6 +2334,7 @@ _DISCOVERY_IR_TABLES: Dict[str, Optional[Dict[int, int]]] = {
     "gowin": OpenOcdTransport.IR_TABLE_GOWIN,
     "polarfire": OpenOcdTransport.IR_TABLE_POLARFIRE,
     "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
+    "ecp5": OpenOcdTransport.IR_TABLE_ECP5,
 }
 
 

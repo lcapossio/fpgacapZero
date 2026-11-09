@@ -791,18 +791,18 @@ swap one for the other without changing the IR table.
 | AMD/Xilinx Kintex / Virtex UltraScale (standalone) | none on hw_server; `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) for raw opcodes on single-die parts | `use_register_ir=True` on hw_server |
 | AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | none on hw_server; raw opcodes from the part's BSDL | `use_register_ir=True` on hw_server |
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
-| Lattice ECP5 | none — pass the table yourself: `ir_table={1: 0x32, 2: 0x38}` (ER1 / ER2, as in `rtl/jtag_tap/jtag_tap_ecp5.v`) | `OpenOcdTransport` from Python only: the CLI has no ECP5 preset (an ECP5 tap name falls back to the AMD/Xilinx 7-series table) and RPC/MCP `ir_table` names no ECP5 table.  ECP5 is not hardware-validated. |
+| Lattice ECP5 | `OpenOcdTransport.IR_TABLE_ECP5` (ER1 / ER2 = `0x32` / `0x38`, as in `rtl/jtag_tap/jtag_tap_ecp5.v`) | Auto-selected by the CLI for `--tap ecp5...` / `lfe5...`; RPC/MCP `ir_table: "ecp5"`.  ECP5 is not hardware-validated. |
 | Intel / Altera | n/a — `sld_virtual_jtag` chains are addressed by instance index on the USB-Blaster transport; `ir_table` doesn't apply | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
 | Microchip PolarFire / PolarFire SoC | `OpenOcdTransport.IR_TABLE_POLARFIRE` | Auto-selected by the CLI for `--tap MPF...`; one `UJTAG` per device |
 | Efinix Trion / Titanium | `OpenOcdTransport.IR_TABLE_EFINIX` | Auto-selected by the CLI for `--tap trion.../titanium.../efinix...`; opcodes match Efinity's BSDL for Trion and Titanium |
 
-On ECP5, pass the ER1/ER2 opcodes when you build the transport (the tap
-name is whatever your OpenOCD config declares, `ecp5.tap` with OpenOCD's
-stock Lattice ECP5 target file):
+On ECP5 from Python, pass the preset when you build the transport (the
+tap name is whatever your OpenOCD config declares, `ecp5.tap` with
+OpenOCD's stock Lattice ECP5 target file):
 
 ```python
-t = OpenOcdTransport(port=6666, tap="ecp5.tap", ir_table={1: 0x32, 2: 0x38})
+t = OpenOcdTransport(port=6666, tap="ecp5.tap", ir_table=OpenOcdTransport.IR_TABLE_ECP5)
 ```
 
 On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL

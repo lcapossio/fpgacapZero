@@ -220,6 +220,8 @@ def _ir_table_for_tap(tap: str) -> dict[int, int] | None:
         return OpenOcdTransport.IR_TABLE_POLARFIRE
     if tap_name.startswith(("trion", "titanium", "efinix")):
         return OpenOcdTransport.IR_TABLE_EFINIX
+    if tap_name.startswith(("ecp5", "lfe5")):
+        return OpenOcdTransport.IR_TABLE_ECP5
     return None
 
 

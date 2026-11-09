@@ -546,6 +546,8 @@ class RpcServer:
         "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
         "trion": OpenOcdTransport.IR_TABLE_EFINIX,
         "titanium": OpenOcdTransport.IR_TABLE_EFINIX,
+        "ecp5": OpenOcdTransport.IR_TABLE_ECP5,
+        "lattice": OpenOcdTransport.IR_TABLE_ECP5,
         "intel": None,
         "altera": None,
         # FTDI: read the family from the IDCODE at connect.

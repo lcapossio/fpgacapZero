@@ -1089,6 +1089,15 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_EFINIX)
 
+    def test_openocd_ecp5_tap_uses_ecp5_ir_table(self):
+        for tap in ("ecp5.tap", "lfe5u25.tap", "LFE5UM5G-85F.tap"):
+            args = argparse.Namespace(
+                backend="openocd", host="127.0.0.1", port=6666, tap=tap,
+            )
+            t = _make_transport(args)
+            self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_ECP5, tap)
+            self.assertEqual(t.ir_table, {1: 0x32, 2: 0x38})
+
     def test_openocd_xilinx_tap_keeps_default_ir_table(self):
         args = argparse.Namespace(
             backend="openocd",

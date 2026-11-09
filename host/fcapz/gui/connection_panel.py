@@ -104,6 +104,7 @@ class ConnectionPanel(QGroupBox):
         self._ir.addItem("UltraScale+", "ultrascale")
         self._ir.addItem("Gowin", "gowin")
         self._ir.addItem("Microchip PolarFire", "polarfire")
+        self._ir.addItem("Lattice ECP5", "ecp5")
         self._ir.addItem("Auto from IDCODE (FTDI)", "auto")
         self._ir.currentIndexChanged.connect(self._refresh_burst_enabled)
 
