@@ -710,6 +710,22 @@ class ProgramTests(_FtdiTestCase):
         self.assertEqual(self.lib.dev.programs, 0)
         self.assertEqual(a.read_reg(0x0000) & 0xFFFF, self.lib.dev.regs[0] & 0xFFFF)
 
+    def test_cancelled_program_does_not_cancel_the_recovering_connect(self):
+        t = self._transport()
+        snapshot = []
+
+        def cancel_and_snapshot(cycles):  # cancel(), then connect() starts
+            t.cancel()
+            snapshot.append(t._cancel_count)
+            raise RuntimeError("FTDI transport cancelled; reconnect")
+
+        with mock.patch.object(t, "_idle", cancel_and_snapshot):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                t.program(self._file(self.data, "design.bin"))
+        # The detach after the cancel did not retire the session again: a
+        # connect() that read the count after the cancel still works.
+        self.assertEqual(t._cancel_count, snapshot[0])
+
     def test_cancel_stops_programming_without_waiting(self):
         t = self._transport()
         real = t._idle
@@ -935,9 +951,9 @@ class SessionTests(_FtdiTestCase):
     def test_open_pins_forgets_unreleased_claims(self):
         self._manager()
         t = self._transport()
-        t._claim_manager(1, self.MGR)
-        t.cancel()
         t.close()
+        t.__dict__["_fcapz_owned_managers"] = {(1, self.MGR)}  # left behind
+        t.__dict__["_fcapz_owner_token"] = 0x1234
         t.open_pins()
         self.assertNotIn("_fcapz_owned_managers", t.__dict__)
         before = self.lib.writes

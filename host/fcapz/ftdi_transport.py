@@ -654,13 +654,18 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             raise
         return layout
 
+    @_in_one_session
     def exchange(self, commands: bytes, reply_bytes: int) -> bytes:
         """Send raw MPSSE *commands*, then read *reply_bytes* bytes of reply.
 
         For a channel opened with :meth:`open_pins`; *commands* must end with
         a send-immediate (``0x87``) when a reply is expected.
         """
-        with self._io_lock:
+        lock = self._io_lock
+        with lock:
+            if lock is not self._io_lock:
+                # Waited on a channel that a reopen has since replaced.
+                raise RuntimeError("FTDI transport reconnected; call again")
             if commands:
                 self._write(commands)
             return self._read(reply_bytes)
@@ -1021,8 +1026,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 raise
             except BaseException:
                 # MPSSE may be mid-command: closed before the lock goes, so
-                # no transport joins it.
-                self._detach()
+                # no transport joins it.  A cancel already ended the session;
+                # retiring it again would cancel the connect() that waits to
+                # recover it.
+                self._detach(retire=not self._cancelled)
                 raise
 
     def _load_bitstream(self, bitfile: str) -> bytes:
