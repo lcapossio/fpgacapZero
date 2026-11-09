@@ -173,3 +173,32 @@ def test_launcher_dedupes_duplicate_stem(tmp_path, monkeypatch, capsys):
     )
     assert launcher.config_names == ["arty_a7"]  # first wins
     assert "duplicate OpenOCD config name" in capsys.readouterr().err
+
+
+def _run_main_without_server(monkeypatch, argv):
+    import sys
+    import types
+
+    ran = {}
+    monkeypatch.setitem(
+        sys.modules, "uvicorn",
+        types.SimpleNamespace(run=lambda app, host, port: ran.update(host=host)),
+    )
+    monkeypatch.setattr(web_main, "_build_openocd_launcher", lambda *a: None)
+    assert web_main.main(argv) == 0
+    return ran
+
+
+def test_prints_token_on_a_network_bind(monkeypatch, capsys):
+    _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
+    err = capsys.readouterr().err
+    assert "API token: s3cret" in err
+    assert "WARNING" not in err
+
+
+def test_warns_without_token_and_keeps_loopback_quiet(monkeypatch, capsys):
+    monkeypatch.delenv("FCAPZ_WEB_TOKEN", raising=False)
+    _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", ""])
+    assert "WARNING" in capsys.readouterr().err
+    _run_main_without_server(monkeypatch, ["--token", "s3cret"])  # 127.0.0.1
+    assert "s3cret" not in capsys.readouterr().err
