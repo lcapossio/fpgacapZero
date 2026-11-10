@@ -220,6 +220,8 @@ def _ir_table_for_tap(tap: str) -> dict[int, int] | None:
         return OpenOcdTransport.IR_TABLE_POLARFIRE
     if tap_name.startswith(("trion", "titanium", "efinix")):
         return OpenOcdTransport.IR_TABLE_EFINIX
+    if tap_name.startswith(("ecp5", "lfe5")):
+        return OpenOcdTransport.IR_TABLE_ECP5
     return None
 
 
@@ -783,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     axi_dump.add_argument(
         "--burst", action="store_true",
-        help="Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH)",
+        help="Use AXI4 burst transfers (split into FIFO_DEPTH-sized bursts)",
     )
 
     axi_fill = sub.add_parser("axi-fill", help="Fill AXI memory with a pattern")
@@ -1116,7 +1118,7 @@ def main() -> int:
                 print(f"wrote 0x{args.data:08X} -> 0x{args.addr:08X} (resp={resp})")
             elif args.cmd == "axi-dump":
                 if args.burst:
-                    words = axi.burst_read(args.addr, args.count)
+                    words = axi.burst_read_range(args.addr, args.count)
                 else:
                     words = axi.read_block(args.addr, args.count)
                 for i, w in enumerate(words):
@@ -1124,7 +1126,7 @@ def main() -> int:
             elif args.cmd == "axi-fill":
                 data = [args.pattern] * args.count
                 if args.burst:
-                    axi.burst_write(args.addr, data)
+                    axi.burst_write_range(args.addr, data)
                 else:
                     axi.write_block(args.addr, data)
                 print(f"filled {args.count} words @ 0x{args.addr:08X}")
@@ -1135,7 +1137,7 @@ def main() -> int:
                 words = [int.from_bytes(raw[i:i+4], 'little')
                          for i in range(0, len(raw), 4)]
                 if args.burst:
-                    axi.burst_write(args.addr, words)
+                    axi.burst_write_range(args.addr, words)
                 else:
                     axi.write_block(args.addr, words)
                 print(f"loaded {len(words)} words @ 0x{args.addr:08X}")

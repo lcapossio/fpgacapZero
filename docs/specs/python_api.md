@@ -1052,6 +1052,7 @@ IR_TABLE_XILINX_ULTRASCALE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_GOWIN = {1: 66, 2: 67}
 IR_TABLE_POLARFIRE = {1: 32, 2: 33}
 IR_TABLE_EFINIX = {1: 8, 2: 9}
+IR_TABLE_ECP5 = {1: 50, 2: 56}
 IR_TABLE_XILINX_ZYNQUS = {1: 2306, 2: 2307, 3: 2338, 4: 2339}
 IR_TABLE_US = {1: 2, 2: 3, 3: 34, 4: 35}
 USER1_IR = 2
@@ -2930,6 +2931,27 @@ fifo[0]. So we need a priming scan before the data scans.
 **Raises:**
 
 - `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES. The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
+
+#### `EjtagAxiController.burst_read_range`
+
+```python
+burst_read_range(base_addr: int, count: int) -> list[int]
+```
+
+Read *count* consecutive words with as many `burst_read`
+calls as it takes: bursts of at most 256 beats and `FIFO_DEPTH`,
+none crossing a 4 KiB boundary.  *base_addr* must be word-aligned
+and the range must not wrap past 0xFFFFFFFF.
+
+#### `EjtagAxiController.burst_write_range`
+
+```python
+burst_write_range(base_addr: int, data: list[int], wstrb: int = 15) -> None
+```
+
+Write *data* to consecutive words with as many
+`burst_write` calls as it takes (split as
+`burst_read_range`).
 
 #### `EjtagAxiController.stream_read`
 

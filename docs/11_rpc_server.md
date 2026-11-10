@@ -505,6 +505,7 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
   "depth": 1024,
   "sample_clock_hz": 100000000,
   "channel": 0,
+  "probe_sel": 0,
   "decimation": 0,
   "ext_trigger_mode": 0,
   "stor_qual_mode": 0,
@@ -521,6 +522,10 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 `depth` and `sample_width` must match the synthesized core; omit them to
 read them from the connected core (a `probe_file`'s `sample_width` takes
 precedence). An explicit value that disagrees is rejected.
+
+`probe_sel` (int 0..255, default 0) picks the runtime probe mux slice on a
+core that reports `probe_mux_w > 0` in `probe`. A slice the core does not
+have reads as slice 0.
 
 `rle` (bool, default `false`) turns on run-length capture on cores that
 report `rle_width > 0` in `probe`. Capture replies then carry a

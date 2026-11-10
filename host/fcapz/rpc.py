@@ -546,6 +546,8 @@ class RpcServer:
         "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
         "trion": OpenOcdTransport.IR_TABLE_EFINIX,
         "titanium": OpenOcdTransport.IR_TABLE_EFINIX,
+        "ecp5": OpenOcdTransport.IR_TABLE_ECP5,
+        "lattice": OpenOcdTransport.IR_TABLE_ECP5,
         "intel": None,
         "altera": None,
         # FTDI: read the family from the IDCODE at connect.
@@ -923,6 +925,13 @@ class RpcServer:
         return self._build_config(req, hw)
 
     @staticmethod
+    def _validated_probe_sel(sel: int) -> int:
+        # ADDR_PROBE_SEL is 8 bits wide in the core.
+        if not (0 <= sel <= 0xFF):
+            raise ValueError(f"probe_sel must be 0..255, got {sel}")
+        return sel
+
+    @staticmethod
     def _validated_post_clocks(clocks: int) -> int:
         if clocks < 0:
             raise ValueError(f"post_clocks must be >= 0, got {clocks}")
@@ -998,6 +1007,7 @@ class RpcServer:
             sample_clock_hz=int(req.get("sample_clock_hz", file_sample_clock_hz)),
             probes=probes,
             channel=int(req.get("channel", 0)),
+            probe_sel=cls._validated_probe_sel(int(req.get("probe_sel", 0))),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
             sequence=cls._parse_sequence(
@@ -1635,7 +1645,7 @@ class RpcServer:
             data = [int(d, 16) if isinstance(d, str) else int(d) for d in data_raw]
             burst = bool(req.get("burst", False))
             if burst:
-                self._axi.burst_write(addr, data)
+                self._axi.burst_write_range(addr, data)
             else:
                 self._axi.write_block(addr, data)
             return self._ok(count=len(data))
@@ -1647,7 +1657,7 @@ class RpcServer:
             count = int(req["count"])
             burst = bool(req.get("burst", False))
             if burst:
-                words = self._axi.burst_read(addr, count)
+                words = self._axi.burst_read_range(addr, count)
             else:
                 words = self._axi.read_block(addr, count)
             return self._ok(words=[f"0x{w:08X}" for w in words])

@@ -231,9 +231,10 @@ The live RPC layer supports:
 | `serial` | `serial_port` | `baudrate` (default 1000000) |
 
 `ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"`,
-`"gowin"`, `"polarfire"` or `"efinix"`. Omit it and the RPC layer infers one
-from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale, anything else
-7-series), or on `ftdi` from the device IDCODE; pass it when the tap name does
+`"gowin"`, `"polarfire"`, `"efinix"` or `"ecp5"`. Omit it and the RPC layer
+infers one from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale,
+`ecp5*`/`lfe5*` ECP5, anything else 7-series), or on `ftdi` from the device
+IDCODE; pass it when the tap name does
 not say which family the part is.
 
 `ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver, with no
@@ -404,7 +405,8 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
 | `probes` | Probe definitions, matching the RPC/Python probe schema. |
 | `probe_file` | Name of a probe definition file directly inside `--probe-root`. |
-| `channel` | Input channel of the channel mux (`0`..`NUM_CHANNELS`-1). The runtime probe mux slice (`probe_sel`) is not exposed over MCP or RPC and stays at `0`; select another slice from Python (`CaptureConfig(probe_sel=...)`) or the CLI (`--probe-sel`). |
+| `channel` | Input channel of the channel mux (`0`..`NUM_CHANNELS`-1). |
+| `probe_sel` | Runtime probe mux slice, on a core with `probe_mux_w > 0` in `fcapz_probe` (default `0`). |
 | `decimation` | Sample decimation factor. |
 | `ext_trigger_mode` | External trigger mode. |
 | `stor_qual_mode` | Storage qualification: `0` off, `1` store only matching samples, `2` store only non-matching ones. `1` needs a core reporting `COMPARE_CAPS` bit 22; older cores have only `2`. |

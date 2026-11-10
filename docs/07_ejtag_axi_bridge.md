@@ -285,6 +285,18 @@ Same constraints as `burst_read`.  The host paces beats one per
 scan; the bridge per-beat-acks so the host knows when to queue the
 next beat.
 
+### Longer transfers
+
+```python
+words = bridge.burst_read_range(0x40000000, count=1000)
+bridge.burst_write_range(0x40000000, words)
+```
+
+These split the transfer into as many `burst_read()` / `burst_write()`
+calls as it takes: bursts of at most `FIFO_DEPTH` (and 256) beats, none
+crossing a 4 KB boundary.  The CLI (`axi-dump`, `axi-fill`, `axi-load`
+with `--burst`) and the RPC `axi_dump` / `axi_write_block` burst paths use them.
+
 ### Streaming read
 
 ```python
@@ -387,7 +399,8 @@ if count > self._fifo_depth:
 
 This catches an oversized burst at the host API boundary, with a
 clear error message that points at the fix (rebuild with a bigger
-`FIFO_DEPTH`).
+`FIFO_DEPTH`), or call `burst_read_range()` /
+`burst_write_range()`, which split it).
 
 On the AXI side a burst read is flow-controlled exactly: while the
 bridge fills the FIFO, `rready` is the FIFO's own not-full, and a beat

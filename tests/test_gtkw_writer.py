@@ -34,6 +34,23 @@ class TestGtkwWriter(unittest.TestCase):
             self.assertIn("[dumpfile]", text)
             self.assertIn("logic.sample[7:0]", text)
 
+    def test_str_paths(self) -> None:
+        cfg = CaptureConfig(
+            pretrigger=1,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0xFF),
+            sample_width=8,
+            depth=4,
+            probes=[],
+        )
+        result = CaptureResult(config=cfg, samples=[0, 1, 2])
+        with tempfile.TemporaryDirectory() as td:
+            vcd = str(Path(td) / "c.vcd")
+            gtkw = str(Path(td) / "sub" / "c.gtkw")
+            Path(vcd).write_text("x", encoding="utf-8")
+            write_gtkw_for_capture(result, vcd, gtkw)
+            self.assertIn("[dumpfile]", Path(gtkw).read_text(encoding="utf-8"))
+
     def test_probes_and_timestamp(self) -> None:
         cfg = CaptureConfig(
             pretrigger=1,

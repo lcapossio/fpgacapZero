@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from ..analyzer import CaptureResult
@@ -30,8 +31,8 @@ def _infer_timestamp_width(result: CaptureResult) -> int:
 
 def write_gtkw_for_capture(
     result: CaptureResult,
-    vcd_path: Path,
-    gtkw_path: Path,
+    vcd_path: str | os.PathLike[str],
+    gtkw_path: str | os.PathLike[str],
     *,
     timestamp_width: int | None = None,
 ) -> None:
@@ -41,6 +42,7 @@ def write_gtkw_for_capture(
     Paths are written with POSIX slashes inside quotes (GTKWave accepts this on
     Windows too).
     """
+    vcd_path, gtkw_path = Path(vcd_path), Path(gtkw_path)
     cfg = result.config
     vcd_abs = vcd_path.resolve().as_posix()
     gtkw_abs = gtkw_path.resolve().as_posix()

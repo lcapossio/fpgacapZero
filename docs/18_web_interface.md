@@ -30,14 +30,15 @@ on the command line — one server can drive whatever board you point it at.
 
 ```bash
 export FCAPZ_WEB_TOKEN="$(openssl rand -hex 16)"
-echo "$FCAPZ_WEB_TOKEN"                 # note it: the browser needs the same value
 fcapz-web --host 0.0.0.0 --port 7373    # --token defaults to $FCAPZ_WEB_TOKEN
 ```
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or the
 `FCAPZ_WEB_TOKEN` environment variable) whenever you do: it is then required as
 `Authorization: Bearer <token>` on every `/api` route and as `?token=` on the
-WebSocket. The server never prints the token, so keep the value you generated.
+WebSocket. On a non-localhost bind the server prints the token at startup
+(to stderr), so you can copy it into the browser. It does so only when stderr
+is a terminal, so the token does not end up in a service log.
 The UI hides the token field until a server asks for it: once a request is
 refused as unauthorized (typically your first **Connect**), the Connection panel
 shows an **API token** field; paste the same value there and press **Connect**

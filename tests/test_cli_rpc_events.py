@@ -782,6 +782,14 @@ class RpcBooleanValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RpcServer._build_config({"post_clocks": -1})
 
+    def test_probe_sel(self):
+        self.assertEqual(RpcServer._build_config({}).probe_sel, 0)
+        self.assertEqual(RpcServer._build_config({"probe_sel": 5}).probe_sel, 5)
+        self.assertEqual(RpcServer._build_config({"probe_sel": 255}).probe_sel, 255)
+        for bad in (-1, 256):
+            with self.assertRaises(ValueError):
+                RpcServer._build_config({"probe_sel": bad})
+
 
 class CliSerialTests(unittest.TestCase):
     def test_serial_backend_builds_the_bridge_transport(self):
@@ -1088,6 +1096,15 @@ class MakeTransportTests(unittest.TestCase):
         t = _make_transport(args)
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_EFINIX)
+
+    def test_openocd_ecp5_tap_uses_ecp5_ir_table(self):
+        for tap in ("ecp5.tap", "lfe5u25.tap", "LFE5UM5G-85F.tap"):
+            args = argparse.Namespace(
+                backend="openocd", host="127.0.0.1", port=6666, tap=tap,
+            )
+            t = _make_transport(args)
+            self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_ECP5, tap)
+            self.assertEqual(t.ir_table, {1: 0x32, 2: 0x38})
 
     def test_openocd_xilinx_tap_keeps_default_ir_table(self):
         args = argparse.Namespace(

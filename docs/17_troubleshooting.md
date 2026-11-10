@@ -168,10 +168,11 @@ burst can carry at most 16 beats (AXI4 `awlen`/`arlen` = beats − 1,
 so up to 15).  You asked for 32.  `burst_write()` raises the same
 error with `burst_write:` in front.
 
-**Fix**: split the transfer yourself into bursts of at most
-`FIFO_DEPTH` beats at successive addresses; `burst_read()` and
-`burst_write()` do not chunk.  Or re-synthesize the bridge with a
-deeper FIFO.  See [chapter 07](07_ejtag_axi_bridge.md).
+**Fix**: use `burst_read_range()` / `burst_write_range()`, which split
+the transfer into bursts of at most `FIFO_DEPTH` (and 256) beats that
+never cross a 4 KB boundary; `burst_read()` and `burst_write()` are
+single AXI bursts and do not chunk.  The CLI and RPC burst commands
+already split.  Or re-synthesize the bridge with a deeper FIFO.  See [chapter 07](07_ejtag_axi_bridge.md).
 
 ### AXI reads return `0xDEADBEEF` or all-ones
 
