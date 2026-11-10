@@ -150,22 +150,28 @@ architecture rtl of fcapz_ejtagaxi is
                       len   : std_logic_vector(7 downto 0);
                       size  : std_logic_vector(2 downto 0);
                       btype : std_logic_vector(1 downto 0)) return boolean is
-        variable bytes : natural;
-        variable l     : natural;
-        variable a0    : natural;
-        variable low   : natural;
+        -- Masks and shifts, not integer * and mod: the transfer size is a
+        -- power of two, and this sits on the dispatch path (one cycle).
+        variable sz   : natural range 0 to 7;
+        variable mask : unsigned(11 downto 0);
+        variable low  : unsigned(11 downto 0);
+        variable span : unsigned(16 downto 0);
+        variable l    : unsigned(7 downto 0);
     begin
-        bytes := 2 ** to_integer(unsigned(size));
-        l := to_integer(unsigned(len));
-        if bytes > DATA_BYTES then
+        sz := to_integer(unsigned(size));
+        if 2 ** sz > DATA_BYTES then
             return false;
         end if;
-        low := to_integer(unsigned(addr(addr'right + 11 downto addr'right)));
-        a0 := low - (low mod bytes);
+        l := unsigned(len);
+        mask := shift_left(to_unsigned(1, 12), sz) - 1;
+        low := unsigned(addr(addr'right + 11 downto addr'right));
+        span := resize(low and not mask, 17)
+              + shift_left(resize(l, 17) + 1, sz);
         case btype is
             when "00" => return l <= 15;
-            when "01" => return a0 + (l + 1) * bytes <= 4096;
-            when "10" => return (l = 1 or l = 3 or l = 7 or l = 15) and (low mod bytes) = 0;
+            when "01" => return span <= 4096;
+            when "10" => return (l = 1 or l = 3 or l = 7 or l = 15)
+                                and (low and mask) = 0;
             when others => return false;
         end case;
     end function;
