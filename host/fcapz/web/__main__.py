@@ -244,12 +244,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     static_dir = args.static_dir or _default_static_dir()
     if not _is_loopback(args.host):
-        if args.token:
+        if args.token and sys.stderr.isatty():
             # A token generated inline (`$(openssl rand ...)`) is otherwise
-            # nowhere to be read back, and the browser needs it.
+            # nowhere to be read back, and the browser needs it.  Only to a
+            # terminal: redirected stderr usually lands in a log file.
             print(
                 f"fcapz-web: API token: {args.token} (paste it into the UI's "
                 "API token field)",
+                file=sys.stderr,
+            )
+        elif args.token:
+            print(
+                "fcapz-web: API token set (not shown: stderr is not a terminal)",
                 file=sys.stderr,
             )
         else:

@@ -190,10 +190,19 @@ def _run_main_without_server(monkeypatch, argv):
 
 
 def test_prints_token_on_a_network_bind(monkeypatch, capsys):
+    monkeypatch.setattr(web_main.sys.stderr, "isatty", lambda: True, raising=False)
     _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
     err = capsys.readouterr().err
     assert "API token: s3cret" in err
     assert "WARNING" not in err
+
+
+def test_hides_token_when_stderr_is_not_a_terminal(monkeypatch, capsys):
+    monkeypatch.setattr(web_main.sys.stderr, "isatty", lambda: False, raising=False)
+    _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
+    err = capsys.readouterr().err
+    assert "s3cret" not in err
+    assert "API token set" in err
 
 
 def test_warns_without_token_and_keeps_loopback_quiet(monkeypatch, capsys):

@@ -37,7 +37,8 @@ fcapz-web --host 0.0.0.0 --port 7373    # --token defaults to $FCAPZ_WEB_TOKEN
 `FCAPZ_WEB_TOKEN` environment variable) whenever you do: it is then required as
 `Authorization: Bearer <token>` on every `/api` route and as `?token=` on the
 WebSocket. On a non-localhost bind the server prints the token at startup
-(to stderr), so you can copy it into the browser.
+(to stderr), so you can copy it into the browser. It does so only when stderr
+is a terminal, so the token does not end up in a service log.
 The UI hides the token field until a server asks for it: once a request is
 refused as unauthorized (typically your first **Connect**), the Connection panel
 shows an **API token** field; paste the same value there and press **Connect**
