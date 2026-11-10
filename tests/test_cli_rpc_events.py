@@ -785,8 +785,10 @@ class RpcBooleanValidationTests(unittest.TestCase):
     def test_probe_sel(self):
         self.assertEqual(RpcServer._build_config({}).probe_sel, 0)
         self.assertEqual(RpcServer._build_config({"probe_sel": 5}).probe_sel, 5)
-        with self.assertRaises(ValueError):
-            RpcServer._build_config({"probe_sel": -1})
+        self.assertEqual(RpcServer._build_config({"probe_sel": 255}).probe_sel, 255)
+        for bad in (-1, 256):
+            with self.assertRaises(ValueError):
+                RpcServer._build_config({"probe_sel": bad})
 
 
 class CliSerialTests(unittest.TestCase):

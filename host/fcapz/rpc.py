@@ -926,8 +926,9 @@ class RpcServer:
 
     @staticmethod
     def _validated_probe_sel(sel: int) -> int:
-        if not (0 <= sel <= 0xFFFF_FFFF):
-            raise ValueError(f"probe_sel must be 0..0xFFFFFFFF, got {sel}")
+        # ADDR_PROBE_SEL is 8 bits wide in the core.
+        if not (0 <= sel <= 0xFF):
+            raise ValueError(f"probe_sel must be 0..255, got {sel}")
         return sel
 
     @staticmethod

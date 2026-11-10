@@ -523,8 +523,9 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 read them from the connected core (a `probe_file`'s `sample_width` takes
 precedence). An explicit value that disagrees is rejected.
 
-`probe_sel` (int, default 0) picks the runtime probe mux slice on a core
-that reports `probe_mux_w > 0` in `probe`.
+`probe_sel` (int 0..255, default 0) picks the runtime probe mux slice on a
+core that reports `probe_mux_w > 0` in `probe`. A slice the core does not
+have reads as slice 0.
 
 `rle` (bool, default `false`) turns on run-length capture on cores that
 report `rle_width > 0` in `probe`. Capture replies then carry a

@@ -231,9 +231,10 @@ The live RPC layer supports:
 | `serial` | `serial_port` | `baudrate` (default 1000000) |
 
 `ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"`,
-`"gowin"`, `"polarfire"` or `"efinix"`. Omit it and the RPC layer infers one
-from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale, anything else
-7-series), or on `ftdi` from the device IDCODE; pass it when the tap name does
+`"gowin"`, `"polarfire"`, `"efinix"` or `"ecp5"`. Omit it and the RPC layer
+infers one from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale,
+`ecp5*`/`lfe5*` ECP5, anything else 7-series), or on `ftdi` from the device
+IDCODE; pass it when the tap name does
 not say which family the part is.
 
 `ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver, with no
