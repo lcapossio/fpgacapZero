@@ -586,7 +586,16 @@ class EjtagAxiController:
     def _burst_chunks(self, base_addr: int, count: int) -> list[tuple[int, int, int]]:
         """``(offset, addr, n)`` pieces of a *count*-word transfer from
         *base_addr*: each at most 256 beats (AXI4) and ``FIFO_DEPTH``, and
-        none crossing a 4 KiB boundary (AXI4 forbids it for INCR bursts)."""
+        none crossing a 4 KiB boundary (AXI4 forbids it for INCR bursts).
+        *base_addr* must be word-aligned and the range must end within the
+        32-bit address space."""
+        if base_addr % 4:
+            raise ValueError(f"burst range: base_addr 0x{base_addr:X} is not word-aligned")
+        if base_addr < 0 or base_addr + 4 * count > 1 << 32:
+            raise ValueError(
+                f"burst range: {count} words from 0x{base_addr:X} "
+                "run past the 32-bit address space"
+            )
         limit = min(256, self._fifo_depth or 256)
         chunks: list[tuple[int, int, int]] = []
         done = 0
@@ -601,7 +610,8 @@ class EjtagAxiController:
     def burst_read_range(self, base_addr: int, count: int) -> list[int]:
         """Read *count* consecutive words with as many :meth:`burst_read`
         calls as it takes: bursts of at most 256 beats and ``FIFO_DEPTH``,
-        none crossing a 4 KiB boundary."""
+        none crossing a 4 KiB boundary.  *base_addr* must be word-aligned
+        and the range must not wrap past 0xFFFFFFFF."""
         if count <= 0:
             raise ValueError(f"burst_read_range: count must be > 0, got {count}")
         out: list[int] = []

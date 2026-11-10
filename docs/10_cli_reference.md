@@ -686,7 +686,7 @@ Usage: `fcapz [global options] axi-dump --addr ADDR --count N [--chain N] [--bur
 | `--addr ADDR` | required | Start address (hex) |
 | `--count N` | required | Number of 32-bit words to read |
 | `--chain N` | `4` | BSCANE2 USER chain |
-| `--burst` | off | Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH) |
+| `--burst` | off | Use AXI4 burst transfers (split into FIFO_DEPTH-sized bursts) |
 
 <!-- END GENERATED cli:axi-dump -->
 
@@ -699,8 +699,8 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 ```
 
 `--burst` switches from auto-increment block read to AXI4 burst
-read; the host refuses a count above the bridge's `FIFO_DEPTH` with a
-clear error.
+read. A count above the bridge's `FIFO_DEPTH` is split into several
+bursts, none longer than 256 beats or crossing a 4 KiB boundary.
 
 ### `axi-fill`
 

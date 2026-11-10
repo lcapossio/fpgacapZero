@@ -2940,7 +2940,8 @@ burst_read_range(base_addr: int, count: int) -> list[int]
 
 Read *count* consecutive words with as many `burst_read`
 calls as it takes: bursts of at most 256 beats and `FIFO_DEPTH`,
-none crossing a 4 KiB boundary.
+none crossing a 4 KiB boundary.  *base_addr* must be word-aligned
+and the range must not wrap past 0xFFFFFFFF.
 
 #### `EjtagAxiController.burst_write_range`
 

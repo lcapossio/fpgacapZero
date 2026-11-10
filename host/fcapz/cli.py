@@ -785,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     axi_dump.add_argument(
         "--burst", action="store_true",
-        help="Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH)",
+        help="Use AXI4 burst transfers (split into FIFO_DEPTH-sized bursts)",
     )
 
     axi_fill = sub.add_parser("axi-fill", help="Fill AXI memory with a pattern")

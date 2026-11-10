@@ -456,6 +456,17 @@ class EjtagAxiTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ctrl.burst_write_range(0x0000, [])
 
+    def test_burst_range_rejects_unaligned_and_wrapping(self):
+        ctrl, t = self._make_ctrl()
+        with self.assertRaises(ValueError):
+            ctrl.burst_read_range(0x0001, 4)
+        with self.assertRaises(ValueError):
+            ctrl.burst_write_range(0xFFFF_FFFC, [1, 2])
+        with self.assertRaises(ValueError):
+            ctrl.burst_read_range(-4, 1)
+        # The last word of the address space is fine.
+        self.assertEqual(ctrl._burst_chunks(0xFFFF_FFFC, 1), [(0, 0xFFFF_FFFC, 1)])
+
     def test_connect_caches_fifo_depth(self):
         ctrl, _ = self._make_ctrl()
         self.assertEqual(ctrl._fifo_depth, 16)
