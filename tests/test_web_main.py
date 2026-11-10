@@ -211,3 +211,21 @@ def test_warns_without_token_and_keeps_loopback_quiet(monkeypatch, capsys):
     assert "WARNING" in capsys.readouterr().err
     _run_main_without_server(monkeypatch, ["--token", "s3cret"])  # 127.0.0.1
     assert "s3cret" not in capsys.readouterr().err
+
+
+def test_stderr_without_isatty_still_starts(monkeypatch, capsys):
+    class _Wrapper:  # a logging wrapper with write/flush only
+        def __init__(self):
+            self.out = []
+
+        def write(self, s):
+            self.out.append(s)
+
+        def flush(self):
+            pass
+
+    w = _Wrapper()
+    monkeypatch.setattr(web_main.sys, "stderr", w)
+    ran = _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
+    assert ran["host"] == "0.0.0.0"
+    assert "s3cret" not in "".join(w.out)

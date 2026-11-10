@@ -244,7 +244,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     static_dir = args.static_dir or _default_static_dir()
     if not _is_loopback(args.host):
-        if args.token and sys.stderr.isatty():
+        isatty = getattr(sys.stderr, "isatty", None)
+        if args.token and callable(isatty) and isatty():
             # A token generated inline (`$(openssl rand ...)`) is otherwise
             # nowhere to be read back, and the browser needs it.  Only to a
             # terminal: redirected stderr usually lands in a log file.
