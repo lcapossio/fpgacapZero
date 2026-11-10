@@ -62,7 +62,7 @@ What it **can't** do (yet):
 ```mermaid
 flowchart LR
     host["Host<br>(XSDB or OpenOCD)"] <-->|"72-bit DR via USER4"| tck["TCK domain<br>shadow registers"]
-    tck <-->|"toggle handshake (CDC)"| axi["axi_clk domain<br>10-state FSM<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
+    tck <-->|"toggle handshake (CDC)"| axi["axi_clk domain<br>command FSM + write engine<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
     axi <-->|"AXI4 master"| bus["Your AXI4 bus"]
 ```
 
@@ -71,16 +71,45 @@ loads with a command + address + data + wstrb on every scan.  On
 DR update, the parsed fields are packed into a registered command
 word and pushed into a **TCK-to-AXI async command FIFO**.
 
-The **`axi_clk` domain** runs a 10-state FSM that drives the AXI
-master interface (`m_axi_*`).  Completed responses cross back to
+The **`axi_clk` domain** runs a command FSM that drives the AR and R
+channels and a write engine that owns AW, W and B.  Completed responses cross back to
 TCK through an **AXI-to-TCK async response FIFO**.  Burst reads use
 that response path plus a dedicated read FIFO so the AXI side can
 fill data while the host scans words out one per shift.
 
 Burst writes use one completion per beat through the same response
-path.  This keeps the inter-beat pacing host-controlled; the AXI
-side never times out between beats, only on the AXI handshake waits
-themselves (`wready`, `bvalid`, `arready`, `rvalid`).
+path, so the host paces the beats.  The beats are collected in an
+on-chip write buffer (`FIFO_DEPTH` entries of data + strobes) and the
+burst goes on the bus only once its last beat is in: a host that
+vanishes, a RESET, another bus command (read, write, burst read) or a
+new `BURST_SETUP` in the middle of a burst discards it, and the slave
+never sees a partial burst.  `SET_ADDR`, `CONFIG`, `NOP` and
+`BURST_RDATA` are handled on the JTAG side and do not cancel it.  The
+last beat's completion is the AXI write response.
+
+### What the bridge never does to the bus
+
+The debug bridge must not break the system it debugs, so the AXI side
+keeps these rules whatever the host does (bridges with `FEATURES[25]`):
+
+- A `VALID` it raised stays high, with the same payload, until the
+  slave's `READY`.  A timeout or a RESET never withdraws it.
+- A write is exactly `AWLEN + 1` beats with `WLAST` on the last; W may
+  go before AW.  The B is always taken.
+- Before any `VALID` goes up, a burst descriptor is checked: transfer
+  size within the bus, burst type not reserved, FIXED at most 16 beats,
+  WRAP of 2, 4, 8 or 16 beats from a size-aligned address, INCR inside
+  one 4 KB page.  A write burst longer than `FIFO_DEPTH` is refused too.
+  A refused burst answers SLVERR (every beat, for a write) and never
+  reaches the bus.
+
+When a write times out (`TIMEOUT` cycles with no AW, W or B handshake)
+the host gets SLVERR, and the write engine carries on by itself: it
+keeps its `VALID`s up, sends the rest of the beats and takes the late B
+without reporting it.  While it is busy the next write waits up to
+`TIMEOUT` cycles for it; after that it answers SLVERR without touching
+the bus.  An AR that times out stays up the same way, and when the
+slave takes it the read is drained as below.
 
 A read whose address the slave has accepted is never abandoned on the
 R channel.  If it times out waiting for `rvalid`, or a RESET cuts it
@@ -91,6 +120,23 @@ cycles without a beat; after that, writes and CONFIG run normally,
 while reads answer SLVERR without touching the bus until the owed
 beats have arrived.  A slave that never answers therefore costs
 SLVERRs, not a hung bridge.
+
+`CFG_AXI_STATUS` (CONFIG `0x0030`, `bridge.axi_status()`) shows what the
+bridge still owes the slave:
+
+| Bit | Meaning |
+|-----|---------|
+| 0 | write engine busy (owns AW/W/B) |
+| 1 | ...finishing a write nobody waits for (timed out or RESET) |
+| 2 | ARVALID held after a timeout or RESET |
+| 3 | discarding the beats of an abandoned read |
+| 4 | burst write being collected (not on the bus yet) |
+| 5 | anything owed to the slave (0, 2 or 3); test this one for idle |
+
+Bits 0 to 4 cross into the TCK domain independently, so while an
+obligation passes from one to another (a held AR the slave takes
+becomes a drain) they can all read 0 for a moment.  Bit 5 is a single
+flop on the AXI side and has no such gap; `axi_status()["idle"]` uses it.
 
 ## The 72-bit DR shift format
 
@@ -173,6 +219,7 @@ print(info)
 #   "data_w": 32,
 #   "fifo_depth": 16,            # <-- cached from FEATURES register
 #   "stream": False,             # FEATURES[24]: streaming read built in
+#   "safe_writes": True,         # FEATURES[25]: bus-safe model, CFG_AXI_STATUS
 # }
 ```
 
@@ -281,9 +328,12 @@ beat per JTAG scan.
 bridge.burst_write(0x40000000, [0xAA, 0xBB, 0xCC, 0xDD])
 ```
 
-Same constraints as `burst_read`.  The host paces beats one per
-scan; the bridge per-beat-acks so the host knows when to queue the
-next beat.
+Same constraints as `burst_read`, and the count must also fit the
+bridge's write buffer (`FIFO_DEPTH`).  The host paces beats one per
+scan; the bridge acknowledges each beat as it buffers it, and answers
+the last one with the AXI write response once the whole burst has
+gone out.  Both single-burst calls refuse a burst that crosses a 4 KB
+boundary (`ValueError`); use the `_range` variants below to split.
 
 ### Longer transfers
 
@@ -420,6 +470,7 @@ FEATURES[7:0]   = ADDR_W
 FEATURES[15:8]  = DATA_W
 FEATURES[23:16] = FIFO_DEPTH - 1   (AXI4 awlen convention so 256 fits in 8 bits)
 FEATURES[24]    = STREAM_ON        (streaming read built in)
+FEATURES[25]    = 1                (bus-safe writes, burst checks, CFG_AXI_STATUS)
 ```
 
 So `FIFO_DEPTH=16` is encoded as `0x0F` in the bitstream and the

@@ -150,6 +150,20 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "burst_timeout_drain",
         "reset_inflight_drain",
         "drain_bounded",
+        "burst_beat_acks",
+        "aw_stall_detached",
+        "write_quarantine",
+        "late_b_absorbed",
+        "collect_reset_discard",
+        "collect_cmd_discard",
+        "collect_setup_restart",
+        "w_stall_reset_completes",
+        "w_before_aw",
+        "burst_refused",
+        "burst_legal_edges",
+        "ar_stall_held",
+        "ar_reset_held",
+        "axi_valid_stable",
     ),
 )
 
@@ -2479,37 +2493,57 @@ def _signal_is_one(signal) -> bool:
 
 
 class AxiTrace:
+    """Records AW/W/AR handshakes and checks the master side of AXI4: once a
+    VALID is up it stays up, with its payload unchanged, until READY."""
+
     def __init__(self, dut) -> None:
         self.dut = dut
+        self.cycle = 0
         self.aw: list[dict[str, int]] = []
         self.w: list[dict[str, int]] = []
         self.ar: list[dict[str, int]] = []
+        self.violations: list[str] = []
+        self._pending: dict[str, dict[str, int] | None] = {"aw": None, "w": None, "ar": None}
+
+    def _payload(self, channel: str) -> dict[str, int]:
+        d = self.dut
+        if channel == "aw":
+            return {"addr": _signal_int(d.m_axi_awaddr), "len": _signal_int(d.m_axi_awlen),
+                    "size": _signal_int(d.m_axi_awsize), "burst": _signal_int(d.m_axi_awburst)}
+        if channel == "w":
+            return {"data": _signal_int(d.m_axi_wdata), "strb": _signal_int(d.m_axi_wstrb),
+                    "last": _signal_int(d.m_axi_wlast)}
+        return {"addr": _signal_int(d.m_axi_araddr), "len": _signal_int(d.m_axi_arlen),
+                "size": _signal_int(d.m_axi_arsize), "burst": _signal_int(d.m_axi_arburst)}
+
+    def _check(self, channel: str, valid, ready, log: list[dict[str, int]]) -> None:
+        is_valid = _signal_is_one(valid)
+        payload = self._payload(channel) if is_valid else None
+        held = self._pending[channel]
+        if held is not None:
+            if not is_valid:
+                self.violations.append(f"cycle {self.cycle}: {channel}valid dropped before ready")
+            elif payload != held:
+                self.violations.append(
+                    f"cycle {self.cycle}: {channel} payload changed while stalled: "
+                    f"{held} -> {payload}")
+        if is_valid and _signal_is_one(ready):
+            log.append({**payload, "cycle": self.cycle})
+            self._pending[channel] = None
+        else:
+            self._pending[channel] = payload
 
     async def monitor(self) -> None:
+        d = self.dut
         while True:
-            await RisingEdge(self.dut.axi_clk)
-            if _signal_is_one(self.dut.axi_rst):
+            await RisingEdge(d.axi_clk)
+            self.cycle += 1
+            if _signal_is_one(d.axi_rst):
+                self._pending = {"aw": None, "w": None, "ar": None}
                 continue
-            if _signal_is_one(self.dut.m_axi_awvalid) and _signal_is_one(self.dut.m_axi_awready):
-                self.aw.append({
-                    "addr": _signal_int(self.dut.m_axi_awaddr),
-                    "len": _signal_int(self.dut.m_axi_awlen),
-                    "size": _signal_int(self.dut.m_axi_awsize),
-                    "burst": _signal_int(self.dut.m_axi_awburst),
-                })
-            if _signal_is_one(self.dut.m_axi_wvalid) and _signal_is_one(self.dut.m_axi_wready):
-                self.w.append({
-                    "data": _signal_int(self.dut.m_axi_wdata),
-                    "strb": _signal_int(self.dut.m_axi_wstrb),
-                    "last": _signal_int(self.dut.m_axi_wlast),
-                })
-            if _signal_is_one(self.dut.m_axi_arvalid) and _signal_is_one(self.dut.m_axi_arready):
-                self.ar.append({
-                    "addr": _signal_int(self.dut.m_axi_araddr),
-                    "len": _signal_int(self.dut.m_axi_arlen),
-                    "size": _signal_int(self.dut.m_axi_arsize),
-                    "burst": _signal_int(self.dut.m_axi_arburst),
-                })
+            self._check("aw", d.m_axi_awvalid, d.m_axi_awready, self.aw)
+            self._check("w", d.m_axi_wvalid, d.m_axi_wready, self.w)
+            self._check("ar", d.m_axi_arvalid, d.m_axi_arready, self.ar)
 
 
 async def init_ejtagaxi(dut) -> tuple[AxiRam, AxiTrace]:
@@ -2725,7 +2759,7 @@ async def fcapz_ejtagaxi_protocol(dut):
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_002C, 0, 0), "S9 features")
-    assert axi_rdata(out) == 0x000F_2020
+    assert axi_rdata(out) == 0x020F_2020
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_features")
     await axi_cdc_wait(dut)
 
@@ -2736,6 +2770,7 @@ async def fcapz_ejtagaxi_protocol(dut):
     assert not (axi_status(out) & 0x2)
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("soft_reset")
     assert_axi_protocol_trace(axi_trace)
+    assert not axi_trace.violations, axi_trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("axi_protocol_trace")
 
 
@@ -2946,7 +2981,351 @@ async def fcapz_ejtagaxi_r_drain(dut):
     r_channel.pause = False
     await axi_cdc_wait(dut, 20)
     await read_ok(0x210, 0x2222_0004, "read once the owed beat is drained")
+    assert not axi_trace.violations, axi_trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("drain_bounded")
+
+
+CFG_AXI_STATUS = 0x0030
+AXI_ST_WE_BUSY = 0x01
+AXI_ST_WE_DETACHED = 0x02
+AXI_ST_AR_ORPHAN = 0x04
+AXI_ST_R_DRAIN = 0x08
+AXI_ST_COLLECTING = 0x10
+AXI_ST_OWED = 0x20  # registered OR of WE_BUSY, AR_ORPHAN, R_DRAIN
+
+
+def burst_cfg(length: int, size: int = 2, burst: int = 1) -> int:
+    return ((burst & 0x3) << 12) | ((size & 0x7) << 8) | (length & 0xFF)
+
+
+async def axi_bus_status(dut) -> int:
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_CONFIG, CFG_AXI_STATUS, 0, 0), "AXI_STATUS")
+    return axi_rdata(out)
+
+
+async def axi_wait_bus_idle(dut, label: str) -> None:
+    for _ in range(16):
+        if await axi_bus_status(dut) == 0:
+            return
+        await axi_cdc_wait(dut, 10)
+    raise AssertionError(f"{label}: AXI_STATUS never went idle")
+
+
+async def collect_responses(dut, label: str) -> list[int]:
+    """NOP-poll until the bridge goes idle; return every response's resp code."""
+    resps: list[int] = []
+    for _ in range(96):
+        out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        status = axi_status(out)
+        if status & 0x1:
+            resps.append(axi_resp(out))
+        elif not (status & 0x2):
+            return resps
+        await axi_cdc_wait(dut, 4)
+    raise AssertionError(f"{label}: bridge never went idle ({resps})")
+
+
+async def scan_seq(dut, cmds: list[int], label: str) -> list[int]:
+    """Run *cmds* back to back, then NOP-poll until idle, like the host's
+    batched transfers; return the resp code of every response seen."""
+    resps: list[int] = []
+    for i, cmd in enumerate(cmds):
+        out = await dr_scan_72(dut, cmd)
+        if i and axi_status(out) & 0x1:
+            resps.append(axi_resp(out))
+    return resps + await collect_responses(dut, label)
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_w_safety(dut):
+    """Bus safety of the write path and of held ARs (BUG-280/289/296/299).
+
+    Runs with TIMEOUT=64.  The slave stalls single channels; the bridge must
+    never drop a VALID before READY (AxiTrace checks every cycle), must finish
+    every write it started with exactly the beats it announced, must take every
+    B itself, and must never put a burst on the bus before all of its beats are
+    in, or one that breaks an AXI burst rule.
+    """
+    axi_ram, trace = await init_ejtagaxi(dut)
+    wif = axi_ram.write_if
+    rif = axi_ram.read_if
+    mem = axi_ram.read_dword
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x002C, 0, 0), "FEATURES")
+    assert axi_rdata(out) & (1 << 25), "FEATURES[25] (bus-safe writes) not set"
+    assert await axi_bus_status(dut) == 0
+
+    # ---- A burst answers one response per beat (Verilog and VHDL alike).
+    resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, 0x080, burst_cfg(3), 0)] + [
+        axi_cmd(CMD_BURST_WDATA, 0, 0x0800_0000 + i, 0xF) for i in range(4)], "burst acks")
+    assert resps == [0, 0, 0, 0], f"burst responses {resps}"
+    assert [mem(0x080 + 4 * i) for i in range(4)] == [0x0800_0000 + i for i in range(4)]
+    assert trace.aw[-1]["len"] == 3 and len(trace.w) == 4
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_beat_acks")
+
+    # ---- AW stalled past TIMEOUT: SLVERR, but AWVALID stays up and the write
+    # completes once the slave takes it; its B produces no second response.
+    aw0, w0 = len(trace.aw), len(trace.w)
+    wif.aw_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x100, 0x1111_1111, 0xF))
+    out = await wait_resp(dut, "write with AW stalled")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    st = await axi_bus_status(dut)
+    assert st & (AXI_ST_WE_BUSY | AXI_ST_WE_DETACHED | AXI_ST_OWED) == (
+        AXI_ST_WE_BUSY | AXI_ST_WE_DETACHED | AXI_ST_OWED), hex(st)
+    assert len(trace.aw) == aw0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("aw_stall_detached")
+
+    # A write while the engine still owes the slave: SLVERR, no AW of its own.
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x104, 0x2222_2222, 0xF))
+    out = await wait_resp(dut, "write while the engine is busy")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("write_quarantine")
+
+    wif.aw_channel.pause = False
+    await axi_wait_bus_idle(dut, "AW stall")
+    assert mem(0x100) == 0x1111_1111
+    assert mem(0x104) == 0, "a quarantined write reached the bus"
+    assert len(trace.aw) == aw0 + 1 and len(trace.w) == w0 + 1
+    assert trace.w[-1]["cycle"] <= trace.aw[-1]["cycle"], "expected W before AW here"
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x108, 0x3333_3333, 0xF), "write after the stall")
+    assert axi_resp(out) == 0 and mem(0x108) == 0x3333_3333
+    assert await collect_responses(dut, "no stray B response") == []
+
+    # ---- B held back past TIMEOUT: absorbed by the engine, never handed to a
+    # later write.
+    wif.b_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x200, 0x4444_4444, 0xF))
+    out = await wait_resp(dut, "write with B stalled")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & AXI_ST_WE_DETACHED
+    aw1 = len(trace.aw)
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x204, 0x5555_5555, 0xF))
+    out = await wait_resp(dut, "write while B is owed")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert len(trace.aw) == aw1
+    wif.b_channel.pause = False
+    await axi_wait_bus_idle(dut, "late B")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x208, 0x6666_6666, 0xF), "write after late B")
+    assert axi_resp(out) == 0
+    assert await collect_responses(dut, "late B gave no response") == []
+    assert mem(0x200) == 0x4444_4444 and mem(0x204) == 0 and mem(0x208) == 0x6666_6666
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("late_b_absorbed")
+
+    # ---- Incomplete bursts never reach the bus.
+    aw2 = len(trace.aw)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x300, burst_cfg(3), 0))
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, 0x7000_0000, 0xF))
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, 0x7000_0001, 0xF))
+    await axi_cdc_wait(dut, 10)
+    # Collecting alone owes the slave nothing.
+    assert await axi_bus_status(dut) & (AXI_ST_COLLECTING | AXI_ST_OWED) == AXI_ST_COLLECTING
+    await clear_after_error(dut)  # CMD_RESET mid-collection
+    assert await axi_bus_status(dut) == 0
+    assert len(trace.aw) == aw2 and mem(0x300) == 0 and mem(0x304) == 0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("collect_reset_discard")
+
+    resps = await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0x340, burst_cfg(3), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7100_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7100_0001, 0xF),
+        axi_cmd(CMD_WRITE, 0x380, 0x7200_0000, 0xF)], "write ends a collection")
+    assert resps == [0, 0, 0], resps
+    assert len(trace.aw) == aw2 + 1 and trace.aw[-1]["addr"] == 0x380
+    assert mem(0x340) == 0 and mem(0x380) == 0x7200_0000
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("collect_cmd_discard")
+
+    resps = await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0x400, burst_cfg(3), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7300_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7300_0001, 0xF),
+        axi_cmd(CMD_BURST_SETUP, 0x440, burst_cfg(1), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7400_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7400_0001, 0xF)], "SETUP restarts a collection")
+    assert resps == [0, 0, 0, 0], resps
+    assert len(trace.aw) == aw2 + 2
+    assert trace.aw[-1]["addr"] == 0x440 and trace.aw[-1]["len"] == 1
+    assert mem(0x400) == 0 and mem(0x440) == 0x7400_0000 and mem(0x444) == 0x7400_0001
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("collect_setup_restart")
+
+    # ---- W stalled mid-burst, then CMD_RESET: the burst still completes with
+    # exactly its four beats, WLAST on the fourth, and the original data.
+    w2 = len(trace.w)
+    values = [0x7500_0000 + i for i in range(4)]
+    wif.w_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x500, burst_cfg(3), 0))
+    for v in values:
+        await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, v, 0xF))
+    await axi_cdc_wait(dut, 6)
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & AXI_ST_WE_DETACHED
+    wif.w_channel.pause = False
+    await axi_wait_bus_idle(dut, "W stall + RESET")
+    beats = trace.w[w2:]
+    assert [b["data"] for b in beats] == values, beats
+    assert [b["last"] for b in beats] == [0, 0, 0, 1]
+    assert [mem(0x500 + 4 * i) for i in range(4)] == values
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("w_stall_reset_completes")
+
+    # ---- Single-beat burst whose W is taken before its AW.
+    wif.aw_channel.pause = True
+
+    async def release_aw_after_w() -> None:
+        w_now = len(trace.w)
+        while len(trace.w) == w_now:
+            await RisingEdge(dut.axi_clk)
+        for _ in range(4):
+            await RisingEdge(dut.axi_clk)
+        wif.aw_channel.pause = False
+
+    release = cocotb.start_soon(release_aw_after_w())
+    resps = await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0x600, burst_cfg(0), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7600_0000, 0xF)], "W-before-AW single-beat burst")
+    await release
+    assert resps == [0], resps
+    assert trace.w[-1]["cycle"] < trace.aw[-1]["cycle"]
+    assert mem(0x600) == 0x7600_0000
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("w_before_aw")
+
+    # ---- Bursts that break an AXI rule or exceed the buffer: SLVERR for every
+    # beat, nothing on the bus.
+    refused = [
+        (0xFFC, burst_cfg(1)),            # INCR crossing 4 KB
+        (0x700, burst_cfg(0, size=3)),    # 8-byte beats on a 4-byte bus
+        (0x700, burst_cfg(0, burst=3)),   # reserved burst type
+        (0x700, burst_cfg(16, burst=0)),  # FIXED longer than 16 beats
+        (0x700, burst_cfg(2, burst=2)),   # WRAP of 3 beats
+        (0x702, burst_cfg(1, burst=2)),   # WRAP from an unaligned address
+        (0x700, burst_cfg(16)),           # 17 beats > FIFO_DEPTH (16)
+    ]
+    for addr, cfg in refused:
+        aw_n, ar_n = len(trace.aw), len(trace.ar)
+        beats_n = (cfg & 0xFF) + 1
+        resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr, cfg, 0)] + [
+            axi_cmd(CMD_BURST_WDATA, 0, 0xBAD0_0000 + i, 0xF) for i in range(beats_n)],
+            f"refused burst 0x{addr:X}/0x{cfg:X}")
+        assert resps == [2] * beats_n, (hex(addr), hex(cfg), resps)
+        await clear_after_error(dut)
+        assert len(trace.aw) == aw_n, f"refused burst 0x{addr:X}/0x{cfg:X} reached the bus"
+        if cfg == burst_cfg(16):
+            continue  # a 17-beat INCR read is legal (reads may exceed the FIFO)
+        resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr, cfg, 0),
+                                     axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                               f"refused read 0x{addr:X}/0x{cfg:X}")
+        assert resps == [2], (hex(addr), hex(cfg), resps)
+        assert len(trace.ar) == ar_n, f"refused read 0x{addr:X}/0x{cfg:X} reached the bus"
+        await clear_after_error(dut)
+    assert mem(0x700) == 0 and mem(0x704) == 0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_refused")
+
+    # Legal edge cases go through.
+    assert await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0xFF8, burst_cfg(1), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7700_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7700_0001, 0xF)], "INCR to the 4 KB edge") == [0, 0]
+    assert mem(0xFF8) == 0x7700_0000 and mem(0xFFC) == 0x7700_0001
+    assert await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, 0x780, burst_cfg(3, burst=0), 0)] + [
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7800_0000 + i, 0xF) for i in range(4)],
+        "FIXED burst") == [0, 0, 0, 0]
+    assert mem(0x780) == 0x7800_0003 and mem(0x784) == 0
+    assert await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, 0x7C8, burst_cfg(3, burst=2), 0)] + [
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7900_0000 + i, 0xF) for i in range(4)],
+        "WRAP burst") == [0, 0, 0, 0]
+    assert [mem(0x7C0 + 4 * i) for i in range(4)] == [
+        0x7900_0002, 0x7900_0003, 0x7900_0000, 0x7900_0001]
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_legal_edges")
+
+    # ---- AR stalled past TIMEOUT: SLVERR, ARVALID stays up, reads are refused
+    # without an AR until the slave takes it, then its beat is drained.
+    axi_ram.write_dword(0x900, 0x9000_0000)
+    axi_ram.write_dword(0x904, 0x9000_0001)
+    ar0 = len(trace.ar)
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x900, 0, 0))
+    out = await wait_resp(dut, "read with AR stalled")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & (AXI_ST_AR_ORPHAN | AXI_ST_OWED) == (
+        AXI_ST_AR_ORPHAN | AXI_ST_OWED)
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x904, 0, 0))
+    out = await wait_resp(dut, "read while the AR is held")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert len(trace.ar) == ar0
+    rif.ar_channel.pause = False
+    await axi_wait_bus_idle(dut, "AR stall")
+    assert len(trace.ar) == ar0 + 1 and trace.ar[-1]["addr"] == 0x900
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x904, 0, 0), "read after AR stall")
+    assert axi_rdata(out) == 0x9000_0001
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("ar_stall_held")
+
+    # CMD_RESET while a burst AR waits: the AR stays up, then is drained.
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x900, burst_cfg(1), 0))
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut, 8)
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & (AXI_ST_AR_ORPHAN | AXI_ST_OWED) == (
+        AXI_ST_AR_ORPHAN | AXI_ST_OWED)
+    rif.ar_channel.pause = False
+    await axi_wait_bus_idle(dut, "AR held over RESET")
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x900, 0, 0), "read after held AR")
+    assert axi_rdata(out) == 0x9000_0000
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("ar_reset_held")
+
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("axi_valid_stable")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_ar_reset_race(dut):
+    """CMD_RESET recognized in the very cycle the slave takes a pending AR.
+
+    Runs with TIMEOUT=1024, so the AR is still the FSM's own (not yet held
+    after a timeout) when the RESET arrives.  The slave's ARREADY is released
+    at every AXI cycle offset around the RESET; in each case the bridge must
+    issue that AR exactly once (a VALID left up after its handshake is a
+    second read nobody drains) and the next read must return its own data.
+    """
+    axi_ram, trace = await init_ejtagaxi(dut)
+    rif = axi_ram.read_if
+    axi_ram.write_dword(0xA00, 0xA000_0000)
+    axi_ram.write_dword(0xA04, 0xA000_0004)
+
+    async def release_ar(k: int) -> None:
+        await RisingEdge(dut.update)
+        for _ in range(k):
+            await RisingEdge(dut.axi_clk)
+        rif.ar_channel.pause = False
+
+    for d, k in [(d, k) for d in range(3) for k in range(12)]:
+        ar0 = len(trace.ar)
+        rif.ar_channel.pause = True
+        await dr_scan_72(dut, axi_cmd(CMD_READ, 0xA00, 0, 0))
+        # d shifts the TCK/axi_clk phase of the RESET by a third of a cycle.
+        await axi_cdc_wait(dut, 2 + d)
+        rel = cocotb.start_soon(release_ar(k))
+        await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+        await rel
+        await axi_cdc_wait(dut)
+        await drain_until_idle(dut)
+        await axi_wait_bus_idle(dut, f"AR/RESET race d={d} k={k}")
+        await axi_cdc_wait(dut, 20)
+        assert len(trace.ar) == ar0 + 1, (
+            f"d={d} k={k}: {len(trace.ar) - ar0} AR handshakes for one READ")
+        out = await issue_and_wait_valid(
+            dut, axi_cmd(CMD_READ, 0xA04, 0, 0), f"read after race d={d} k={k}")
+        assert axi_rdata(out) == 0xA000_0004, f"d={d} k={k}: {axi_rdata(out):#x}"
+
+    assert not trace.violations, trace.violations
 
 
 UART_CMD_NOP = 0x0

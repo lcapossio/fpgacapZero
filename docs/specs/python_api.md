@@ -2832,6 +2832,31 @@ has_stream -> bool
 
 True when the bridge reports the streaming read (FEATURES[24]).
 
+#### `EjtagAxiController.has_safe_writes`
+
+```python
+@property
+has_safe_writes -> bool
+```
+
+True when the bridge reports the bus-safe write model (FEATURES[25]).
+
+Such a bridge buffers a whole burst before AW, never drops a VALID
+before its READY, always takes the B, refuses illegal bursts with
+SLVERR before touching the bus, and has CFG_AXI_STATUS.
+
+#### `EjtagAxiController.axi_status`
+
+```python
+axi_status() -> dict
+```
+
+Read CFG_AXI_STATUS: what the bridge still owes the AXI slave.
+
+After a timeout (SLVERR) the bridge keeps any VALID it raised until the
+slave takes it and drains any read it started; this shows whether that
+is still going on.  Needs FEATURES[25].
+
 #### `EjtagAxiController.connect`
 
 ```python
@@ -2913,7 +2938,7 @@ AXI4 burst write. N+2 scans.
 
 **Raises:**
 
-- `ValueError`: If `len(data)` is 0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+- `ValueError`: If `len(data)` is 0, exceeds 256 (AXI4 max burst), exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the burst crosses a 4 KiB boundary (see `burst_write_range`).
 
 #### `EjtagAxiController.burst_read`
 
@@ -2930,7 +2955,7 @@ fifo[0]. So we need a priming scan before the data scans.
 
 **Raises:**
 
-- `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES. The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
+- `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the burst crosses a 4 KiB boundary (see `burst_read_range`). The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
 
 #### `EjtagAxiController.burst_read_range`
 

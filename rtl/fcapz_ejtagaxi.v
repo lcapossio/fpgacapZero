@@ -129,31 +129,32 @@ module fcapz_ejtagaxi #(
     localparam CMD_BURST_RDATA = 4'h8;
     localparam CMD_BURST_RSTART= 4'h9;
     localparam CMD_STREAM_RSTART = 4'hA;
+    // Internal only: the TCK side queues the first BURST_WDATA after a
+    // BURST_SETUP under this code, so the AXI side can tell a new burst from
+    // continuation data.  The DR never accepts 4'hB (it decodes as a NOP).
+    localparam CMD_BURST_WFIRST = 4'hB;
     localparam CMD_CONFIG      = 4'hE;
     localparam CMD_RESET       = 4'hF;
 
     // AXI FSM states
+    // (Codes 2, 5, 6, 13 and 14 belonged to the old per-beat write states.)
     localparam [3:0] ST_IDLE        = 4'd0,
-                     ST_AW_W        = 4'd1,
-                     ST_WAIT_B      = 4'd2,
+                     ST_W_WAIT      = 4'd1,
                      ST_AR          = 4'd3,
                      ST_WAIT_R      = 4'd4,
-                     ST_BURST_AW_W  = 4'd5,
-                     ST_BURST_W     = 4'd6,
                      ST_BURST_AR    = 4'd7,
                      ST_BURST_R_FILL= 4'd8,
                      ST_DONE         = 4'd9,
                      ST_TIMEOUT_ERR  = 4'd10,
                      ST_CMD_FETCH    = 4'd11,
                      ST_CMD_DISPATCH = 4'd12,
-                     ST_BURST_W_FETCH= 4'd13,
-                     ST_BURST_W_LOAD = 4'd14,
                      ST_STREAM_ISSUE = 4'd15;
 
     // Config register addresses
     localparam CFG_VERSION   = 16'h0000;
     localparam CFG_VERSION_ALIAS = 16'h0004;
     localparam CFG_FEATURES  = 16'h002C;
+    localparam CFG_AXI_STATUS = 16'h0030;
     localparam CFG_DBG_REC_COUNT      = 16'h0100;
     localparam CFG_DBG_REC0_SR_ADDR   = 16'h0120;
     localparam CFG_DBG_REC0_SR_PAYLOAD= 16'h0124;
@@ -217,6 +218,9 @@ module fcapz_ejtagaxi #(
 
     // ---- Async FIFO pointer widths -------------------------------------------
     localparam FIFO_AW = $clog2(FIFO_DEPTH);
+    // Write buffer index width (FIFO_DEPTH = 1 still needs one bit).
+    localparam WB_AW = (FIFO_AW > 0) ? FIFO_AW : 1;
+    localparam WB_W  = DATA_W + DATA_W/8;
     // Wide enough to count to TIMEOUT - 1 (12 bits at the default 4096).
     localparam TO_W = (TIMEOUT > 1) ? $clog2(TIMEOUT) : 1;
     localparam CMD_FIFO_AW = $clog2(CMD_FIFO_DEPTH);
@@ -247,6 +251,8 @@ module fcapz_ejtagaxi #(
             CMD_FIFO_DEPTH_must_be_power_of_2_and_at_least_2 _cmd_depth_check_FAILED();
         if (RESP_FIFO_DEPTH < 2 || (RESP_FIFO_DEPTH & (RESP_FIFO_DEPTH - 1)))
             RESP_FIFO_DEPTH_must_be_power_of_2_and_at_least_2 _resp_depth_check_FAILED();
+        if (ADDR_W < 12)
+            ADDR_W_must_be_at_least_12 _addr_w_check_FAILED();
     endgenerate
     initial begin
         if (FIFO_DEPTH < 1 || FIFO_DEPTH > 256)
@@ -257,6 +263,8 @@ module fcapz_ejtagaxi #(
             $error("fcapz_ejtagaxi: CMD_FIFO_DEPTH must be a power of 2 >= 2 (got %0d)", CMD_FIFO_DEPTH);
         if (RESP_FIFO_DEPTH < 2 || (RESP_FIFO_DEPTH & (RESP_FIFO_DEPTH - 1)))
             $error("fcapz_ejtagaxi: RESP_FIFO_DEPTH must be a power of 2 >= 2 (got %0d)", RESP_FIFO_DEPTH);
+        if (ADDR_W < 12)
+            $error("fcapz_ejtagaxi: ADDR_W must be >= 12 (got %0d)", ADDR_W);
     end
 
     // ========================================================================
@@ -282,11 +290,12 @@ module fcapz_ejtagaxi #(
     reg [3:0]  axi_state;
     reg        rready_q;   // R-channel ready for single reads
     reg        r_drain;    // discard the rest of a read cut off by RESET or an R timeout
-    reg [TO_W-1:0] drain_cnt;  // cycles without a beat while draining (saturates)
+    reg            ar_orphan;  // ARVALID left up by a timeout or RESET, held to AR handshake
+    reg [TO_W-1:0] drain_cnt;  // cycles without progress while a channel is owed (saturates)
     reg [TO_W-1:0] timeout_cnt;
     reg [7:0]  beat_count;
-    reg        reset_req_sync1_axi;
-    reg        reset_req_sync2_axi;
+    (* ASYNC_REG = "TRUE" *) reg reset_req_sync1_axi;
+    (* ASYNC_REG = "TRUE" *) reg reset_req_sync2_axi;
     reg        reset_req_seen_axi;
     reg        dut_reset_ack_toggle_axi;
     reg [CMDQ_W-1:0]    dbg_axi_deq_cmdq;
@@ -306,6 +315,38 @@ module fcapz_ejtagaxi #(
     reg [7:0]           strm_len;      // beats of the next burst
     reg                 strm_len_ok;   // strm_len computed for strm_addr/left
     reg [1:0]           strm_err;      // first non-OKAY rresp of the stream
+
+    // -- Write path (axi_clk domain) ------------------------------------------
+    // A write reaches the bus only once all its beats are in wbuf: a burst is
+    // collected beat by beat (each beat acknowledged as it arrives) and an
+    // incomplete one is discarded without any bus activity.  The write engine
+    // then owns AW/W/B until the slave's B, whatever the host or CMD_RESET do
+    // meanwhile (we_detached: finish, but report nothing).
+    reg [WB_W-1:0]      wbuf [0:FIFO_DEPTH-1];
+    reg [WB_W-1:0]      wbuf_q;        // registered read of wbuf[we_w_idx]
+    reg                 wb_collecting; // burst beats still to come
+    reg                 wb_bad;        // burst refused: its beats answer SLVERR
+    reg [8:0]           wb_cnt;        // beats of the burst received so far
+    reg [ADDR_W-1:0]    wb_addr;       // descriptor of the burst being collected
+    reg [7:0]           wb_len;
+    reg [2:0]           wb_size;
+    reg [1:0]           wb_type;
+    reg                 we_start;      // host FSM -> engine: start we_d_*
+    reg                 we_detach;     // host FSM -> engine: report nothing
+    reg [ADDR_W-1:0]    we_d_addr;
+    reg [7:0]           we_d_len;
+    reg [2:0]           we_d_size;
+    reg [1:0]           we_d_type;
+    reg                 we_busy;       // engine owns AW/W/B
+    reg                 we_detached;
+    reg                 we_aw_done;
+    reg [8:0]           we_w_idx;      // next beat to present
+    reg [8:0]           we_w_done;     // W handshakes so far
+    reg [7:0]           we_len;
+    reg                 we_rd_ok;      // wbuf_q holds beat we_w_idx
+    reg                 we_done;       // pulse: an attached write finished
+    reg [1:0]           we_bresp;
+    reg                 we_progress;   // pulse: an AW, W or B handshake
 
     // ========================================================================
     //  TCK domain registers
@@ -366,8 +407,11 @@ module fcapz_ejtagaxi #(
     reg [15:0] dbg_tck_update_count;
     reg [15:0] dbg_tck_enqueue_count;
     reg        reset_req_toggle;
-    reg        reset_ack_sync1_tck;
-    reg        reset_ack_sync2_tck;
+    (* ASYNC_REG = "TRUE" *) reg reset_ack_sync1_tck;
+    (* ASYNC_REG = "TRUE" *) reg reset_ack_sync2_tck;
+    reg        axi_owed;  // registered chan_busy (CFG_AXI_STATUS[5])
+    (* ASYNC_REG = "TRUE" *) reg [5:0] axi_status_sync1_tck;
+    (* ASYNC_REG = "TRUE" *) reg [5:0] axi_status_sync2_tck;
 
     // Streaming read (tck domain)
     reg              stream_mode;
@@ -623,40 +667,42 @@ module fcapz_ejtagaxi #(
     } : 256'd0;
 
     assign respq_rd_en = sel && update && resp_pop_pending && respq_rd_ready;
-    assign cmdq_rd_en = cmdq_rd_ready &&
-                        !cmdq_empty &&
-                        ((axi_state == ST_CMD_FETCH) ||
-                         (axi_state == ST_BURST_W_FETCH));
+    assign cmdq_rd_en = cmdq_rd_ready && !cmdq_empty && (axi_state == ST_CMD_FETCH);
 
-    wire burst_first_ack_push =
-        (axi_state == ST_BURST_AW_W) &&
-        ((!m_axi_awvalid || m_axi_awready) && (!m_axi_wvalid || m_axi_wready)) &&
-        (launch_burst_len != 8'd0) && respq_wr_ready && !respq_full;
-
-    wire burst_mid_ack_push =
-        (axi_state == ST_BURST_W_LOAD) &&
-        (launch_cmd == CMD_BURST_WDATA) &&
-        (beat_count != launch_burst_len) && respq_wr_ready && !respq_full;
-
+    // One response per queued command, each pushed by ST_DONE or
+    // ST_TIMEOUT_ERR (both wait for room).  An intermediate burst beat is
+    // answered OKAY when it is stored; the last one with the write's B.
     wire done_resp_push =
         (axi_state == ST_DONE) && respq_wr_ready && !respq_full;
 
     wire timeout_resp_push =
         (axi_state == ST_TIMEOUT_ERR) && respq_wr_ready && !respq_full;
 
-    assign respq_wr_en = burst_first_ack_push || burst_mid_ack_push ||
-                         done_resp_push || timeout_resp_push;
+    assign respq_wr_en = done_resp_push || timeout_resp_push;
 
     assign respq_wr_data =
-        (burst_first_ack_push || burst_mid_ack_push) ? {2'b00, {DATA_W{1'b0}}} :
-        done_resp_push                               ? {resp_code, resp_rdata} :
-        timeout_resp_push                            ? {2'b10, {DATA_W{1'b0}}} :
-                                                       {RESPQ_W{1'b0}};
+        done_resp_push    ? {resp_code, resp_rdata} :
+        timeout_resp_push ? {2'b10, {DATA_W{1'b0}}} :
+                            {RESPQ_W{1'b0}};
+
+    // First BURST_WDATA after a BURST_SETUP: queued as CMD_BURST_WFIRST.
+    wire       burst_w_first = (burst_w_beats_left == {1'b0, burst_awlen} + 9'd1);
+    wire [3:0] burst_w_cmd   = burst_w_first ? CMD_BURST_WFIRST : CMD_BURST_WDATA;
+
+    // AXI-side bus state for CFG_AXI_STATUS: flags, each a flop output,
+    // synchronized per bit.  Bits can pass the synchronizers a TCK apart (an
+    // AR handed from ar_orphan to r_drain may show neither for a moment), so
+    // "anything owed" is its own flop, axi_owed, which stays high across such
+    // hand-overs; hosts test that one bit for idle.
+    wire [5:0] axi_status_axi = {axi_owed, wb_collecting, r_drain, ar_orphan,
+                                 we_detached, we_busy};
 
     // ---- TCK: main CAPTURE / SHIFT / UPDATE logic ---------------------------
     always @(posedge tck) begin
         reset_ack_sync1_tck <= dut_reset_ack_toggle_axi;
         reset_ack_sync2_tck <= reset_ack_sync1_tck;
+        axi_status_sync1_tck <= axi_status_axi;
+        axi_status_sync2_tck <= axi_status_sync1_tck;
         cmdq_rst_tck  <= 1'b0;
         respq_rst_tck <= 1'b0;
         fifo_rst_tck  <= 1'b0;
@@ -934,7 +980,7 @@ module fcapz_ejtagaxi #(
                             // Ignore malformed zero-strobe burst writes.
                         end else if (cmdq_wr_ready && !cmdq_full && cmdq_stage_ready) begin
                             cmdq_stage_valid <= 1'b1;
-                            cmdq_stage_data  <= {CMD_BURST_WDATA, burst_addr,
+                            cmdq_stage_data  <= {burst_w_cmd, burst_addr,
                                                  sr_payload[DATA_W-1:0],
                                                  sr_wstrb[DATA_W/8-1:0],
                                                  burst_awlen, burst_awsize, burst_awburst};
@@ -950,7 +996,7 @@ module fcapz_ejtagaxi #(
                                     burst_awsize,
                                     burst_awburst
                                 };
-                                dbg_tck_update_cmdq <= {CMD_BURST_WDATA, burst_addr,
+                                dbg_tck_update_cmdq <= {burst_w_cmd, burst_addr,
                                                         sr_payload[DATA_W-1:0],
                                                         sr_wstrb[DATA_W/8-1:0],
                                                         burst_awlen, burst_awsize, burst_awburst};
@@ -1040,12 +1086,21 @@ module fcapz_ejtagaxi #(
                             // FEATURES: [7:0]=ADDR_W, [15:8]=DATA_W,
                             // [23:16]=(FIFO_DEPTH-1)  (AXI4 awlen convention,
                             // so FIFO_DEPTH=256 fits as 0xFF; host adds 1),
-                            // [24]=streaming read
-                            CFG_FEATURES:  config_rdata <= {7'd0,
+                            // [24]=streaming read, [25]=bus-safe writes
+                            // (buffered bursts, held VALIDs, owned B, burst
+                            // checks, CFG_AXI_STATUS)
+                            CFG_FEATURES:  config_rdata <= {6'd0,
+                                                            1'b1,
                                                             STREAM_ON,
                                                             FIFO_DEPTH_ENC,
                                                             DATA_W[7:0],
                                                             ADDR_W[7:0]};
+                            // AXI_STATUS: [0] write engine busy, [1] it
+                            // finishes a write nobody waits for, [2] AR held
+                            // after a timeout/RESET, [3] read beats being
+                            // drained, [4] burst write being collected,
+                            // [5] anything owed to the slave ([0]|[2]|[3]).
+                            CFG_AXI_STATUS: config_rdata <= {26'd0, axi_status_sync2_tck};
                             CFG_DBG_REC_COUNT: config_rdata <= DEBUG_EN ? {29'd0, dbg_rec_count} : 32'd0;
                             CFG_DBG_REC0_SR_ADDR: config_rdata <= DEBUG_EN ? dbg_rec_sr_addr[0] : 32'd0;
                             CFG_DBG_REC0_SR_PAYLOAD: config_rdata <= DEBUG_EN ? dbg_rec_sr_payload[0] : 32'd0;
@@ -1232,6 +1287,8 @@ module fcapz_ejtagaxi #(
         reset_req_toggle  = 1'b0;
         reset_ack_sync1_tck = 1'b0;
         reset_ack_sync2_tck = 1'b0;
+        axi_status_sync1_tck = 6'd0;
+        axi_status_sync2_tck = 6'd0;
         respq_head_seen   = 1'b0;
         resp_pop_pending  = 1'b0;
         cmdq_stage_valid  = 1'b0;
@@ -1345,16 +1402,80 @@ module fcapz_ejtagaxi #(
         m_axi_arvalid       = 1'b0;
         rready_q            = 1'b0;
         r_drain             = 1'b0;
+        ar_orphan           = 1'b0;
         drain_cnt           = {TO_W{1'b0}};
         cmdq_rst_axi        = 1'b0;
         fifo_rst_axi        = 1'b0;
         respq_rst_axi       = 1'b0;
+        wbuf_q              = {WB_W{1'b0}};
+        wb_collecting       = 1'b0;
+        wb_bad              = 1'b0;
+        wb_cnt              = 9'd0;
+        wb_addr             = {ADDR_W{1'b0}};
+        wb_len              = 8'd0;
+        wb_size             = 3'b010;
+        wb_type             = 2'b01;
+        we_start            = 1'b0;
+        we_detach           = 1'b0;
+        we_d_addr           = {ADDR_W{1'b0}};
+        we_d_len            = 8'd0;
+        we_d_size           = 3'b010;
+        we_d_type           = 2'b01;
+        we_busy             = 1'b0;
+        we_detached         = 1'b0;
+        we_aw_done          = 1'b0;
+        we_w_idx            = 9'd0;
+        we_w_done           = 9'd0;
+        we_len              = 8'd0;
+        we_rd_ok            = 1'b0;
+        we_done             = 1'b0;
+        we_bresp            = 2'b00;
+        we_progress         = 1'b0;
+    end
+
+    // Burst descriptor check, before any VALID goes up: transfer size within
+    // the bus, burst type not reserved, FIXED at most 16 beats, WRAP of 2, 4,
+    // 8 or 16 beats from a size-aligned address, INCR inside one 4 KB page
+    // counted from the size-aligned start.  A FIXED or aligned WRAP burst
+    // never crosses 4 KB (its window is at most 2 KB and aligned).
+    function burst_ok;
+        input [ADDR_W-1:0] addr;
+        input [7:0]        len;
+        input [2:0]        size;
+        input [1:0]        btype;
+        reg   [11:0]       a0;
+        reg   [16:0]       span;
+        begin
+            a0   = addr[11:0] & ~((12'd1 << size) - 12'd1);
+            span = {5'd0, a0} + (({9'd0, len} + 17'd1) << size);
+            if ((9'd1 << size) > (DATA_W / 8))
+                burst_ok = 1'b0;
+            else case (btype)
+                2'b00:   burst_ok = (len <= 8'd15);
+                2'b01:   burst_ok = (span <= 17'd4096);
+                2'b10:   burst_ok = ((len == 8'd1) || (len == 8'd3) ||
+                                     (len == 8'd7) || (len == 8'd15)) &&
+                                    ((addr[6:0] & ((7'd1 << size) - 7'd1)) == 7'd0);
+                default: burst_ok = 1'b0;
+            endcase
+        end
+    endfunction
+
+    // Read channel owes something: beats of an accepted read, or an AR held
+    // up after a timeout/RESET.  Write channel owes something: we_busy.
+    wire rd_busy   = r_drain || ar_orphan;
+    wire chan_busy = rd_busy || we_busy;
+    wire ar_hs     = m_axi_arvalid && m_axi_arready;
+
+    always @(posedge axi_clk or posedge axi_rst) begin
+        if (axi_rst)
+            axi_owed <= 1'b0;
+        else
+            axi_owed <= chan_busy;
     end
 
     // A read the slave has accepted and not finished (see r_drain).
-    wire r_inflight = (axi_state == ST_WAIT_R) || (axi_state == ST_BURST_R_FILL) ||
-                      (((axi_state == ST_AR) || (axi_state == ST_BURST_AR)) &&
-                       m_axi_arvalid && m_axi_arready);
+    wire r_inflight = (axi_state == ST_WAIT_R) || (axi_state == ST_BURST_R_FILL) || ar_hs;
 
     // Stream bursts: STREAM_BURST beats, cut at the stream end and at 4 KB.
     wire [10:0] strm_to_4k   = 11'd1024 - {1'b0, strm_addr[11:2]};
@@ -1362,6 +1483,114 @@ module fcapz_ejtagaxi #(
                                                           : STREAM_BURST[10:0];
     wire [10:0] strm_len_nxt = (strm_to_4k < strm_len_a) ? strm_to_4k : strm_len_a;
     wire        strm_room    = ({1'b0, fifo_wr_count} <= STREAM_LIMIT);
+
+    // First-beat check: refused bursts never reach the bus.
+    wire wfirst_bad = we_busy ||
+                      ({1'b0, launch_burst_len} >= FIFO_DEPTH) ||
+                      !burst_ok(launch_addr, launch_burst_len,
+                                launch_burst_size, launch_burst_type);
+
+    // ---- Write buffer -------------------------------------------------------
+    // Written in ST_CMD_DISPATCH (single write at 0, burst beat at its index),
+    // never while the engine may still read it.  wbuf_q is a registered read,
+    // so the buffer can map to block or distributed RAM.
+    wire wb_store =
+        (axi_state == ST_CMD_DISPATCH) && !we_busy &&
+        ((launch_cmd == CMD_WRITE) ||
+         ((launch_cmd == CMD_BURST_WFIRST) && ({1'b0, launch_burst_len} < FIFO_DEPTH)) ||
+         ((launch_cmd == CMD_BURST_WDATA) && wb_collecting && !wb_bad));
+    wire [8:0] wb_store_idx = (launch_cmd == CMD_BURST_WDATA) ? wb_cnt : 9'd0;
+
+    always @(posedge axi_clk) begin
+        if (wb_store)
+            wbuf[wb_store_idx[WB_AW-1:0]] <= {launch_wstrb, launch_wdata};
+        wbuf_q <= wbuf[we_w_idx[WB_AW-1:0]];
+    end
+
+    // ---- Write engine -------------------------------------------------------
+    // Owns AW, W and B for one write at a time.  AW and W are independent (W
+    // may complete first); each VALID and its payload stay unchanged until its
+    // handshake; exactly we_len + 1 beats go out, WLAST on the last; the B is
+    // always taken.  Only axi_rst stops it.  A detached write (host timeout or
+    // CMD_RESET) completes the same way and reports nothing.
+    always @(posedge axi_clk or posedge axi_rst) begin
+        if (axi_rst) begin
+            m_axi_awaddr  <= {ADDR_W{1'b0}};
+            m_axi_awlen   <= 8'd0;
+            m_axi_awsize  <= 3'b010;
+            m_axi_awburst <= 2'b01;
+            m_axi_awvalid <= 1'b0;
+            m_axi_wdata   <= {DATA_W{1'b0}};
+            m_axi_wstrb   <= {(DATA_W/8){1'b0}};
+            m_axi_wvalid  <= 1'b0;
+            m_axi_wlast   <= 1'b0;
+            m_axi_bready  <= 1'b0;
+            we_busy       <= 1'b0;
+            we_detached   <= 1'b0;
+            we_aw_done    <= 1'b0;
+            we_w_idx      <= 9'd0;
+            we_w_done     <= 9'd0;
+            we_len        <= 8'd0;
+            we_rd_ok      <= 1'b0;
+            we_done       <= 1'b0;
+            we_bresp      <= 2'b00;
+            we_progress   <= 1'b0;
+        end else begin
+            we_done     <= 1'b0;
+            we_progress <= 1'b0;
+            we_rd_ok    <= 1'b1;  // we_w_idx held a cycle: wbuf_q is its beat
+            if (!we_busy) begin
+                if (we_start) begin
+                    m_axi_awaddr  <= we_d_addr;
+                    m_axi_awlen   <= we_d_len;
+                    m_axi_awsize  <= we_d_size;
+                    m_axi_awburst <= we_d_type;
+                    m_axi_awvalid <= 1'b1;
+                    we_busy       <= 1'b1;
+                    we_detached   <= 1'b0;
+                    we_aw_done    <= 1'b0;
+                    we_w_idx      <= 9'd0;
+                    we_w_done     <= 9'd0;
+                    we_len        <= we_d_len;
+                    we_rd_ok      <= 1'b0;
+                end
+            end else begin
+                if (we_detach)
+                    we_detached <= 1'b1;
+                if (m_axi_awvalid && m_axi_awready) begin
+                    m_axi_awvalid <= 1'b0;
+                    we_aw_done    <= 1'b1;
+                    we_progress   <= 1'b1;
+                end
+                if (m_axi_wvalid && m_axi_wready) begin
+                    m_axi_wvalid <= 1'b0;
+                    m_axi_wlast  <= 1'b0;
+                    we_w_done    <= we_w_done + 9'd1;
+                    we_progress  <= 1'b1;
+                end else if (!m_axi_wvalid && (we_w_idx <= {1'b0, we_len}) && we_rd_ok) begin
+                    m_axi_wdata  <= wbuf_q[DATA_W-1:0];
+                    m_axi_wstrb  <= wbuf_q[WB_W-1:DATA_W];
+                    m_axi_wvalid <= 1'b1;
+                    m_axi_wlast  <= (we_w_idx == {1'b0, we_len});
+                    we_w_idx     <= we_w_idx + 9'd1;
+                    we_rd_ok     <= 1'b0;
+                end
+                // B once AW and every beat are through.
+                if (we_aw_done && (we_w_done == {1'b0, we_len} + 9'd1))
+                    m_axi_bready <= 1'b1;
+                if (m_axi_bready && m_axi_bvalid) begin
+                    m_axi_bready <= 1'b0;
+                    we_busy      <= 1'b0;
+                    we_detached  <= 1'b0;
+                    we_progress  <= 1'b1;
+                    if (!we_detached && !we_detach) begin
+                        we_done  <= 1'b1;
+                        we_bresp <= m_axi_bresp;
+                    end
+                end
+            end
+        end
+    end
 
     // ---- AXI master FSM -----------------------------------------------------
     always @(posedge axi_clk or posedge axi_rst) begin
@@ -1393,16 +1622,6 @@ module fcapz_ejtagaxi #(
             launch_burst_len  <= 8'd0;
             launch_burst_size <= 3'b010;
             launch_burst_type <= 2'b01;
-            m_axi_awaddr      <= {ADDR_W{1'b0}};
-            m_axi_awlen       <= 8'd0;
-            m_axi_awsize      <= 3'b010;
-            m_axi_awburst     <= 2'b01;
-            m_axi_awvalid     <= 1'b0;
-            m_axi_wdata       <= {DATA_W{1'b0}};
-            m_axi_wstrb       <= {(DATA_W/8){1'b0}};
-            m_axi_wvalid      <= 1'b0;
-            m_axi_wlast       <= 1'b0;
-            m_axi_bready      <= 1'b0;
             m_axi_araddr      <= {ADDR_W{1'b0}};
             m_axi_arlen       <= 8'd0;
             m_axi_arsize      <= 3'b010;
@@ -1410,6 +1629,7 @@ module fcapz_ejtagaxi #(
             m_axi_arvalid     <= 1'b0;
             rready_q          <= 1'b0;
             r_drain           <= 1'b0;
+            ar_orphan         <= 1'b0;
             drain_cnt         <= {TO_W{1'b0}};
             cmdq_rst_axi      <= 1'b0;
             fifo_rst_axi      <= 1'b0;
@@ -1420,20 +1640,37 @@ module fcapz_ejtagaxi #(
             strm_len          <= 8'd0;
             strm_len_ok       <= 1'b0;
             strm_err          <= 2'b00;
+            wb_collecting     <= 1'b0;
+            wb_bad            <= 1'b0;
+            wb_cnt            <= 9'd0;
+            wb_addr           <= {ADDR_W{1'b0}};
+            wb_len            <= 8'd0;
+            wb_size           <= 3'b010;
+            wb_type           <= 2'b01;
+            we_start          <= 1'b0;
+            we_detach         <= 1'b0;
+            we_d_addr         <= {ADDR_W{1'b0}};
+            we_d_len          <= 8'd0;
+            we_d_size         <= 3'b010;
+            we_d_type         <= 2'b01;
         end else begin
             reset_req_sync1_axi <= reset_req_toggle;
+            we_start  <= 1'b0;
+            we_detach <= 1'b0;
             // The drain only ends at RLAST: a beat that arrives however late
-            // is still discarded.  Commands wait for it at most TIMEOUT
-            // cycles without a beat (drain_cnt); after that they run, but
-            // reads answer SLVERR without issuing an AR (ST_CMD_DISPATCH), so
-            // a slave that never answers cannot wedge the bridge.
-            if (!r_drain || m_axi_rvalid) begin
+            // is still discarded.  While a channel is owed (drain, held AR,
+            // busy write engine) commands wait for it at most TIMEOUT cycles
+            // without progress (drain_cnt); after that they run, but a read
+            // answers SLVERR without an AR while the read channel is owed and
+            // a write answers SLVERR without an AW while the engine is busy
+            // (ST_CMD_DISPATCH), so a slave that never answers cannot wedge
+            // the bridge, and nothing owed to the slave is ever withdrawn.
+            if (r_drain && m_axi_rvalid && m_axi_rlast)
+                r_drain <= 1'b0;
+            if (!chan_busy || (r_drain && m_axi_rvalid) || ar_hs || we_progress)
                 drain_cnt <= {TO_W{1'b0}};
-                if (r_drain && m_axi_rvalid && m_axi_rlast)
-                    r_drain <= 1'b0;
-            end else if (drain_cnt < TIMEOUT - 1) begin
+            else if (drain_cnt < TIMEOUT - 1)
                 drain_cnt <= drain_cnt + 1;
-            end
             reset_req_sync2_axi <= reset_req_sync1_axi;
             if (DEBUG_EN) begin
                 dbg_axi_deq_fire <= 1'b0;
@@ -1476,6 +1713,10 @@ module fcapz_ejtagaxi #(
                 end
             end
             if (reset_req_sync2_axi != reset_req_seen_axi) begin
+                // CMD_RESET clears the host side only.  Whatever the slave
+                // is owed stays owed: a write in the engine is detached and
+                // finishes, an AR not yet accepted stays up (ar_orphan) and a
+                // read already accepted is drained (r_drain).
                 reset_req_seen_axi     <= reset_req_sync2_axi;
                 dut_reset_ack_toggle_axi <= reset_req_sync2_axi;
                 axi_state              <= ST_IDLE;
@@ -1490,17 +1731,21 @@ module fcapz_ejtagaxi #(
                 launch_burst_type      <= 2'b01;
                 resp_rdata             <= {DATA_W{1'b0}};
                 resp_code              <= 2'b00;
-                m_axi_awvalid          <= 1'b0;
-                m_axi_wvalid           <= 1'b0;
-                m_axi_wlast            <= 1'b0;
-                m_axi_bready           <= 1'b0;
-                m_axi_arvalid          <= 1'b0;
                 rready_q               <= 1'b0;
                 cmdq_rst_axi           <= 1'b1;
                 respq_rst_axi          <= 1'b1;
                 fifo_rst_axi           <= 1'b1;
                 strm_active            <= 1'b0;
                 strm_len_ok            <= 1'b0;
+                wb_collecting          <= 1'b0;
+                wb_bad                 <= 1'b0;
+                we_detach              <= 1'b1;
+                // An AR the slave takes in this very cycle is done (its read
+                // is drained below); one it has not taken stays up.
+                if (ar_hs)
+                    m_axi_arvalid <= 1'b0;
+                else if (m_axi_arvalid)
+                    ar_orphan <= 1'b1;
                 // A read already accepted by the slave is drained, so its
                 // beats cannot land in the next command (an aborted stream
                 // usually has a burst in flight).
@@ -1514,16 +1759,11 @@ module fcapz_ejtagaxi #(
 
                 // ---- Idle: consume next queued command ----
                 ST_IDLE: begin
-                    m_axi_awvalid <= 1'b0;
-                    m_axi_wvalid  <= 1'b0;
-                    m_axi_wlast   <= 1'b0;
-                    m_axi_bready  <= 1'b0;
-                    m_axi_arvalid <= 1'b0;
                     rready_q      <= 1'b0;
                     timeout_cnt   <= {TO_W{1'b0}};
                     beat_count    <= 8'd0;
 
-                    if (!cmdq_empty && (!r_drain || drain_cnt >= TIMEOUT - 1)) begin
+                    if (!cmdq_empty && (!chan_busy || drain_cnt >= TIMEOUT - 1)) begin
                         // Give FWFT async FIFO one full rd_clk cycle with
                         // empty=0 before sampling/popping the head word.
                         axi_state <= ST_CMD_FETCH;
@@ -1542,23 +1782,30 @@ module fcapz_ejtagaxi #(
                 end
 
                 ST_CMD_DISPATCH: begin
+                    // Any command but continuation data ends a burst being
+                    // collected; its beats never reach the bus.
+                    wb_collecting <= 1'b0;
+                    timeout_cnt   <= {TO_W{1'b0}};
                     case (launch_cmd)
                         CMD_WRITE: begin
-                            m_axi_awaddr  <= launch_addr;
-                            m_axi_awlen   <= 8'd0;
-                            m_axi_awsize  <= 3'b010;
-                            m_axi_awburst <= 2'b01;
-                            m_axi_awvalid <= 1'b1;
-                            m_axi_wdata   <= launch_wdata;
-                            m_axi_wstrb   <= launch_wstrb;
-                            m_axi_wvalid  <= 1'b1;
-                            m_axi_wlast   <= 1'b1;
-                            axi_state     <= ST_AW_W;
+                            if (we_busy) begin
+                                resp_code  <= 2'b10;
+                                resp_rdata <= {DATA_W{1'b0}};
+                                axi_state  <= ST_DONE;
+                            end else begin
+                                // wbuf[0] is written this cycle (wb_store).
+                                we_d_addr <= launch_addr;
+                                we_d_len  <= 8'd0;
+                                we_d_size <= 3'b010;
+                                we_d_type <= 2'b01;
+                                we_start  <= 1'b1;
+                                axi_state <= ST_W_WAIT;
+                            end
                         end
 
                         CMD_READ: begin
-                            if (r_drain) begin
-                                // Earlier beats still owed: no AR until they are in.
+                            if (rd_busy) begin
+                                // Read channel still owed: no AR.
                                 axi_state     <= ST_TIMEOUT_ERR;
                             end else begin
                                 m_axi_araddr  <= launch_addr;
@@ -1570,23 +1817,74 @@ module fcapz_ejtagaxi #(
                             end
                         end
 
+                        CMD_BURST_WFIRST: begin
+                            // First beat of a burst: latch its descriptor.
+                            // A refused burst (bad descriptor, longer than
+                            // the buffer, engine busy) answers SLVERR for
+                            // every beat and never reaches the bus.
+                            wb_addr <= launch_addr;
+                            wb_len  <= launch_burst_len;
+                            wb_size <= launch_burst_size;
+                            wb_type <= launch_burst_type;
+                            wb_cnt  <= 9'd1;
+                            wb_bad  <= wfirst_bad;
+                            if (wfirst_bad) begin
+                                wb_collecting <= (launch_burst_len != 8'd0);
+                                resp_code     <= 2'b10;
+                                resp_rdata    <= {DATA_W{1'b0}};
+                                axi_state     <= ST_DONE;
+                            end else if (launch_burst_len == 8'd0) begin
+                                we_d_addr <= launch_addr;
+                                we_d_len  <= launch_burst_len;
+                                we_d_size <= launch_burst_size;
+                                we_d_type <= launch_burst_type;
+                                we_start  <= 1'b1;
+                                axi_state <= ST_W_WAIT;
+                            end else begin
+                                wb_collecting <= 1'b1;
+                                resp_code     <= 2'b00;
+                                resp_rdata    <= {DATA_W{1'b0}};
+                                axi_state     <= ST_DONE;
+                            end
+                        end
+
                         CMD_BURST_WDATA: begin
-                            m_axi_awaddr  <= launch_addr;
-                            m_axi_awlen   <= launch_burst_len;
-                            m_axi_awsize  <= launch_burst_size;
-                            m_axi_awburst <= launch_burst_type;
-                            m_axi_awvalid <= 1'b1;
-                            m_axi_wdata   <= launch_wdata;
-                            m_axi_wstrb   <= launch_wstrb;
-                            m_axi_wvalid  <= 1'b1;
-                            m_axi_wlast   <= (launch_burst_len == 8'd0);
-                            beat_count    <= 8'd0;
-                            axi_state     <= ST_BURST_AW_W;
+                            if (!wb_collecting) begin
+                                // Continuation data with no burst open.
+                                resp_code  <= 2'b10;
+                                resp_rdata <= {DATA_W{1'b0}};
+                                axi_state  <= ST_DONE;
+                            end else if (wb_cnt == {1'b0, wb_len}) begin
+                                // Last beat: the whole burst is buffered.
+                                if (wb_bad) begin
+                                    resp_code  <= 2'b10;
+                                    resp_rdata <= {DATA_W{1'b0}};
+                                    axi_state  <= ST_DONE;
+                                end else begin
+                                    we_d_addr <= wb_addr;
+                                    we_d_len  <= wb_len;
+                                    we_d_size <= wb_size;
+                                    we_d_type <= wb_type;
+                                    we_start  <= 1'b1;
+                                    axi_state <= ST_W_WAIT;
+                                end
+                            end else begin
+                                wb_collecting <= 1'b1;
+                                wb_cnt        <= wb_cnt + 9'd1;
+                                resp_code     <= wb_bad ? 2'b10 : 2'b00;
+                                resp_rdata    <= {DATA_W{1'b0}};
+                                axi_state     <= ST_DONE;
+                            end
                         end
 
                         CMD_BURST_RSTART: begin
-                            if (r_drain) begin
+                            if (rd_busy) begin
                                 axi_state     <= ST_TIMEOUT_ERR;
+                            end else if (!burst_ok(launch_addr, launch_burst_len,
+                                                   launch_burst_size, launch_burst_type)) begin
+                                resp_code     <= 2'b10;
+                                resp_rdata    <= {DATA_W{1'b0}};
+                                axi_state     <= ST_DONE;
                             end else begin
                                 m_axi_araddr  <= launch_addr;
                                 m_axi_arlen   <= launch_burst_len;
@@ -1620,41 +1918,23 @@ module fcapz_ejtagaxi #(
                     endcase
                 end
 
-                // ---- Single write: AW + W phase ----
-                ST_AW_W: begin
-                    if (m_axi_awready && m_axi_awvalid)
-                        m_axi_awvalid <= 1'b0;
-                    if (m_axi_wready && m_axi_wvalid) begin
-                        m_axi_wvalid <= 1'b0;
-                        m_axi_wlast  <= 1'b0;
-                    end
-                    // Both channels accepted -> wait for B
-                    if ((!m_axi_awvalid || m_axi_awready) &&
-                        (!m_axi_wvalid  || m_axi_wready)) begin
-                        m_axi_awvalid <= 1'b0;
-                        m_axi_wvalid  <= 1'b0;
-                        m_axi_wlast   <= 1'b0;
-                        m_axi_bready  <= 1'b1;
-                        axi_state     <= ST_WAIT_B;
-                        timeout_cnt   <= {TO_W{1'b0}};
+                // ---- Write: wait for the engine's B ----
+                ST_W_WAIT: begin
+                    if (we_done) begin
+                        resp_code   <= we_bresp;
+                        resp_rdata  <= {DATA_W{1'b0}};
+                        axi_state   <= ST_DONE;
+                    end else if (we_progress) begin
+                        timeout_cnt <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
+                        if (timeout_cnt >= TIMEOUT - 1) begin
+                            // No handshake for TIMEOUT cycles: answer SLVERR.
+                            // The engine keeps every VALID up and takes the
+                            // B whenever it comes, reporting nothing.
+                            we_detach <= 1'b1;
                             axi_state <= ST_TIMEOUT_ERR;
-                    end
-                end
-
-                // ---- Wait for write response ----
-                ST_WAIT_B: begin
-                    if (m_axi_bvalid) begin
-                        resp_code    <= m_axi_bresp;
-                        resp_rdata   <= {DATA_W{1'b0}};
-                        m_axi_bready <= 1'b0;
-                        axi_state    <= ST_DONE;
-                    end else begin
-                        timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
-                            axi_state <= ST_TIMEOUT_ERR;
+                        end
                     end
                 end
 
@@ -1667,8 +1947,11 @@ module fcapz_ejtagaxi #(
                         timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
+                        if (timeout_cnt >= TIMEOUT - 1) begin
+                            // ARVALID stays up until the slave takes it.
+                            ar_orphan <= 1'b1;
                             axi_state <= ST_TIMEOUT_ERR;
+                        end
                     end
                 end
 
@@ -1690,88 +1973,6 @@ module fcapz_ejtagaxi #(
                     end
                 end
 
-                // ---- Burst write: AW + first W beat ----
-                ST_BURST_AW_W: begin
-                    if (m_axi_awready && m_axi_awvalid)
-                        m_axi_awvalid <= 1'b0;
-                    if (m_axi_wready && m_axi_wvalid) begin
-                        m_axi_wvalid <= 1'b0;
-                        if (m_axi_wlast)
-                            m_axi_wlast <= 1'b0;
-                    end
-                    if ((!m_axi_awvalid || m_axi_awready) &&
-                        (!m_axi_wvalid  || m_axi_wready)) begin
-                        m_axi_awvalid <= 1'b0;
-                        m_axi_wvalid  <= 1'b0;
-                        if (launch_burst_len == 8'd0) begin
-                            // Single-beat burst
-                            m_axi_wlast  <= 1'b0;
-                            m_axi_bready <= 1'b1;
-                            axi_state    <= ST_WAIT_B;
-                        end else begin
-                            // Multi-beat burst: ack first beat so host can send next
-                            if (respq_wr_ready && !respq_full) begin
-                                beat_count <= 8'd1;
-                                axi_state  <= ST_BURST_W;
-                            end
-                        end
-                        timeout_cnt <= {TO_W{1'b0}};
-                    end else begin
-                        timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
-                            axi_state <= ST_TIMEOUT_ERR;
-                    end
-                end
-
-                // ---- Burst write: subsequent beats (fed by host) ----
-                ST_BURST_W: begin
-                    // Accept W-channel handshake
-                    if (m_axi_wvalid && m_axi_wready) begin
-                        m_axi_wvalid <= 1'b0;
-                        if (m_axi_wlast) begin
-                            m_axi_wlast  <= 1'b0;
-                            m_axi_bready <= 1'b1;
-                            axi_state    <= ST_WAIT_B;
-                            timeout_cnt  <= {TO_W{1'b0}};
-                        end
-                    end
-                    // New data from host via command FIFO
-                    if (cmdq_rd_ready && !cmdq_empty && !m_axi_wvalid &&
-                        ((beat_count == launch_burst_len) || (respq_wr_ready && !respq_full))) begin
-                        axi_state    <= ST_BURST_W_FETCH;
-                    end
-                    // No timeout in ST_BURST_W: inter-beat timing is
-                    // controlled by the host via JTAG scans (~0.5 ms each),
-                    // which is far longer than any AXI-side timeout.
-                    // Timeout only applies to AXI handshake waits (wready,
-                    // bvalid, arready, rvalid), not to host-paced data flow.
-                end
-
-                ST_BURST_W_FETCH: begin
-                    launch_cmd   <= cmdq_cmd;
-                    launch_wdata <= cmdq_wdata;
-                    launch_wstrb <= cmdq_wstrb;
-                    axi_state    <= ST_BURST_W_LOAD;
-                end
-
-                ST_BURST_W_LOAD: begin
-                    if (launch_cmd == CMD_BURST_WDATA) begin
-                        m_axi_wdata  <= launch_wdata;
-                        m_axi_wstrb  <= launch_wstrb;
-                        m_axi_wvalid <= 1'b1;
-                        m_axi_wlast  <= (beat_count == launch_burst_len);
-                        beat_count   <= beat_count + 1;
-                        timeout_cnt  <= {TO_W{1'b0}};
-                        axi_state <= ST_BURST_W;
-                    end else begin
-                        m_axi_wvalid <= 1'b0;
-                        m_axi_wlast  <= 1'b0;
-                        resp_code    <= 2'b10;
-                        resp_rdata   <= {DATA_W{1'b0}};
-                        axi_state    <= ST_DONE;
-                    end
-                end
-
                 // ---- Burst read: AR phase ----
                 ST_BURST_AR: begin
                     if (m_axi_arready) begin
@@ -1780,8 +1981,10 @@ module fcapz_ejtagaxi #(
                         timeout_cnt   <= {TO_W{1'b0}};
                     end else begin
                         timeout_cnt <= timeout_cnt + 1;
-                        if (timeout_cnt >= TIMEOUT - 1)
+                        if (timeout_cnt >= TIMEOUT - 1) begin
+                            ar_orphan <= 1'b1;
                             axi_state <= ST_TIMEOUT_ERR;
+                        end
                     end
                 end
 
@@ -1824,7 +2027,7 @@ module fcapz_ejtagaxi #(
                     end else if (!strm_len_ok) begin
                         strm_len    <= strm_len_nxt[7:0];
                         strm_len_ok <= 1'b1;
-                    end else if (strm_room && !r_drain) begin
+                    end else if (strm_room && !rd_busy) begin
                         // While earlier beats are still owed the stream
                         // stalls; the host sees no words and aborts.
                         m_axi_araddr  <= strm_addr;
@@ -1840,27 +2043,17 @@ module fcapz_ejtagaxi #(
                     // FIFO at JTAG pace.
                 end
 
-                // ---- Transaction complete: toggle ack ----
+                // ---- Transaction complete: push the response ----
                 ST_DONE: begin
-                    m_axi_awvalid <= 1'b0;
-                    m_axi_wvalid  <= 1'b0;
-                    m_axi_wlast   <= 1'b0;
-                    m_axi_bready  <= 1'b0;
-                    m_axi_arvalid <= 1'b0;
                     rready_q      <= 1'b0;
                     if (respq_wr_ready && !respq_full) begin
                         axi_state     <= ST_IDLE;
                     end
                 end
 
-                // ---- Timeout error: signal error and ack ----
+                // ---- Timeout error: push SLVERR ----
                 ST_TIMEOUT_ERR: begin
                     strm_active   <= 1'b0;
-                    m_axi_awvalid <= 1'b0;
-                    m_axi_wvalid  <= 1'b0;
-                    m_axi_wlast   <= 1'b0;
-                    m_axi_bready  <= 1'b0;
-                    m_axi_arvalid <= 1'b0;
                     rready_q      <= 1'b0;
                     resp_code     <= 2'b10; // SLVERR
                     resp_rdata    <= {DATA_W{1'b0}};
@@ -1874,6 +2067,14 @@ module fcapz_ejtagaxi #(
                 end
 
             endcase
+
+            // An AR left up by a timeout or RESET: drop it at its handshake,
+            // whatever the FSM is doing, and drain the read it started.
+            if (ar_orphan && ar_hs) begin
+                m_axi_arvalid <= 1'b0;
+                ar_orphan     <= 1'b0;
+                r_drain       <= 1'b1;
+            end
         end
     end
 

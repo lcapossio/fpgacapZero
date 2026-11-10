@@ -7,6 +7,11 @@ import unittest
 from typing import List
 
 from fcapz.ejtagaxi import (
+    AXI_ST_COLLECTING,
+    AXI_ST_OWED,
+    AXI_ST_R_DRAIN,
+    AXI_ST_WE_BUSY,
+    AXI_ST_WE_DETACHED,
     AXIError,
     CMD_BURST_RDATA,
     CMD_BURST_RSTART,
@@ -498,6 +503,39 @@ class EjtagAxiTests(unittest.TestCase):
         ctrl, _ = self._make_ctrl()
         with self.assertRaisesRegex(ValueError, "FIFO_DEPTH"):
             ctrl.burst_write(0x0000, [0] * 17)
+
+    def test_single_bursts_reject_4k_crossing(self):
+        ctrl, t = self._make_ctrl()
+        with self.assertRaisesRegex(ValueError, "4 KiB"):
+            ctrl.burst_write(0x0FF8, [1, 2, 3])
+        with self.assertRaisesRegex(ValueError, "4 KiB"):
+            ctrl.burst_read(0x1FFC, 2)
+        self.assertNotIn(CMD_BURST_SETUP, t.scan_log[5:])  # nothing sent
+        # Ending exactly on the boundary is legal.
+        ctrl.burst_write(0x0FF8, [1, 2])
+        self.assertEqual(ctrl.burst_read(0x0FF8, 2), [1, 2])
+
+    def test_safe_writes_feature_and_axi_status(self):
+        ctrl, _ = self._make_ctrl()
+        self.assertFalse(ctrl.has_safe_writes)
+        with self.assertRaisesRegex(RuntimeError, "FEATURES\\[25\\]"):
+            ctrl.axi_status()
+
+        t = FakeBridgeTransport()
+        t._config_regs[0x002C] |= 1 << 25
+        t._config_regs[0x0030] = (AXI_ST_WE_BUSY | AXI_ST_WE_DETACHED | AXI_ST_R_DRAIN
+                                  | AXI_ST_OWED)
+        ctrl, _ = self._make_ctrl(t)
+        self.assertTrue(ctrl.has_safe_writes)
+        st = ctrl.axi_status()
+        self.assertEqual(st["raw"], 0x2B)
+        self.assertTrue(st["write_busy"] and st["write_detached"] and st["r_drain"])
+        self.assertFalse(st["ar_held"] or st["collecting"] or st["idle"])
+        t._config_regs[0x0030] = AXI_ST_COLLECTING
+        self.assertTrue(ctrl.axi_status()["idle"])
+        # Mid hand-over the per-flag bits may all read 0; bit 5 decides.
+        t._config_regs[0x0030] = AXI_ST_OWED
+        self.assertFalse(ctrl.axi_status()["idle"])
 
     def test_error_raises_axi_error(self):
         ctrl, t = self._make_ctrl()

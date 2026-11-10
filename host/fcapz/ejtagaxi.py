@@ -42,6 +42,15 @@ CMD_RESET        = 0xF
 DR_WIDTH = 72
 STREAM_SLOT_W = 33  # streaming-read slot: {data[31:0], valid}, LSB first
 
+_CFG_AXI_STATUS = 0x0030
+# CFG_AXI_STATUS bits (bridges with FEATURES[25]).
+AXI_ST_WE_BUSY = 0x01      # write engine owns AW/W/B
+AXI_ST_WE_DETACHED = 0x02  # ...finishing a write nobody waits for
+AXI_ST_AR_HELD = 0x04      # ARVALID held after a timeout or RESET
+AXI_ST_R_DRAIN = 0x08      # discarding beats of an abandoned read
+AXI_ST_COLLECTING = 0x10   # burst write being collected (not on the bus yet)
+AXI_ST_OWED = 0x20         # anything owed to the slave (busy, AR held, drain)
+
 _BRIDGE_CORE_ID = 0x4A58  # ASCII "JX"
 _BRIDGE_ID = _BRIDGE_CORE_ID  # compatibility alias for older tests/imports
 _LEGACY_BRIDGE_ID = 0x454A4158  # ASCII "EJAX"
@@ -108,6 +117,7 @@ class EjtagAxiController:
         self._chain = chain
         self._fifo_depth: int = 0  # populated by connect() from FEATURES
         self._stream: bool = False  # FEATURES[24], populated by connect()
+        self._safe_writes: bool = False  # FEATURES[25], populated by connect()
 
     def _encode(self, cmd: int, addr: int = 0, payload: int = 0,
                 wstrb: int = 0x0) -> int:
@@ -331,12 +341,60 @@ class EjtagAxiController:
             "data_w": (features >> 8) & 0xFF,
             "fifo_depth": ((features >> 16) & 0xFF) + 1,
             "stream": bool((features >> 24) & 1),
+            "safe_writes": bool((features >> 25) & 1),
         }
 
     @property
     def has_stream(self) -> bool:
         """True when the bridge reports the streaming read (FEATURES[24])."""
         return self._stream
+
+    @property
+    def has_safe_writes(self) -> bool:
+        """True when the bridge reports the bus-safe write model (FEATURES[25]).
+
+        Such a bridge buffers a whole burst before AW, never drops a VALID
+        before its READY, always takes the B, refuses illegal bursts with
+        SLVERR before touching the bus, and has CFG_AXI_STATUS.
+        """
+        return self._safe_writes
+
+    def axi_status(self) -> dict:
+        """Read CFG_AXI_STATUS: what the bridge still owes the AXI slave.
+
+        After a timeout (SLVERR) the bridge keeps any VALID it raised until the
+        slave takes it and drains any read it started; this shows whether that
+        is still going on.  Needs FEATURES[25].
+        """
+        if not self._safe_writes:
+            raise RuntimeError(
+                "axi_status: bridge has no CFG_AXI_STATUS (FEATURES[25]=0)"
+            )
+        decoded = self._scan_batch(
+            [(CMD_CONFIG, _CFG_AXI_STATUS, 0, 0), (CMD_NOP, 0, 0, 0)]
+        )
+        raw = decoded[1][2] & 0x3F
+        return {
+            "raw": raw,
+            "write_busy": bool(raw & AXI_ST_WE_BUSY),
+            "write_detached": bool(raw & AXI_ST_WE_DETACHED),
+            "ar_held": bool(raw & AXI_ST_AR_HELD),
+            "r_drain": bool(raw & AXI_ST_R_DRAIN),
+            "collecting": bool(raw & AXI_ST_COLLECTING),
+            # Bit 5 is one flop on the AXI side: unlike [0], [2] and [3],
+            # which cross the clock domain independently, it cannot show a
+            # gap while an obligation passes from one flag to another.
+            "idle": not (raw & AXI_ST_OWED),
+        }
+
+    @staticmethod
+    def _check_4k(name: str, base_addr: int, count: int) -> None:
+        """An INCR burst must not cross a 4 KiB boundary (AXI4)."""
+        if (base_addr & 0xFFC) + 4 * count > 0x1000:
+            raise ValueError(
+                f"{name}: {count} words from 0x{base_addr:X} cross a 4 KiB "
+                f"boundary (AXI4 forbids it); use {name}_range"
+            )
 
     def connect(self) -> dict:
         """Open transport, select chain, and probe bridge identity.
@@ -391,6 +449,7 @@ class EjtagAxiController:
         # Add 1 back to recover the true depth (max supported burst beats).
         self._fifo_depth = int(info["fifo_depth"])
         self._stream = bool(info.get("stream", False))
+        self._safe_writes = bool(info.get("safe_writes", False))
         self._prime_cdc()
         return info
 
@@ -420,6 +479,7 @@ class EjtagAxiController:
                 info = self._decode_config(identity_or_version, legacy_version, features)
                 self._fifo_depth = int(info["fifo_depth"])
                 self._stream = bool(info.get("stream", False))
+                self._safe_writes = bool(info.get("safe_writes", False))
                 self._prime_cdc()
                 return info
             finally:
@@ -490,7 +550,8 @@ class EjtagAxiController:
 
         Raises:
             ValueError: If ``len(data)`` is 0, exceeds 256 (AXI4 max burst),
-                or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+                exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the
+                burst crosses a 4 KiB boundary (see :meth:`burst_write_range`).
         """
         n = len(data)
         if n == 0:
@@ -502,6 +563,7 @@ class EjtagAxiController:
                 f"burst_write: count {n} exceeds bridge FIFO_DEPTH "
                 f"({self._fifo_depth}); rebuild bitstream with larger FIFO_DEPTH"
             )
+        self._check_4k("burst_write", base_addr, n)
         burst_len = n - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
         scans = [(CMD_BURST_SETUP, base_addr, config, 0)]
@@ -540,7 +602,8 @@ class EjtagAxiController:
 
         Raises:
             ValueError: If ``count`` is <=0, exceeds 256 (AXI4 max burst),
-                or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+                exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the
+                burst crosses a 4 KiB boundary (see :meth:`burst_read_range`).
                 The bridge cannot buffer more beats than its FIFO holds —
                 rebuild the bitstream with a larger FIFO_DEPTH parameter
                 if longer bursts are required.
@@ -554,6 +617,7 @@ class EjtagAxiController:
                 f"burst_read: count {count} exceeds bridge FIFO_DEPTH "
                 f"({self._fifo_depth}); rebuild bitstream with larger FIFO_DEPTH"
             )
+        self._check_4k("burst_read", base_addr, count)
         burst_len = count - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
         scans = [
