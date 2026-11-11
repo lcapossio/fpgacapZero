@@ -703,11 +703,30 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   disconnect before programming with them.  On Linux, install FTDI's D2XX library and
   detach `ftdi_sio` from the adapter.  `$FCAPZ_D2XX_LIBRARY` names the
   library explicitly.
+- **libusb.** An adapter bound to WinUSB or libusbK on Windows (as OpenOCD
+  or Zadig sets it up), or any adapter on Linux and macOS without FTDI's
+  library, works through libusb: `pip install fpgacapzero[usb]` (pyusb and
+  a bundled libusb), then name the channel with a `usb:` selector.  `usb:`
+  alone picks the one known adapter, `usb:Digilent USB Device A` names it
+  by description and `usb:<serial>` by serial.  libusb channels are named as
+  D2XX names them (product string, channel letter on a multi-channel chip),
+  so the known pin layouts apply.  Without the D2XX library a plain
+  `device` picks from the libusb channels too.  `list_ftdi_targets()` lists
+  the selectors of both.  Nothing reads the chip in the background as D2XX
+  does, so a transfer whose reply could fill the chip's buffer reads on a
+  second thread while it writes.
 - **Sharing in one process.** Transports on the same channel in one Python
   process share one handle: for example the ELA, EIO and bridge sessions of
   the RPC server or the GUI.  The first transport's clock, layout and sample
   edge apply,
-  and the channel closes with the last transport.
+  and the channel closes with the last transport.  A channel is matched by
+  USB VID/PID, serial and channel letter, so a D2XX name and a `usb:` name
+  for the same channel share it.  If a USB transfer fails partway, the
+  channel closes for every transport on it (the adapter may be left
+  mid-command); each refuses I/O until it connects again, which opens the
+  channel afresh.  A channel opened with `open_pins()` (`fcapz
+  openocd-bridge`) is never shared: other transports in the process are
+  refused it.
 - **Programming.** `program(bitfile)`, or `bitfile=` (CLI `--program`, RPC
   and MCP `program`, the desktop GUI's *Program on connect*), configures an
   AMD/Xilinx 7-series FPGA over JTAG with a Vivado `.bit` or a raw `.bin`,

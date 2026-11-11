@@ -74,13 +74,23 @@ def _load_d2xx():
 
 
 class FtdiDevice(NamedTuple):
-    """One FTDI channel as D2XX enumerates it."""
+    """One FTDI channel, as D2XX or libusb enumerates it."""
 
     index: int
     description: str
     serial: str
     usb_id: int  # VID << 16 | PID
     opened: bool
+    #: ``"d2xx"``, or ``"libusb"`` for a channel from
+    #: :func:`fcapz.ftdi_libusb.list_usb_devices`.
+    backend: str = "d2xx"
+    #: USB interface number of the channel (A = 0); libusb only.
+    interface: int = 0
+    #: Where libusb found it (``backend:bus:address``); libusb only.
+    location: str = ""
+
+#: Prefix of a ``device=`` selector that names a libusb channel.
+USB_PREFIX = "usb:"
 
 
 def list_ftdi_devices() -> list[FtdiDevice]:
@@ -164,13 +174,63 @@ def _channel_key(dev: FtdiDevice) -> tuple[int, str, str] | None:
 
 
 def _selects(dev: FtdiDevice, device: str) -> bool:
-    """Whether the ``device=`` selector names *dev*."""
+    """Whether the ``device=`` selector names *dev*: by description or
+    serial; a ``usb:`` selector names a libusb channel only."""
+    if device.startswith(USB_PREFIX):
+        if dev.backend != "libusb":
+            return False
+        device = device[len(USB_PREFIX):]
+        if not device:
+            return True
     return device in (dev.description, dev.serial)
+
+
+def list_ftdi_targets() -> list[str]:
+    """``device=`` selectors for every channel either backend reaches: D2XX
+    descriptions, then ``usb:`` names of libusb channels (when pyusb is
+    installed).  Raises the D2XX error when neither backend works."""
+    targets: list[str] = []
+    error: RuntimeError | None = None
+    try:
+        targets += [d.description for d in list_ftdi_devices() if d.description]
+    except RuntimeError as exc:
+        error = exc
+    try:
+        from .ftdi_libusb import list_usb_devices
+
+        targets += [USB_PREFIX + d.description for d in list_usb_devices() if d.description]
+    except RuntimeError:
+        if error is not None:
+            raise error from None
+    return targets
+
+
+def _list_devices(device: str | None) -> list[FtdiDevice]:
+    """The channels *device* chooses from: libusb's for a ``usb:``
+    selector, else D2XX's (libusb's when the D2XX library is missing and
+    pyusb is installed)."""
+    if device is not None and device.startswith(USB_PREFIX):
+        from .ftdi_libusb import list_usb_devices
+
+        return list_usb_devices()
+    try:
+        return list_ftdi_devices()
+    except RuntimeError:
+        try:
+            import usb.core  # noqa: F401
+        except ImportError:
+            raise
+        from .ftdi_libusb import list_usb_devices
+
+        return list_usb_devices()
 
 
 def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
     """Pick the adapter channel: by exact description or serial, or the
     single known JTAG adapter's channel A."""
+    if device is not None and device.startswith(USB_PREFIX):
+        devices = [d for d in devices if d.backend == "libusb"]
+        device = device[len(USB_PREFIX):] or None
     listing = ", ".join(repr(d.description) for d in devices) or "none"
     if device:
         for d in devices:
@@ -650,8 +710,9 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         #: :func:`_in_one_session`).
         self._call_local = threading.local()
         self._active_chain = 1
-        #: The channel's byte I/O (:class:`_D2xxIo`) while connected.
-        self._handle: _D2xxIo | None = None
+        #: The channel's byte I/O (:class:`_D2xxIo`, or
+        #: :class:`fcapz.ftdi_libusb.LibusbIo`) while connected.
+        self._handle = None
         self._channel: _OpenChannel | None = None
         self._io_lock = threading.RLock()
         #: Filled by :meth:`connect`.
@@ -688,7 +749,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._session_count = count
             ch = _find_open_channel(self.device)
             if ch is None:
-                dev = _pick_device(list_ftdi_devices(), self.device)
+                dev = _pick_device(_list_devices(self.device), self.device)
                 ch = _channel_open_as(dev)
             opened = ch is None
             if opened:
@@ -719,19 +780,24 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             if opened:
                 _OPEN_CHANNELS.append(ch)
 
-    def _open_mpsse(self, dev: FtdiDevice) -> tuple[_D2xxIo, tuple[int, int]]:
+    def _open_mpsse(self, dev: FtdiDevice) -> tuple[object, tuple[int, int]]:
         """Open channel *dev* and put it in MPSSE mode: ``(io, layout)``,
         with ``_handle`` set.  Released again on failure."""
-        lib = _load_d2xx()
         layout = self.layout or _layout_for(dev.description) or DEFAULT_LAYOUT
-        handle = ctypes.c_void_p()
-        status = lib.FT_Open(dev.index, ctypes.byref(handle))
-        if status != _FT_OK:
-            busy = " (in use by another program?)" if dev.opened else ""
-            raise RuntimeError(
-                f"cannot open FTDI channel {dev.description!r}{busy}: D2XX status {status}"
-            )
-        io = _D2xxIo(lib, handle)
+        if dev.backend == "libusb":
+            from .ftdi_libusb import LibusbIo, open_port
+
+            io = LibusbIo(open_port(dev, self.timeout_ms), self.timeout_ms)
+        else:
+            lib = _load_d2xx()
+            handle = ctypes.c_void_p()
+            status = lib.FT_Open(dev.index, ctypes.byref(handle))
+            if status != _FT_OK:
+                busy = " (in use by another program?)" if dev.opened else ""
+                raise RuntimeError(
+                    f"cannot open FTDI channel {dev.description!r}{busy}: D2XX status {status}"
+                )
+            io = _D2xxIo(lib, handle)
         self._handle = io
         try:
             self._setup_mpsse(layout)
@@ -783,7 +849,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             else:
                 held = None
             if held is None:
-                dev = _pick_device(list_ftdi_devices(), self.device)
+                dev = _pick_device(_list_devices(self.device), self.device)
                 held = next(
                     (c for c in _live_channels()
                      if c.key is not None and c.key == _channel_key(dev)),
@@ -984,7 +1050,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         mask = _PIN_TCK | both
         return reply[0] & mask == both and reply[1] & mask == 0
 
-    def _io(self) -> _D2xxIo:
+    def _io(self):
         """The channel's I/O, if this session may use it."""
         io = self._handle
         if io is None:

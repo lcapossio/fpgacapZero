@@ -48,6 +48,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   TAP models in Verilog and VHDL: identity, a capture triggered on a write
   address, and readback through the register window and the burst path. No
   hardware build yet.
+- **FTDI adapters through libusb.** `FtdiMpsseTransport` also drives a
+  channel through libusb (pyusb), for adapters bound to WinUSB or libusbK
+  on Windows and for Linux or macOS without FTDI's D2XX library. Install
+  `fpgacapzero[usb]` and name the channel `usb:` (the one known adapter),
+  `usb:<description>` or `usb:<serial>`. A transfer whose reply could fill
+  the chip's buffer reads on a second thread while it writes, so wide scans
+  do not stall. `list_ftdi_targets()` (and RPC/GUI discovery) lists both
+  backends' channels. Not yet hardware-validated.
+
+### Changed
+
+- **FTDI: a failed USB transfer closes the channel for every transport on
+  it.** Each refuses I/O until it connects again, which opens the channel
+  afresh; before, only the transport that saw the failure (and only during
+  programming) dropped it. Open channels are matched by USB VID/PID, serial
+  and channel letter, so a D2XX name and a `usb:` name share one channel. A
+  channel opened with `open_pins()` (`fcapz openocd-bridge`) now refuses
+  other transports in the process with a clear error.
 
 ### Fixed
 
