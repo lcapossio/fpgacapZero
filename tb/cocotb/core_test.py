@@ -2870,7 +2870,9 @@ async def fcapz_ejtagaxi_tck_order(dut):
     A burst word shown by a scan's CAPTURE is popped on that scan's UPDATE
     whatever the new command is, so it is never shown twice.  A second
     CMD_RESET sent before the first is acknowledged (AXI clock stopped) must
-    not cancel the first: the AXI side must still drop the queued read.
+    not cancel the first: the AXI side must still drop the queued read.  A
+    command sent while a RESET is in flight is refused, so none can run
+    between the two RESETs.
     """
     axi_run = [True]
 
@@ -2939,6 +2941,27 @@ async def fcapz_ejtagaxi_tck_order(dut):
     await axi_wait_bus_idle(dut, "after two RESETs")
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, base + 4, 0, 0), "read after RESETs")
     assert axi_resp(out) == 0 and axi_rdata(out) == values[1], hex(axi_rdata(out))
+
+    # No command is queued while a RESET is in flight: otherwise the AXI side
+    # runs it after that reset, and a second RESET folded into the first
+    # could not cancel it.  AXI clock stopped: RESET, then READ (refused).
+    await axi_wait_bus_idle(dut, "before RESET + READ")
+    ar0 = len(trace.ar)
+    axi_run[0] = False
+    await Timer(100, unit="ns")
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    out = await dr_scan_72(dut, axi_cmd(CMD_READ, base, 0, 0))
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    assert axi_status(out) & 0x2, "RESET in flight not reported busy"
+    axi_run[0] = True
+    await axi_cdc_wait(dut, 40)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x1), "a READ sent during RESET was answered"
+    await axi_cdc_wait(dut, 20)
+    assert len(trace.ar) == ar0, "a READ sent while RESET was in flight reached the bus"
+    await clear_after_error(dut)  # Verilog flags the refused READ (error_sticky)
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, base + 8, 0, 0), "read after RESET")
+    assert axi_resp(out) == 0 and axi_rdata(out) == values[2], hex(axi_rdata(out))
     assert not trace.violations, trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_coalesced")
 

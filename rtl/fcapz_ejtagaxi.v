@@ -477,7 +477,10 @@ module fcapz_ejtagaxi #(
     end
     wire tck_rst = tck_rst_sync[1];
 
-    wire cmdq_wr_ready        = !cmdq_wr_rst_busy;
+    // No command is queued while a CMD_RESET is in flight (status busy): the
+    // AXI side could otherwise run it after that reset, and a later RESET,
+    // folded into the one in flight, would not cancel it.
+    wire cmdq_wr_ready        = !cmdq_wr_rst_busy && !reset_busy_tck;
     wire cmdq_rd_ready        = !cmdq_rd_rst_busy;
     wire respq_wr_ready       = !respq_wr_rst_busy;
     wire respq_rd_ready       = !respq_rd_rst_busy;
@@ -601,8 +604,11 @@ module fcapz_ejtagaxi #(
     reg [31:0] config_rdata;
 
     // Capture-time data source mux
-    wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty;
-    wire capture_resp_data  = !capture_burst_data &&
+    // Nothing is captured while a CMD_RESET is in flight: the AXI sides of
+    // the FIFOs are not reset yet, so the TCK side may see stale entries.
+    wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty &&
+                              !reset_busy_tck;
+    wire capture_resp_data  = !capture_burst_data && !reset_busy_tck &&
                               respq_head_seen &&
                               respq_rd_ready &&
                               !respq_empty;

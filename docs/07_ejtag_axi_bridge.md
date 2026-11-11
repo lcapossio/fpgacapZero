@@ -179,7 +179,7 @@ polling.
 | `0x9` | BURST_RSTART | Initiate burst read (starts the address phase) |
 | `0xA` | STREAM_RSTART | Start a streaming read (addr = start, payload = word count); `STREAM_EN=1` only |
 | `0xE` | CONFIG | Read bridge config register (addr selects which) |
-| `0xF` | RESET | Reset bridge state machines (a RESET sent while one is still in flight, status `busy`, is folded into it) |
+| `0xF` | RESET | Reset bridge state machines (until the AXI side has acknowledged it, status `busy`, a further RESET is folded into it, no command is queued and no response is captured: wait for `busy` to clear) |
 
 **Status bits `[71:68]`:**
 
