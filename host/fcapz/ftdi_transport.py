@@ -759,9 +759,14 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 # A cancelled session: let its call in flight end (it fails
                 # at its next write; a read already waiting ends within the
                 # D2XX timeout, as close() may wait), then start a new one.
-                # A broken channel is reopened the same way.
+                # A broken channel is reopened the same way, in a new
+                # session: a call paused between batches must not carry on
+                # over the new channel (a cancel() meanwhile still counts).
+                broken = not self._cancelled
                 with self._io_lock:
-                    self._detach(retire=False)
+                    self._detach(retire=broken)
+                if broken:
+                    count += 1
             self._session_count = count
             ch = _find_open_channel(self.device)
             if ch is None:
@@ -1080,13 +1085,16 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         except Exception as exc:
             ch = self._channel
             if ch is not None and ch.broken is None:
-                # Under the channel lock (every I/O path holds it): the
-                # handle closes now, so a peer that reconnects opens it anew.
-                ch.broken = str(exc) or type(exc).__name__
+                # Under the channel lock (every I/O path holds it).  The
+                # handle closes before the channel is marked: the registry
+                # drops a broken channel without its lock, and a peer must
+                # not reopen the adapter while this close is still running.
                 try:
                     ch.io.close()
                 except Exception:
                     pass
+                finally:
+                    ch.broken = str(exc) or type(exc).__name__
             raise
 
     def _write(self, data: bytes) -> None:

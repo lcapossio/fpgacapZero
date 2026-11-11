@@ -996,6 +996,54 @@ class SessionTests(_FtdiTestCase):
         self.assertEqual(a.read_reg(0x0000), 0x46430004)
         self.assertEqual(len(a.read_window_block(0x0100, 700)), 700)
 
+    def test_multi_batch_read_does_not_resume_after_a_broken_channel(self):
+        a = self._transport()
+        b = self._transport()
+        a.burst = False
+        real = a._run_scans
+        batches = itertools.count()
+        real_read = self.lib.FT_Read
+
+        def short(handle, buf, n, got):
+            self.lib.FT_Read = real_read
+            status = real_read(handle, buf, n, got)
+            got._obj.value = max(0, got._obj.value - 1)
+            return status
+
+        def break_and_reconnect_between_batches(ops):
+            out = real(ops)
+            if next(batches) == 0:
+                self.lib.FT_Read = short
+                with self.assertRaises(RuntimeError):
+                    b.read_reg(0x0000)  # the peer breaks the channel
+                worker = threading.Thread(target=a.connect)  # another thread
+                worker.start()
+                worker.join(2.0)
+            return out
+
+        with mock.patch.object(a, "_run_scans", break_and_reconnect_between_batches):
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                a.read_window_block(0x0100, 700)  # two batches
+        self.assertEqual(self.lib.opens, 2)
+        self.assertEqual(len(a.read_window_block(0x0100, 700)), 700)
+
+    def test_broken_channel_is_closed_before_it_is_marked(self):
+        a = self._transport()
+        ch = a._channel
+        seen = []
+        real_close = ch.io.close
+
+        def close():
+            seen.append(ch.broken)
+            real_close()
+
+        ch.io.close = close
+        self.lib.FT_Write = lambda *args: 4  # D2XX status: I/O error
+        with self.assertRaises(RuntimeError):
+            a.read_reg(0x0000)
+        self.assertEqual(seen, [None])  # not yet visible as broken
+        self.assertIsNotNone(ch.broken)
+
     def test_call_session_is_cleared_after_each_call(self):
         t = self._transport()
         t.read_reg(0x0000)

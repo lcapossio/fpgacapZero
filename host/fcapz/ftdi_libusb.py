@@ -94,8 +94,12 @@ def list_usb_devices() -> list[FtdiDevice]:
     """
     usb = _usb()
     out: list[FtdiDevice] = []
-    seen: set[tuple[int, str, int]] = set()
+    # Channels from earlier backends: a later backend's entry with the same
+    # serial is the same chip.  Within one backend every location is kept,
+    # clones that share a serial included.
+    earlier: set[tuple[int, str, int]] = set()
     for name, be in _backends():
+        found_here: set[tuple[int, str, int]] = set()
         try:
             devices = list(usb.core.find(find_all=True, backend=be,
                                          custom_match=lambda d: d.idVendor in FTDI_VIDS))
@@ -115,9 +119,9 @@ def list_usb_devices() -> list[FtdiDevice]:
                     continue
                 letter = "ABCD"[number]
                 key = (usb_id, serial, number)
-                if serial and key in seen:
+                if serial and key in earlier:
                     continue
-                seen.add(key)
+                found_here.add(key)
                 out.append(
                     FtdiDevice(
                         index=len(out),
@@ -130,6 +134,7 @@ def list_usb_devices() -> list[FtdiDevice]:
                         location=f"{name}:{dev.bus}:{dev.address}",
                     )
                 )
+        earlier |= found_here
     return out
 
 
@@ -264,9 +269,12 @@ class LibusbIo:
     """
 
     backend = "libusb"
-    #: Reply bytes any chip buffers whole: below this a transfer is a plain
-    #: write then read.
+    #: Reply bytes any high-speed chip buffers whole (FT232H: 1 KB): up to
+    #: this a transfer is a plain write then read.
     DIRECT_REPLY_BYTES = 512
+    #: The same for a full-speed chip (64-byte packets): the FT2232D holds
+    #: 384 reply bytes and 128 command bytes.
+    DIRECT_REPLY_BYTES_FULL_SPEED = 256
     #: Largest single bulk read request.
     MAX_READ = 0x10000
 
@@ -277,6 +285,9 @@ class LibusbIo:
         self._rx = bytearray()
         #: A transfer's reader still running after the transfer failed.
         self._reader: threading.Thread | None = None
+        #: Port release left to that reader (see :meth:`close`).
+        self._release_lock = threading.Lock()
+        self._release_pending = False
 
     def setup(self, timeout_ms: int) -> None:
         """Reset the channel and put it in MPSSE mode (as D2XX does)."""
@@ -344,7 +355,9 @@ class LibusbIo:
         """Send *cmd* and read its *reply_bytes* bytes of reply, reading
         while writing when the reply could fill the chip's buffer."""
         deadline = time.monotonic() + self.timeout_ms / 1000
-        if reply_bytes <= self.DIRECT_REPLY_BYTES:
+        direct = (self.DIRECT_REPLY_BYTES_FULL_SPEED if self.port.packet_size <= 64
+                  else self.DIRECT_REPLY_BYTES)
+        if reply_bytes <= direct:
             self.write(cmd, deadline)
             return self.read(reply_bytes, deadline)
         result: list = []
@@ -354,6 +367,11 @@ class LibusbIo:
                 result.append(self.read(reply_bytes, deadline))
             except BaseException as exc:  # handed to the caller below
                 result.append(exc)
+            finally:
+                with self._release_lock:
+                    release, self._release_pending = self._release_pending, False
+                if release:
+                    self._release_port()
 
         thread = threading.Thread(target=reader, name="fcapz-ftdi-read", daemon=True)
         thread.start()
@@ -380,6 +398,17 @@ class LibusbIo:
         if reader is not None:
             # A USB read still in flight must end before the device goes.
             reader.join(self.timeout_ms / 1000 + 1.0)
+            with self._release_lock:
+                if reader.is_alive():
+                    # Still in the backend (libusb-win32 can wait without
+                    # bound to cancel a timed-out read): the reader releases
+                    # the port when it returns.  Until then the interface
+                    # stays claimed, so nothing else can open it.
+                    self._release_pending = True
+                    return
+        self._release_port()
+
+    def _release_port(self) -> None:
         try:
             self.port.ctrl(_SIO_SET_BITMODE, _BITMODE_RESET)
         except Exception:

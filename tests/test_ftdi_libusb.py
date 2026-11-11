@@ -212,6 +212,18 @@ class TransferTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "timed out"):
                 io.transfer(bytes((0x81,)) * 8192 + bytes((0x87,)), 8192)
 
+    def test_full_speed_chip_buffers(self):
+        # FT2232D: 128 command bytes, 384 reply bytes.  450 replies behind
+        # 1800 command bytes stall the chip before the write ends.
+        cmd = bytes((0x86, 0, 0, 0x81)) * 450 + bytes((0x87,))
+        io = self._io(packet_size=64, rx_fifo=128, tx_fifo=384)
+        self.assertEqual(len(io.transfer(cmd, 450)), 450)
+        io = self._io(packet_size=64, rx_fifo=128, tx_fifo=384)
+        io.timeout_ms = 300
+        with mock.patch.object(fl.LibusbIo, "DIRECT_REPLY_BYTES_FULL_SPEED", 512):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                io.transfer(cmd, 450)
+
     def test_small_reply_is_one_write_then_one_read(self):
         io = self._io()
         with mock.patch.object(threading, "Thread", side_effect=AssertionError("thread")):
@@ -239,6 +251,36 @@ class TransferTests(unittest.TestCase):
         io.close()
         self.assertEqual(events[-1], "close")
         self.assertIn("read done", events)
+
+    def test_a_reader_stuck_past_close_releases_the_port_itself(self):
+        events = []
+        release = threading.Event()
+
+        class StuckPort(_FakeChipPort):
+            def write(self, data, timeout_ms):
+                raise RuntimeError("USB write failed (fake)")
+
+            def read(self, size, timeout_ms):
+                release.wait(10)  # stuck in the backend
+                events.append("read done")
+                return self.STATUS
+
+            def close(self):
+                events.append("close")
+                super().close()
+
+        io = fl.LibusbIo(StuckPort(_FakeD2xx()), timeout_ms=50)
+        with self.assertRaises(RuntimeError):
+            io.transfer(bytes((0x81,)) * 1024, 1024)
+        io.close()  # the reader is still inside read()
+        self.assertEqual(events, [])  # the port is not released under it
+        release.set()
+        for _ in range(200):
+            if "close" in events:
+                break
+            time.sleep(0.01)
+        self.assertEqual(events, ["read done", "close"])
+        self.assertEqual(io.port.closed, 1)
 
     def test_close_leaves_mpsse_once(self):
         io = self._io()
@@ -362,6 +404,57 @@ class SameChannelTests(unittest.TestCase):
                                    serial="FP5SN0B")
         self.assertFalse(ft._same_channel(d2xx, port_b))
         self.assertFalse(ft._same_channel(d2xx._replace(serial=""), _USB_FP5._replace(serial="")))
+
+
+class _UsbDev:
+    """A pyusb device as list_usb_devices sees it."""
+
+    def __init__(self, serial, bus, address, interfaces=(0, 1), product="Dual RS232-HS"):
+        self.idVendor, self.idProduct, self.bcdDevice = 0x0403, 0x6010, 0x0700
+        self.iProduct, self.iSerialNumber = 1, 2 if serial else 0
+        self.strings = {1: product, 2: serial}
+        self.bus, self.address = bus, address
+        self.configs = [[mock.Mock(bInterfaceNumber=n) for n in interfaces]]
+
+    def __iter__(self):
+        return iter(self.configs)
+
+
+class EnumerationTests(unittest.TestCase):
+    def _list(self, per_backend):
+        usb = mock.Mock()
+        usb.core.USBError = OSError
+        usb.core.find = lambda find_all, backend, custom_match: per_backend[backend]
+        usb.util.get_string = lambda dev, index: dev.strings[index]
+        backends = [(name, name) for name in per_backend]
+        with (
+            mock.patch.object(fl, "_usb", lambda: usb),
+            mock.patch.object(fl, "_backends", lambda: backends),
+        ):
+            return fl.list_usb_devices()
+
+    def test_clones_sharing_a_serial_are_all_listed(self):
+        found = self._list({"libusb1": [_UsbDev("SAME", 1, 3), _UsbDev("SAME", 1, 4)]})
+        self.assertEqual([d.location for d in found], ["libusb1:1:3"] * 2 + ["libusb1:1:4"] * 2)
+        self.assertEqual([d.serial for d in found], ["SAMEA", "SAMEB"] * 2)
+
+    def test_a_chip_both_backends_reach_is_listed_once(self):
+        found = self._list({
+            "libusb1": [_UsbDev("FT01", 1, 3)],
+            "libusb0": [_UsbDev("FT01", 0, 255, interfaces=(0,)),
+                        _UsbDev("FT01", 0, 254, interfaces=(1,))],
+        })
+        self.assertEqual([(d.description, d.location) for d in found], [
+            ("Dual RS232-HS A", "libusb1:1:3"), ("Dual RS232-HS B", "libusb1:1:3"),
+        ])
+
+    def test_serial_less_chips_are_kept_per_backend(self):
+        found = self._list({
+            "libusb1": [_UsbDev("", 1, 3)],
+            "libusb0": [_UsbDev("", 0, 255, interfaces=(0,))],
+        })
+        self.assertEqual([d.location for d in found], ["libusb1:1:3"] * 2 + ["libusb0:0:255"])
+        self.assertEqual(found[2].description, "Dual RS232-HS A")  # FT2232H: lettered
 
 
 class DiscoveryTests(unittest.TestCase):
