@@ -1093,6 +1093,23 @@ class TestEjtagAxiBusSafety(unittest.TestCase):
         self._assert_idle()
         self.assertEqual(self.bridge.read_block(0x00, 16), before)
 
+    def test_over_depth_burst_read_refused(self):
+        from fcapz.ejtagaxi import AXIError
+
+        depth = self.bridge._fifo_depth
+        data = [0x0DD00000 + i for i in range(8)]
+        self.bridge.write_block(0x00, data)
+        # Bypass the host-side guard: the RTL refuses a read that does not
+        # fit the FIFO room, so the R channel can never stall on a full FIFO.
+        self.bridge._fifo_depth = 0
+        try:
+            with self.assertRaises(AXIError):
+                self.bridge.burst_read(0x00, depth + 1)
+        finally:
+            self.bridge._fifo_depth = depth
+        self._assert_idle()
+        self.assertEqual(self.bridge.burst_read(0x00, 8), data)
+
     def test_reset_mid_burst_leaves_slave_untouched(self):
         from fcapz.ejtagaxi import CMD_BURST_SETUP, CMD_BURST_WDATA, CMD_NOP, CMD_RESET
 
