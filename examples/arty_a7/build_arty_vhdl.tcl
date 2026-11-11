@@ -45,9 +45,10 @@ if {[info exists ::env(FPGACAP_PROJECT_DIR)]} {
     set override_project_dir ""
 }
 
-# The VHDL core files that replace rtl/fcapz_ela.v, rtl/fcapz_eio.v and
-# rtl/fcapz_axi_mon.v; the Verilog vendor wrappers bind their core instances
-# to these entities (mixed-language, by name).
+# The VHDL core files that replace rtl/fcapz_ela.v, rtl/fcapz_eio.v,
+# rtl/fcapz_axi_mon.v and rtl/fcapz_ejtagaxi.v (+ its async FIFO); the Verilog
+# vendor wrappers bind their core instances to these entities (mixed-language,
+# by name).  The VHDL bridge has no streaming read; this top leaves it off.
 set vhdl_sources [list \
     $root/rtl/vhdl/pkg/fcapz_pkg.vhd \
     $root/rtl/vhdl/pkg/fcapz_util_pkg.vhd \
@@ -55,13 +56,16 @@ set vhdl_sources [list \
     $root/rtl/vhdl/core/fcapz_ela.vhd \
     $root/rtl/vhdl/core/fcapz_eio.vhd \
     $root/rtl/vhdl/core/fcapz_axi_mon.vhd \
+    $root/rtl/vhdl/core/fcapz_async_fifo.vhd \
+    $root/rtl/vhdl/core/fcapz_ejtagaxi.vhd \
     $example_dir/arty_a7_top.vhd \
 ]
 
 # Verilog TAP plumbing, vendor wrappers, bridge, monitor wrapper, test slave,
 # and the VexRiscv shared-bus subsystem (interconnect + vendored core + shared
 # vex_cpu + board vex_sys + firmware image).  The fcapz_ela.v/fcapz_eio.v/
-# fcapz_axi_mon.v cores and arty_a7_top.v are replaced by their VHDL versions.
+# fcapz_axi_mon.v/fcapz_ejtagaxi.v/fcapz_async_fifo.v cores and arty_a7_top.v
+# are replaced by their VHDL versions.
 set verilog_sources [list \
     $root/rtl/reset_sync.v \
     $root/rtl/dpram.v \
@@ -76,8 +80,6 @@ set verilog_sources [list \
     $root/rtl/jtag_pipe_iface.v \
     $root/rtl/jtag_burst_read.v \
     $root/rtl/jtag_tap/jtag_tap_xilinx7.v \
-    $root/rtl/fcapz_async_fifo.v \
-    $root/rtl/fcapz_ejtagaxi.v \
     $root/rtl/fcapz_ejtagaxi_xilinx7.v \
     $root/rtl/fcapz_axi_mon_xilinx7.v \
     $root/rtl/fcapz_eio_xilinx7.v \
@@ -89,7 +91,18 @@ set verilog_sources [list \
     $example_dir/vex/fw/fw.mem \
 ]
 
+# Verilog cores an older project may still hold; the VHDL ones replace them.
+set replaced_sources [list \
+    $root/rtl/fcapz_async_fifo.v \
+    $root/rtl/fcapz_ejtagaxi.v \
+]
+
 proc _vhdl_add_sources {vhdl_sources verilog_sources example_dir} {
+    foreach src $::replaced_sources {
+        if {[llength [get_files -quiet $src]] > 0} {
+            remove_files $src
+        }
+    }
     foreach src $vhdl_sources {
         if {[llength [get_files -quiet $src]] == 0} {
             add_files -norecurse $src

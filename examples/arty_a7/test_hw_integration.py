@@ -140,8 +140,8 @@ _BITSTREAM_SOURCES_VHDL = [
     _ROOT / "rtl" / "jtag_pipe_iface.v",
     _ROOT / "rtl" / "jtag_burst_read.v",
     _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
-    _ROOT / "rtl" / "fcapz_async_fifo.v",
-    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
     _ROOT / "rtl" / "vhdl" / "core" / "fcapz_axi_mon.vhd",
     _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
@@ -1517,6 +1517,100 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         # Sanity: > 0.3 KB/s (sequential, no batch) and < 200 KB/s.
         # With raw_dr_scan_batch transport optimization, expect ~80 KB/s.
         self.assertGreater(kb_per_s, 0.3)
+
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestEjtagAxiBusSafety(unittest.TestCase):
+    """EJTAG-AXI bridge: bus-safe model (FEATURES[25], CFG_AXI_STATUS).
+
+    Host words stay inside 0..15 (< 0x40): the CPU owns 16..31.
+    """
+
+    def setUp(self):
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.bridge = EjtagAxiController(_make_transport(), chain=4)
+        self.bridge.connect()
+
+    def tearDown(self):
+        self.bridge.close()
+
+    def _assert_idle(self):
+        st = self.bridge.axi_status()
+        self.assertTrue(st["idle"], f"bridge still owes the slave: {st}")
+        self.assertEqual(st["raw"], 0, f"unexpected AXI status bits: {st}")
+
+    def test_safe_writes_feature_and_idle_status(self):
+        self.assertTrue(self.bridge.has_safe_writes)
+        self._assert_idle()
+
+    def test_idle_after_traffic_and_error(self):
+        from fcapz.ejtagaxi import AXIError
+
+        self.bridge.axi_write(0x00, 0x5A5A0001)
+        self.bridge.burst_write(0x00, [0x5A5A0100 + i for i in range(16)])
+        self.assertEqual(self.bridge.burst_read(0x00, 16),
+                         [0x5A5A0100 + i for i in range(16)])
+        self._assert_idle()
+        with self.assertRaises(AXIError):
+            self.bridge.axi_write(0xFFFFFFFC, 0x1234)
+        with self.assertRaises(AXIError):
+            self.bridge.axi_read(0xFFFFFFFC)
+        self._assert_idle()
+        self.bridge.axi_write(0x08, 0x600DF00D)
+        self.assertEqual(self.bridge.axi_read(0x08), 0x600DF00D)
+
+    def test_over_depth_burst_refused_without_bus_write(self):
+        from fcapz.ejtagaxi import AXIError
+
+        depth = self.bridge._fifo_depth
+        before = [0xC0DE0000 + i for i in range(16)]
+        self.bridge.write_block(0x00, before)
+        # Bypass the host-side guard so the RTL descriptor check is exercised.
+        self.bridge._fifo_depth = 0
+        try:
+            with self.assertRaises(AXIError):
+                self.bridge.burst_write(0x00, [0xBAD00000 + i for i in range(depth + 1)])
+        finally:
+            self.bridge._fifo_depth = depth
+        self._assert_idle()
+        self.assertEqual(self.bridge.read_block(0x00, 16), before)
+
+    def test_over_depth_burst_read_refused(self):
+        from fcapz.ejtagaxi import AXIError
+
+        depth = self.bridge._fifo_depth
+        data = [0x0DD00000 + i for i in range(8)]
+        self.bridge.write_block(0x00, data)
+        # Bypass the host-side guard: the RTL refuses a read that does not
+        # fit the FIFO room, so the R channel can never stall on a full FIFO.
+        self.bridge._fifo_depth = 0
+        try:
+            with self.assertRaises(AXIError):
+                self.bridge.burst_read(0x00, depth + 1)
+        finally:
+            self.bridge._fifo_depth = depth
+        self._assert_idle()
+        self.assertEqual(self.bridge.burst_read(0x00, 8), data)
+
+    def test_reset_mid_burst_leaves_slave_untouched(self):
+        from fcapz.ejtagaxi import CMD_BURST_SETUP, CMD_BURST_WDATA, CMD_NOP, CMD_RESET
+
+        before = [0x0B0B0000 + i for i in range(8)]
+        self.bridge.write_block(0x00, before)
+        config = (8 - 1) | (0b010 << 8) | (0b01 << 12)  # 8 beats, 32-bit, INCR
+        scans = [(CMD_BURST_SETUP, 0x00, config, 0)]
+        scans += [(CMD_BURST_WDATA, 0, 0xDEAD0000 + i, 0xF) for i in range(3)]
+        scans += [(CMD_RESET, 0, 0, 0)] + [(CMD_NOP, 0, 0, 0)] * 4
+        self.bridge._scan_batch(scans)
+        self.bridge._prime_cdc()
+        self._assert_idle()
+        self.assertEqual(self.bridge.read_block(0x00, 8), before)
+        # The bridge still works normally afterwards.
+        data = [0x77770000 + i for i in range(8)]
+        self.bridge.burst_write(0x00, data)
+        self.assertEqual(self.bridge.burst_read(0x00, 8), data)
 
 
 # ── AXI monitor tests (USER2) ────────────────────────────

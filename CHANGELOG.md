@@ -51,6 +51,33 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
+  dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
+  the next write's response; an aborted burst write never sent WLAST and
+  stalled the write channel for every master; and host bursts crossing
+  4 KB, or with a bad FIXED/WRAP length, size or type, went on the bus
+  as given. The bridge (Verilog and VHDL) now buffers a whole burst
+  before AW, and a write engine owns AW/W/B: VALIDs and payload are held
+  to READY, exactly AWLEN+1 beats go out with WLAST on the last, and the
+  B is always taken, even after the host has had its SLVERR. A timed-out
+  AR stays up and its read is drained. Illegal bursts and write bursts
+  longer than `FIFO_DEPTH` answer SLVERR without touching the bus. New
+  `CFG_AXI_STATUS` (`0x0030`, `EjtagAxiController.axi_status()`) shows
+  what is still owed; `FEATURES[25]` (`has_safe_writes`) announces all
+  this. A burst read goes out only if all its beats fit in the room
+  left in the burst FIFO, so a host that stops draining can no longer
+  hold the read channel. `burst_read()` / `burst_write()` refuse a 4 KB
+  crossing. The
+  reset handshake synchronizers now carry `ASYNC_REG`. The cocotb tests
+  check VALID/payload stability on every EJTAG-AXI run and cover stalls,
+  late B, RESET mid-burst, RESET in the cycle the slave takes an AR,
+  W before AW and every refused descriptor.
+- **The VHDL EJTAG-AXI bridge repeated a CONFIG answer.** Every NOP poll
+  after a CONFIG captured the CONFIG data again and hid the AXI
+  completions queued behind it, so reading `axi_status()` while a read
+  was in flight lost that read's answer. A NOP now ends the CONFIG
+  capture, as in Verilog.
+
 - **PolarFire took any `IR_USER1` / `IR_USER2` opcode.** An opcode outside
   the UJTAG user range (`0x10..0x7F`), such as `0xFF` (BYPASS), built a core
   the host could never reach. `jtag_tap_polarfire` now flags one, or two equal

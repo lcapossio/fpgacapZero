@@ -125,6 +125,8 @@ python examples/arty_a7/build.py --variant vhdl         # mixed-language VHDL to
 The `microblaze` variant needs a MicroBlaze licence and `mb-gcc` and writes
 `arty_a7_top.bit`. The `vhdl` variant is the VHDL top with the same VexRiscv
 subsystem (needs the RISC-V toolchain) and writes `arty_a7_top_vhdl.bit`.
+Its ELA, EIO, AXI monitor and EJTAG-AXI bridge are the VHDL cores. The VHDL
+bridge has no streaming read, so `stream_read` is not available on this image.
 
 ## Connect With hw_server
 
