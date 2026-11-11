@@ -68,8 +68,10 @@ class _FakeChipPort:
             if cmd is None:
                 return
             length, reply = cmd
-            if len(self.chip.rx) + reply > self.tx_fifo:
-                return  # stalled until the host reads
+            if self.chip.rx and len(self.chip.rx) + reply > self.tx_fifo:
+                # Stalled until the host reads.  (A real chip streams a
+                # reply longer than its buffer; here it lands at once.)
+                return
             self.chip._run(bytes(self.pending[:length]))
             del self.pending[:length]
 
@@ -214,6 +216,29 @@ class TransferTests(unittest.TestCase):
         io = self._io()
         with mock.patch.object(threading, "Thread", side_effect=AssertionError("thread")):
             self.assertEqual(len(io.transfer(bytes((0x81, 0x81, 0x87)), 2)), 2)
+
+    def test_close_waits_for_a_reader_still_in_flight(self):
+        events = []
+
+        class SlowPort(_FakeChipPort):
+            def write(self, data, timeout_ms):
+                raise RuntimeError("USB write failed (fake)")
+
+            def read(self, size, timeout_ms):
+                time.sleep(1.5)  # a read that overruns its timeout
+                events.append("read done")
+                return self.STATUS
+
+            def close(self):
+                events.append("close")
+                super().close()
+
+        io = fl.LibusbIo(SlowPort(_FakeD2xx()), timeout_ms=100)
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            io.transfer(bytes((0x81,)) * 1024, 1024)
+        io.close()
+        self.assertEqual(events[-1], "close")
+        self.assertIn("read done", events)
 
     def test_close_leaves_mpsse_once(self):
         io = self._io()

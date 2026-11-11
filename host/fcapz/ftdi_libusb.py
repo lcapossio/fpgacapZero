@@ -88,7 +88,9 @@ def list_usb_devices() -> list[FtdiDevice]:
 
     A device whose strings cannot be read is left out: its driver (FTDI's
     own, on Windows) keeps libusb away, and D2XX lists it instead.  A chip
-    that two backends both reach is listed once, from libusb-1.0.
+    that two backends both reach is listed once, from libusb-1.0, if it has
+    a serial number; without one it cannot be told from a twin, so each
+    backend's entry stays.
     """
     usb = _usb()
     out: list[FtdiDevice] = []
@@ -164,7 +166,11 @@ class _PyusbPort:
                     self._reattach = True
             except (usb.core.USBError, NotImplementedError):
                 pass
-        usb.util.claim_interface(dev, interface)
+        try:
+            usb.util.claim_interface(dev, interface)
+        except Exception:
+            self.close()  # gives the channel back to its kernel driver
+            raise
         self._claimed = True
 
         def direction(want):
@@ -221,6 +227,14 @@ def open_port(dev: FtdiDevice, timeout_ms: int) -> _PyusbPort:
             d.bus == int(bus) and d.address == int(address)
             and (d.idVendor << 16 | d.idProduct) == dev.usb_id
         ))
+    if found is not None and dev.serial:
+        # A replug can hand the bus address to another adapter.
+        try:
+            serial = usb.util.get_string(found, found.iSerialNumber) or ""
+        except (usb.core.USBError, ValueError):
+            serial = None
+        if serial is None or dev.serial not in (serial, serial + "ABCD"[dev.interface]):
+            found = None
     if found is None:
         raise RuntimeError(f"USB device for {dev.description!r} is gone (unplugged?)")
     try:
@@ -261,6 +275,8 @@ class LibusbIo:
         self.timeout_ms = timeout_ms
         self.closed = False
         self._rx = bytearray()
+        #: A transfer's reader still running after the transfer failed.
+        self._reader: threading.Thread | None = None
 
     def setup(self, timeout_ms: int) -> None:
         """Reset the channel and put it in MPSSE mode (as D2XX does)."""
@@ -347,6 +363,8 @@ class LibusbIo:
             # The reader ends by the same deadline; never leave it running
             # on the port.
             thread.join(max(0.0, deadline - time.monotonic()) + 1.0)
+            if thread.is_alive():
+                self._reader = thread  # close() waits for it
         if thread.is_alive() or not result:
             raise RuntimeError("FTDI read did not finish")
         if isinstance(result[0], BaseException):
@@ -358,6 +376,10 @@ class LibusbIo:
         if self.closed:
             return
         self.closed = True
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            # A USB read still in flight must end before the device goes.
+            reader.join(self.timeout_ms / 1000 + 1.0)
         try:
             self.port.ctrl(_SIO_SET_BITMODE, _BITMODE_RESET)
         except Exception:

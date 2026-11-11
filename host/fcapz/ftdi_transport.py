@@ -903,7 +903,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     def close(self) -> None:
         ch = self._channel
-        if ch is not None and not self._cancelled:
+        if ch is not None and not self._cancelled and ch.broken is None:
             # Clear this session's MGR_OWNER token, as the other backends do.
             # Under the channel lock, so the owner check and the clear are one
             # unit against a peer's claim and against program(), which
