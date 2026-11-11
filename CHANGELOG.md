@@ -51,6 +51,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **EJTAG-AXI: a second RESET could cancel the first.** RESET crosses to
+  the AXI clock as a toggle; a second RESET before the first was
+  acknowledged flipped it back, so the AXI side never reset: a read or
+  write in flight finished and its response reached the host as the
+  answer to a later command. A RESET while one is in flight is now
+  folded into it, and while a RESET is in flight (status `busy`) the
+  bridge queues no command and captures no response or burst word: the
+  AXI sides of its FIFOs are not reset yet (Verilog and VHDL). A command
+  sent then is dropped (Verilog also sets the error bit). Needs the AXI
+  clock stopped, held in reset or much slower than TCK.
+
+- **EJTAG-AXI: a burst word could be shown twice.** A scan that captured
+  a burst FIFO word (any scan after a BURST_RDATA) popped it only if the
+  new command was BURST_RDATA too, so after any other command the same
+  word came back on the next BURST_RDATA. The word a scan shows is now
+  popped on that scan's UPDATE, whatever the new command (Verilog and
+  VHDL). The host's `burst_read` drains the FIFO, so it was not affected.
+
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
   the next write's response; an aborted burst write never sent WLAST and

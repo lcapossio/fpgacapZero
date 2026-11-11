@@ -1110,6 +1110,25 @@ class TestEjtagAxiBusSafety(unittest.TestCase):
         self._assert_idle()
         self.assertEqual(self.bridge.burst_read(0x00, 8), data)
 
+    def test_burst_word_shown_once(self):
+        from fcapz.ejtagaxi import (
+            CMD_BURST_RDATA, CMD_BURST_RSTART, CMD_BURST_SETUP, CMD_NOP)
+
+        data = [0x0F0F0000 + i for i in range(4)]
+        self.bridge.write_block(0x00, data)
+        config = (4 - 1) | (0b010 << 8) | (0b01 << 12)  # 4 beats, 32-bit, INCR
+        rd, nop = (CMD_BURST_RDATA, 0, 0, 0), (CMD_NOP, 0, 0, 0)
+        # Two words drained, a NOP shows the third: it must be popped there,
+        # so the next RDATA pair returns the fourth, not the third again.
+        scans = [(CMD_BURST_SETUP, 0x00, config, 0), (CMD_BURST_RSTART, 0, 0, 0)]
+        scans += [nop] * 4 + [rd, rd, rd, nop, rd, rd, nop]
+        out = self.bridge._scan_batch(scans)
+        self.assertEqual([out[i][2] for i in (7, 8, 9, 11)], data)
+        self.assertTrue(out[9][0] & 0x1, "NOP after RDATA showed no word")
+        self.assertFalse(out[12][0] & 0x9, f"word left over: status 0x{out[12][0]:X}")
+        self._assert_idle()
+        self.assertEqual(self.bridge.burst_read(0x00, 4), data)
+
     def test_reset_mid_burst_leaves_slave_untouched(self):
         from fcapz.ejtagaxi import CMD_BURST_SETUP, CMD_BURST_WDATA, CMD_NOP, CMD_RESET
 

@@ -202,6 +202,9 @@ architecture rtl of fcapz_ejtagaxi is
     signal burst_w_beats_left : unsigned(8 downto 0) := (others => '0');
     signal burst_rdata_ready : std_logic := '0';
     signal prev_valid : std_logic := '0';
+    -- This scan's capture showed a burst FIFO word: pop it on UPDATE,
+    -- whatever the new command, so a word is never shown twice.
+    signal burst_pop_pending : std_logic := '0';
     signal error_sticky : std_logic := '0';
     signal pending_count : unsigned(CMD_FIFO_AW downto 0) := (others => '0');
     signal last_cmd : std_logic_vector(3 downto 0) := CMD_NOP;
@@ -544,13 +547,20 @@ begin
                     capture_rdata := (others => '0');
                     capture_resp := "00";
                     capture_valid := '0';
+                    burst_pop_pending <= '0';
 
                     if last_cmd = CMD_CONFIG then
                         capture_rdata := config_rdata;
                         capture_valid := '1';
+                    -- Nothing is captured while a CMD_RESET is in flight: the
+                    -- AXI sides of the FIFOs are not reset yet, so the TCK side
+                    -- may see stale entries.
+                    elsif reset_busy_tck = '1' then
+                        null;
                     elsif last_cmd = CMD_BURST_RDATA and burst_rdata_ready = '1' and fifo_empty = '0' then
                         capture_rdata := low32(fifo_rdata);
                         capture_valid := '1';
+                        burst_pop_pending <= '1';
                     elsif respq_empty = '0' and respq_rd_rst_busy = '0' then
                         capture_rdata := low32(respq_rd_data(DATA_W - 1 downto 0));
                         capture_resp := respq_rd_data(DATA_W + 1 downto DATA_W);
@@ -586,6 +596,11 @@ begin
                     sr <= tdi & sr(DR_W - 1 downto 1);
                 elsif update = '1' then
                     prev_valid <= '0';
+                    burst_pop_pending <= '0';
+                    -- CMD_RESET clears the FIFO itself.
+                    if burst_pop_pending = '1' and sr_cmd /= CMD_RESET then
+                        fifo_rd_en_i <= '1';
+                    end if;
 
                     cmd_addr := sr_addr(ADDR_W - 1 downto 0);
                     enqueue_data := sr_cmd & cmd_addr &
@@ -593,6 +608,10 @@ begin
                         sr_wstrb(DATA_BYTES - 1 downto 0) &
                         burst_awlen & burst_awsize & burst_awburst;
 
+                    -- No command is queued while a CMD_RESET is in flight
+                    -- (status busy): the AXI side could otherwise run it after
+                    -- that reset, and a later RESET, folded into the one in
+                    -- flight, would not cancel it.
                     case sr_cmd is
                         when CMD_NOP =>
                             -- As in Verilog: a CONFIG answer is captured once,
@@ -604,7 +623,7 @@ begin
                             last_cmd <= sr_cmd;
                         when CMD_WRITE =>
                             if sr_wstrb(DATA_BYTES - 1 downto 0) /= ZERO_WSTRB and
-                               cmdq_full = '0' and cmdq_wr_rst_busy = '0' then
+                               cmdq_full = '0' and cmdq_wr_rst_busy = '0' and reset_busy_tck = '0' then
                                 cmdq_wr_data <= CMD_WRITE & cmd_addr &
                                     sr_payload(DATA_W - 1 downto 0) &
                                     sr_wstrb(DATA_BYTES - 1 downto 0) &
@@ -617,7 +636,7 @@ begin
                             burst_w_beats_left <= (others => '0');
                             burst_rdata_ready <= '0';
                         when CMD_READ =>
-                            if cmdq_full = '0' and cmdq_wr_rst_busy = '0' then
+                            if cmdq_full = '0' and cmdq_wr_rst_busy = '0' and reset_busy_tck = '0' then
                                 cmdq_wr_data <= CMD_READ & cmd_addr &
                                     std_logic_vector(to_unsigned(0, DATA_W)) &
                                     std_logic_vector(to_unsigned(0, DATA_BYTES)) &
@@ -631,7 +650,7 @@ begin
                             burst_rdata_ready <= '0';
                         when CMD_WRITE_INC =>
                             if sr_wstrb(DATA_BYTES - 1 downto 0) /= ZERO_WSTRB and
-                               cmdq_full = '0' and cmdq_wr_rst_busy = '0' then
+                               cmdq_full = '0' and cmdq_wr_rst_busy = '0' and reset_busy_tck = '0' then
                                 cmdq_wr_data <= CMD_WRITE & auto_inc_addr &
                                     sr_payload(DATA_W - 1 downto 0) &
                                     sr_wstrb(DATA_BYTES - 1 downto 0) &
@@ -644,7 +663,7 @@ begin
                             burst_cfg_valid <= '0';
                             burst_w_beats_left <= (others => '0');
                         when CMD_READ_INC =>
-                            if cmdq_full = '0' and cmdq_wr_rst_busy = '0' then
+                            if cmdq_full = '0' and cmdq_wr_rst_busy = '0' and reset_busy_tck = '0' then
                                 cmdq_wr_data <= CMD_READ & auto_inc_addr &
                                     std_logic_vector(to_unsigned(0, DATA_W)) &
                                     std_logic_vector(to_unsigned(0, DATA_BYTES)) &
@@ -668,7 +687,7 @@ begin
                         when CMD_BURST_WDATA =>
                             if burst_cfg_valid = '1' and burst_w_beats_left /= 0 and
                                sr_wstrb(DATA_BYTES - 1 downto 0) /= ZERO_WSTRB and
-                               cmdq_full = '0' and cmdq_wr_rst_busy = '0' then
+                               cmdq_full = '0' and cmdq_wr_rst_busy = '0' and reset_busy_tck = '0' then
                                 if burst_w_beats_left = resize(unsigned(burst_awlen), 9) + 1 then
                                     -- First beat after BURST_SETUP.
                                     cmdq_wr_data(CMDQ_W - 1 downto CMDQ_W - 4) <= CMD_BURST_WFIRST;
@@ -690,7 +709,7 @@ begin
                                 last_cmd <= sr_cmd;
                             end if;
                         when CMD_BURST_RSTART =>
-                            if burst_cfg_valid = '1' and cmdq_full = '0' and cmdq_wr_rst_busy = '0' then
+                            if burst_cfg_valid = '1' and cmdq_full = '0' and cmdq_wr_rst_busy = '0' and reset_busy_tck = '0' then
                                 cmdq_wr_data <= CMD_BURST_RSTART & burst_addr &
                                     std_logic_vector(to_unsigned(0, DATA_W)) &
                                     std_logic_vector(to_unsigned(0, DATA_BYTES)) &
@@ -703,9 +722,7 @@ begin
                                 last_cmd <= sr_cmd;
                             end if;
                         when CMD_BURST_RDATA =>
-                            if burst_rdata_ready = '1' and fifo_empty = '0' and last_cmd = CMD_BURST_RDATA then
-                                fifo_rd_en_i <= '1';
-                            end if;
+                            -- The FIFO pop is burst_pop_pending, above.
                             burst_rdata_ready <= '1';
                             last_cmd <= sr_cmd;
                         when CMD_CONFIG =>
@@ -740,7 +757,11 @@ begin
                             burst_rdata_ready <= '0';
                             config_rdata <= (others => '0');
                             last_cmd <= CMD_NOP;
-                            reset_req_toggle <= not reset_req_toggle;
+                            -- A RESET still in flight covers this one: a
+                            -- second flip before the ack would cancel the first.
+                            if reset_busy_tck = '0' then
+                                reset_req_toggle <= not reset_req_toggle;
+                            end if;
                         when others =>
                             null;
                     end case;
@@ -760,6 +781,7 @@ begin
                 fifo_rd_en_i <= '0';
                 error_sticky <= '0';
                 prev_valid <= '0';
+                burst_pop_pending <= '0';
                 pending_count <= (others => '0');
                 auto_inc_addr <= (others => '0');
                 burst_awlen <= (others => '0');

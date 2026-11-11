@@ -395,6 +395,9 @@ module fcapz_ejtagaxi #(
     reg [31:0] dbg_resp_cap_rec_data [0:3];
     reg [31:0] dbg_resp_cap_rec_meta [0:3];
     reg        resp_pop_pending;
+    // This scan's capture showed a burst FIFO word: pop it on UPDATE,
+    // whatever the new command, so a word is never shown twice.
+    reg        burst_pop_pending;
     reg [2:0] dbg_axi_deq_rec_count;
     reg [31:0] dbg_axi_deq_rec_addr [0:3];
     reg [31:0] dbg_axi_deq_rec_meta [0:3];
@@ -474,7 +477,10 @@ module fcapz_ejtagaxi #(
     end
     wire tck_rst = tck_rst_sync[1];
 
-    wire cmdq_wr_ready        = !cmdq_wr_rst_busy;
+    // No command is queued while a CMD_RESET is in flight (status busy): the
+    // AXI side could otherwise run it after that reset, and a later RESET,
+    // folded into the one in flight, would not cancel it.
+    wire cmdq_wr_ready        = !cmdq_wr_rst_busy && !reset_busy_tck;
     wire cmdq_rd_ready        = !cmdq_rd_rst_busy;
     wire respq_wr_ready       = !respq_wr_rst_busy;
     wire respq_rd_ready       = !respq_rd_rst_busy;
@@ -581,9 +587,10 @@ module fcapz_ejtagaxi #(
     wire stream_pop = stream_on_now && !stream_nxt_valid && fifo_notempty;
 
     // FIFO read: pop on UPDATE when BURST_RDATA and previous scan also read
-    assign fifo_rd_en = (sel && update && !stream_on_now &&
-                         (sr_cmd == CMD_BURST_RDATA) &&
-                         fifo_notempty && (last_cmd == CMD_BURST_RDATA)) ||
+    // FIFO read: pop on UPDATE the word this scan's CAPTURE showed.
+    // CMD_RESET clears the FIFO itself.
+    assign fifo_rd_en = (sel && update && !stream_on_now && burst_pop_pending &&
+                         (sr_cmd != CMD_RESET)) ||
                         stream_pop;
 
     // Next slot at a slot boundary.  A valid slot is always stream_hold; once
@@ -597,8 +604,11 @@ module fcapz_ejtagaxi #(
     reg [31:0] config_rdata;
 
     // Capture-time data source mux
-    wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty;
-    wire capture_resp_data  = !capture_burst_data &&
+    // Nothing is captured while a CMD_RESET is in flight: the AXI sides of
+    // the FIFOs are not reset yet, so the TCK side may see stale entries.
+    wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty &&
+                              !reset_busy_tck;
+    wire capture_resp_data  = !capture_burst_data && !reset_busy_tck &&
                               respq_head_seen &&
                               respq_rd_ready &&
                               !respq_empty;
@@ -757,11 +767,13 @@ module fcapz_ejtagaxi #(
                 // A word cut short stays in stream_hold for the next scan.
                 prev_valid       <= 1'b0;
                 resp_pop_pending <= 1'b0;
+                burst_pop_pending <= 1'b0;
                 if (stream_hdr_zero)
                     stream_mode <= 1'b0;
 
             end else if (capture) begin
                 resp_pop_pending <= capture_resp_data;
+                burst_pop_pending <= capture_burst_data;
                 // Assemble shift-out register from computed mux outputs
                 if (capture_prev_valid) begin
                     prev_valid <= 1'b1;
@@ -802,6 +814,7 @@ module fcapz_ejtagaxi #(
             end else if (update) begin
                 prev_valid <= 1'b0;
                 resp_pop_pending <= 1'b0;
+                burst_pop_pending <= 1'b0;
                 if (DEBUG_EN && dbg_rec_count < 3'd4) begin
                     dbg_rec_sr_addr[dbg_rec_count]    <= sr_addr;
                     dbg_rec_sr_payload[dbg_rec_count] <= sr_payload;
@@ -1167,6 +1180,7 @@ module fcapz_ejtagaxi #(
                         prev_valid   <= 1'b0;
                         respq_head_seen <= 1'b0;
                         resp_pop_pending <= 1'b0;
+                        burst_pop_pending <= 1'b0;
                         pending_count <= {(CMD_FIFO_AW+1){1'b0}};
                         cmdq_rst_tck  <= 1'b1;
                         respq_rst_tck <= 1'b1;
@@ -1192,7 +1206,10 @@ module fcapz_ejtagaxi #(
                         stream_bitpos     <= 6'd0;
                         stream_tdi_one    <= 1'b0;
                         stream_hdr_zero   <= 1'b0;
-                        reset_req_toggle <= ~reset_req_toggle;
+                        // A RESET still in flight covers this one: a second
+                        // flip before the ack would cancel the first.
+                        if (!reset_busy_tck)
+                            reset_req_toggle <= ~reset_req_toggle;
                     end
 
                     default: begin
@@ -1246,6 +1263,7 @@ module fcapz_ejtagaxi #(
             prev_valid         <= 1'b0;
             respq_head_seen    <= 1'b0;
             resp_pop_pending   <= 1'b0;
+            burst_pop_pending  <= 1'b0;
             pending_count      <= {(CMD_FIFO_AW+1){1'b0}};
             cmdq_stage_valid   <= 1'b0;
             cmdq_stage_data    <= {CMDQ_W{1'b0}};
@@ -1291,6 +1309,7 @@ module fcapz_ejtagaxi #(
         axi_status_sync2_tck = 6'd0;
         respq_head_seen   = 1'b0;
         resp_pop_pending  = 1'b0;
+        burst_pop_pending = 1'b0;
         cmdq_stage_valid  = 1'b0;
         cmdq_stage_data   = {CMDQ_W{1'b0}};
         cmdq_rst_tck      = 1'b0;
