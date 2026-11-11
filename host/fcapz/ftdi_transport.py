@@ -221,6 +221,39 @@ def list_ftdi_targets() -> list[str]:
     return targets
 
 
+def _pick(device: str | None) -> FtdiDevice:
+    """:func:`_pick_device` over the channels *device* chooses from; when
+    nothing fits, says whether the other backend lists the channel."""
+    try:
+        return _pick_device(_list_devices(device), device)
+    except RuntimeError as exc:
+        hint = _other_backend_hint(device)
+        if not hint:
+            raise
+        raise RuntimeError(f"{exc} ({hint})") from exc
+
+
+def _other_backend_hint(device: str | None) -> str:
+    """Where the other backend lists the channel *device* failed to find."""
+    try:
+        if device is not None and device.startswith(USB_PREFIX):
+            name = device[len(USB_PREFIX):]
+            listed = [d for d in list_ftdi_devices()
+                      if d.description and (not name or _selects(d, name))]
+            if listed:
+                return (f"D2XX lists {listed[0].description!r}: its driver keeps libusb "
+                        "away, so name it without the usb: prefix")
+            return ""
+        from .ftdi_libusb import list_usb_devices
+
+        listed = [d for d in list_usb_devices() if device is None or _selects(d, device)]
+        if listed:
+            return f"libusb lists it: name it {USB_PREFIX + listed[0].description!r}"
+    except (RuntimeError, OSError):
+        pass
+    return ""
+
+
 def _list_devices(device: str | None) -> list[FtdiDevice]:
     """The channels *device* chooses from: libusb's for a ``usb:``
     selector, else D2XX's (libusb's when the D2XX library is missing and
@@ -770,7 +803,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._session_count = count
             ch = _find_open_channel(self.device)
             if ch is None:
-                dev = _pick_device(_list_devices(self.device), self.device)
+                dev = _pick(self.device)
                 ch = _channel_open_as(dev)
             opened = ch is None
             if opened:
@@ -869,7 +902,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     (c for c in _live_channels() if _selects(c.adapter, self.device)), None
                 )
             if held is None:
-                dev = _pick_device(_list_devices(self.device), self.device)
+                dev = _pick(self.device)
                 held = next((c for c in _live_channels() if _same_channel(c.adapter, dev)), None)
             if held is not None:
                 raise RuntimeError(

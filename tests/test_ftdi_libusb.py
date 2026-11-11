@@ -17,6 +17,9 @@ from fcapz import ftdi_transport as ft
 from fcapz.ftdi_transport import FtdiDevice, FtdiMpsseTransport
 from test_ftdi_transport import POLARFIRE_IDCODE, _FakeD2xx
 
+#: The real enumeration (conftest stubs it out for every test).
+_LIST_USB_DEVICES = fl.list_usb_devices
+
 
 def _command(buf: bytes, i: int, chip: str = "h") -> tuple[int, int] | None:
     """``(length, reply bytes)`` of the MPSSE command at *buf[i]*, as the
@@ -135,13 +138,18 @@ class _ScriptedPort:
     """Hands out a byte stream framed as USB packets of *packet_size*, in
     transfers of at most *chunk* packets, then status-only packets."""
 
-    def __init__(self, stream: bytes, packet_size: int, chunk: int = 3):
+    def __init__(self, stream: bytes, packet_size: int, chunk: int = 3, gaps: bool = False):
         self.stream = bytearray(stream)
         self.packet_size, self.chunk = packet_size, chunk
+        self.gaps = gaps  # every other transfer: a status-only packet
         self.reads = 0
+        self.sizes: list[int] = []
 
     def read(self, size, timeout_ms):
         self.reads += 1
+        self.sizes.append(size)
+        if self.gaps and self.reads % 2:
+            return b"2`"  # the latency timer fired with nothing to send
         payload = self.packet_size - 2
         out = bytearray()
         for _ in range(min(self.chunk, size // self.packet_size)):
@@ -164,6 +172,21 @@ class FramingTests(unittest.TestCase):
                     rest = len(data) - n
                     if rest:  # what came early is kept for the next read
                         self.assertEqual(io.read(rest), data[n:])
+
+    def test_status_only_packets_mid_reply(self):
+        data = bytes(range(256)) * 20
+        for ps in (64, 512):
+            with self.subTest(packet_size=ps):
+                io = fl.LibusbIo(_ScriptedPort(data, ps, gaps=True))
+                self.assertEqual(io.read(len(data)), data)
+
+    def test_read_larger_than_one_transfer(self):
+        data = bytes(range(251)) * 1000  # 251 KB
+        port = _ScriptedPort(data, 512, chunk=10_000)
+        io = fl.LibusbIo(port)
+        self.assertEqual(io.read(len(data)), data)
+        self.assertLessEqual(max(port.sizes), fl.LibusbIo.MAX_READ)
+        self.assertTrue(all(size % 512 == 0 for size in port.sizes))
 
     def test_partial_reply_times_out_with_the_count(self):
         io = fl.LibusbIo(_ScriptedPort(b"\x11" * 100, 64), timeout_ms=50)
@@ -372,6 +395,17 @@ class LibusbTransportTests(unittest.TestCase):
             FtdiMpsseTransport(device="usb:").connect()
         self.assertEqual(len(self.ports), 1)
 
+    def test_usb_selector_says_when_only_d2xx_lists_the_channel(self):
+        self.usb_devices[:] = []
+        with self.assertRaisesRegex(RuntimeError, "D2XX lists 'Embedded FlashPro5 A'.*usb: prefix"):
+            FtdiMpsseTransport(device="usb:Embedded FlashPro5 A").connect()
+
+    def test_plain_selector_says_when_only_libusb_lists_the_channel(self):
+        self.usb_devices[:] = [_USB_FP5._replace(description="Digilent USB Device A",
+                                                 serial="210319A")]
+        with self.assertRaisesRegex(RuntimeError, "name it 'usb:Digilent USB Device A'"):
+            FtdiMpsseTransport(device="Digilent USB Device A").connect()
+
     def test_usb_error_breaks_the_channel(self):
         a = self._transport(device="usb:")
         b = self._transport(device="usb:")
@@ -431,7 +465,7 @@ class EnumerationTests(unittest.TestCase):
             mock.patch.object(fl, "_usb", lambda: usb),
             mock.patch.object(fl, "_backends", lambda: backends),
         ):
-            return fl.list_usb_devices()
+            return _LIST_USB_DEVICES()
 
     def test_clones_sharing_a_serial_are_all_listed(self):
         found = self._list({"libusb1": [_UsbDev("SAME", 1, 3), _UsbDev("SAME", 1, 4)]})
