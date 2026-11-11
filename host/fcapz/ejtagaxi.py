@@ -49,7 +49,7 @@ AXI_ST_WE_DETACHED = 0x02  # ...finishing a write nobody waits for
 AXI_ST_AR_HELD = 0x04      # ARVALID held after a timeout or RESET
 AXI_ST_R_DRAIN = 0x08      # discarding beats of an abandoned read
 AXI_ST_COLLECTING = 0x10   # burst write being collected (not on the bus yet)
-AXI_ST_OWED = 0x20         # anything owed to the slave (busy, AR held, drain)
+AXI_ST_OWED = 0x20         # anything on the bus: write engine, any read, held AR, drain
 
 _BRIDGE_CORE_ID = 0x4A58  # ASCII "JX"
 _BRIDGE_ID = _BRIDGE_CORE_ID  # compatibility alias for older tests/imports
@@ -383,7 +383,9 @@ class EjtagAxiController:
             "collecting": bool(raw & AXI_ST_COLLECTING),
             # Bit 5 is one flop on the AXI side: unlike [0], [2] and [3],
             # which cross the clock domain independently, it cannot show a
-            # gap while an obligation passes from one flag to another.
+            # gap while an obligation passes from one flag to another.  It
+            # also covers a read still in flight, so idle means nothing at
+            # all is on the bus.
             "idle": not (raw & AXI_ST_OWED),
         }
 

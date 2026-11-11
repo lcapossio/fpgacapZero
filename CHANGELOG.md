@@ -64,11 +64,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   longer than `FIFO_DEPTH` answer SLVERR without touching the bus. New
   `CFG_AXI_STATUS` (`0x0030`, `EjtagAxiController.axi_status()`) shows
   what is still owed; `FEATURES[25]` (`has_safe_writes`) announces all
-  this. `burst_read()` / `burst_write()` refuse a 4 KB crossing. The
+  this. A burst read goes out only if all its beats fit in the room
+  left in the burst FIFO, so a host that stops draining can no longer
+  hold the read channel. `burst_read()` / `burst_write()` refuse a 4 KB
+  crossing. The
   reset handshake synchronizers now carry `ASYNC_REG`. The cocotb tests
   check VALID/payload stability on every EJTAG-AXI run and cover stalls,
   late B, RESET mid-burst, RESET in the cycle the slave takes an AR,
   W before AW and every refused descriptor.
+- **The VHDL EJTAG-AXI bridge repeated a CONFIG answer.** Every NOP poll
+  after a CONFIG captured the CONFIG data again and hid the AXI
+  completions queued behind it, so reading `axi_status()` while a read
+  was in flight lost that read's answer. A NOP now ends the CONFIG
+  capture, as in Verilog.
 
 - **PolarFire took any `IR_USER1` / `IR_USER2` opcode.** An opcode outside
   the UJTAG user range (`0x10..0x7F`), such as `0xFF` (BYPASS), built a core

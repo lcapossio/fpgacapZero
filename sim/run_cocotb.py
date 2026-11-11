@@ -585,6 +585,11 @@ COVERAGE_TARGETS = {
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",
     ),
+    "fcapz_ejtagaxi_burst_fill": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
     "fcapz_ejtagaxi_reset_regression": (
         "fcapz_ejtagaxi",
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",

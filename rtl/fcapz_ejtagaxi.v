@@ -409,7 +409,7 @@ module fcapz_ejtagaxi #(
     reg        reset_req_toggle;
     (* ASYNC_REG = "TRUE" *) reg reset_ack_sync1_tck;
     (* ASYNC_REG = "TRUE" *) reg reset_ack_sync2_tck;
-    reg        axi_owed;  // registered chan_busy (CFG_AXI_STATUS[5])
+    reg        axi_owed;  // registered chan_busy || rd_active (CFG_AXI_STATUS[5])
     (* ASYNC_REG = "TRUE" *) reg [5:0] axi_status_sync1_tck;
     (* ASYNC_REG = "TRUE" *) reg [5:0] axi_status_sync2_tck;
 
@@ -1467,15 +1467,27 @@ module fcapz_ejtagaxi #(
     wire chan_busy = rd_busy || we_busy;
     wire ar_hs     = m_axi_arvalid && m_axi_arready;
 
+    // A read the slave has accepted and not finished (see r_drain).
+    wire r_inflight = (axi_state == ST_WAIT_R) || (axi_state == ST_BURST_R_FILL) || ar_hs;
+
+    // Any read on the bus, ours or abandoned: AR up or beats still to come.
+    // axi_owed (CFG_AXI_STATUS[5]) covers it too, so idle means the bridge
+    // has nothing at all on the bus.
+    wire rd_active = m_axi_arvalid || r_inflight || r_drain;
+
     always @(posedge axi_clk or posedge axi_rst) begin
         if (axi_rst)
             axi_owed <= 1'b0;
         else
-            axi_owed <= chan_busy;
+            axi_owed <= chan_busy || rd_active;
     end
 
-    // A read the slave has accepted and not finished (see r_drain).
-    wire r_inflight = (axi_state == ST_WAIT_R) || (axi_state == ST_BURST_R_FILL) || ar_hs;
+    // A burst read goes out only if all its beats fit in the burst FIFO now:
+    // R then never waits on a full FIFO, so a host that stops draining cannot
+    // hold the read channel.  wr_count counts every word not yet seen read
+    // (it can pass FIFO_DEPTH by the FWFT output register).
+    wire [9:0] rd_need = {2'b00, launch_burst_len} + 10'd1 + fifo_wr_count;
+    wire       rd_fits = (rd_need <= FIFO_DEPTH);
 
     // Stream bursts: STREAM_BURST beats, cut at the stream end and at 4 KB.
     wire [10:0] strm_to_4k   = 11'd1024 - {1'b0, strm_addr[11:2]};
@@ -1881,7 +1893,8 @@ module fcapz_ejtagaxi #(
                             if (rd_busy) begin
                                 axi_state     <= ST_TIMEOUT_ERR;
                             end else if (!burst_ok(launch_addr, launch_burst_len,
-                                                   launch_burst_size, launch_burst_type)) begin
+                                                   launch_burst_size, launch_burst_type) ||
+                                         !rd_fits) begin
                                 resp_code     <= 2'b10;
                                 resp_rdata    <= {DATA_W{1'b0}};
                                 axi_state     <= ST_DONE;

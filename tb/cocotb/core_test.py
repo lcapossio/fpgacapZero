@@ -163,6 +163,8 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "burst_legal_edges",
         "ar_stall_held",
         "ar_reset_held",
+        "read_room_refused",
+        "status_owed_read",
         "axi_valid_stable",
     ),
 )
@@ -2776,17 +2778,19 @@ async def fcapz_ejtagaxi_protocol(dut):
 
 @cocotb.test()
 async def fcapz_ejtagaxi_burst_fill(dut):
-    """A burst read longer than the burst FIFO fills it, stalls, and resumes.
+    """A burst read goes out only if all its beats fit in the burst FIFO.
 
-    The host drains nothing until the FIFO is full, so the R channel is held
-    off by back-pressure.  Every beat the slave hands over must be written
-    exactly once: a registered rready used to accept a beat in the cycle the
-    FIFO filled and drop it.
+    The R channel then never waits on a full FIFO, so a host that stops
+    draining cannot hold the read channel of a shared bus.  A burst that
+    exactly fills the FIFO, with the host draining nothing, must have every
+    beat written exactly once: a registered rready used to accept a beat in
+    the cycle the FIFO filled and drop it.  A burst that does not fit the
+    room left gets SLVERR without an AR.
     """
-    axi_ram, _ = await init_ejtagaxi(dut)
-    beats = 24  # more than FIFO_DEPTH (16)
+    axi_ram, trace = await init_ejtagaxi(dut)
+    depth = 16  # FIFO_DEPTH of this target
     base = 0x0000_0100
-    values = [0xC000_0000 + i for i in range(beats)]
+    values = [0xC000_0000 + i for i in range(24)]
     for i, value in enumerate(values):
         axi_ram.write_dword(base + 4 * i, value)
 
@@ -2800,34 +2804,56 @@ async def fcapz_ejtagaxi_burst_fill(dut):
 
     cocotb.start_soon(watch_r())
 
-    setup = (0b01 << 12) | (0b010 << 8) | (beats - 1)
-    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, base, setup, 0))
+    def setup(addr: int, beats: int) -> int:
+        return axi_cmd(CMD_BURST_SETUP, addr, burst_cfg(beats - 1), 0)
+
+    # Longer than the FIFO: refused, nothing on the bus.
+    ar0 = len(trace.ar)
+    resps = await scan_seq(dut, [setup(base, 24), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                           "24-beat read")
+    assert resps == [2], resps
+    assert len(trace.ar) == ar0 and accepted == []
+    await clear_after_error(dut)
+
+    # Exactly FIFO_DEPTH beats, the host drains nothing: R never stalls.
+    await dr_scan_72(dut, setup(base, depth))
     await axi_cdc_wait(dut)
     await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
     await axi_cdc_wait(dut, 60)
-    assert 0 < len(accepted) < beats, (
-        f"R channel did not stall on a full FIFO ({len(accepted)} beats accepted)")
+    assert accepted == values[:depth], (
+        f"{len(accepted)} of {depth} beats accepted with the FIFO undrained")
 
     await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming scan
     await axi_cdc_wait(dut)
     got = []
-    for _ in range(beats):
+    for _ in range(depth):
         out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
         assert not (axi_status(out) & 0x4), "error_sticky set during burst read"
         got.append(axi_rdata(out))
         await axi_cdc_wait(dut)
-
-    def first_mismatch(seen: list[int]) -> str:
-        for index, (have, want) in enumerate(zip(seen, values)):
-            if have != want:
-                return f"beat {index}: 0x{have:08X} != 0x{want:08X}"
-        return f"{len(seen)} beats, expected {len(values)}"
-
-    assert got == values, f"bridge returned wrong data, {first_mismatch(got)}"
-    assert accepted == values, f"R-channel handshakes wrong, {first_mismatch(accepted)}"
-
+    assert got == values[:depth], [hex(v) for v in got]
     out = await drain_until_idle(dut)
     assert not (axi_status(out) & 0x4)
+
+    # The room left counts: 10 words left undrained, then 6 more fit exactly
+    # and one more does not.
+    accepted.clear()
+    assert await scan_seq(dut, [setup(base, 10), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                          "10 beats") == [0]
+    assert await scan_seq(dut, [setup(base + 0x40, 6), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                          "6 beats fill the FIFO") == [0]
+    ar1 = len(trace.ar)
+    resps = await scan_seq(dut, [setup(base, 1), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                           "1 beat into a full FIFO")
+    assert resps == [2], resps
+    assert len(trace.ar) == ar1, "a burst that does not fit reached the bus"
+    assert accepted == values[:10] + values[16:22]
+    await clear_after_error(dut)  # CMD_RESET empties the burst FIFO
+    assert await scan_seq(dut, [setup(base, depth), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                          "full burst after RESET") == [0]
+    await clear_after_error(dut)
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("read_room_refused")
 
 
 @cocotb.test()
@@ -2991,7 +3017,7 @@ AXI_ST_WE_DETACHED = 0x02
 AXI_ST_AR_ORPHAN = 0x04
 AXI_ST_R_DRAIN = 0x08
 AXI_ST_COLLECTING = 0x10
-AXI_ST_OWED = 0x20  # registered OR of WE_BUSY, AR_ORPHAN, R_DRAIN
+AXI_ST_OWED = 0x20  # anything on the bus: write engine, any read, held AR, drain
 
 
 def burst_cfg(length: int, size: int = 2, burst: int = 1) -> int:
@@ -3215,8 +3241,6 @@ async def fcapz_ejtagaxi_w_safety(dut):
         assert resps == [2] * beats_n, (hex(addr), hex(cfg), resps)
         await clear_after_error(dut)
         assert len(trace.aw) == aw_n, f"refused burst 0x{addr:X}/0x{cfg:X} reached the bus"
-        if cfg == burst_cfg(16):
-            continue  # a 17-beat INCR read is legal (reads may exceed the FIFO)
         resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr, cfg, 0),
                                      axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
                                f"refused read 0x{addr:X}/0x{cfg:X}")
@@ -3299,6 +3323,19 @@ async def fcapz_ejtagaxi_ar_reset_race(dut):
     rif = axi_ram.read_if
     axi_ram.write_dword(0xA00, 0xA000_0000)
     axi_ram.write_dword(0xA04, 0xA000_0004)
+
+    # An ordinary read the host still waits for is on the bus too: the
+    # "anything owed" bit is set before any timeout, with no AR held yet.
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0xA04, 0, 0))
+    await axi_cdc_wait(dut, 2)
+    st = await axi_bus_status(dut)
+    rif.ar_channel.pause = False
+    assert st & (AXI_ST_OWED | AXI_ST_AR_ORPHAN) == AXI_ST_OWED, hex(st)
+    out = await wait_resp(dut, "read under a status poll")
+    assert axi_resp(out) == 0 and axi_rdata(out) == 0xA000_0004, hex(axi_rdata(out))
+    await axi_wait_bus_idle(dut, "read under a status poll")
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("status_owed_read")
 
     async def release_ar(k: int) -> None:
         await RisingEdge(dut.update)

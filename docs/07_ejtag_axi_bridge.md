@@ -131,7 +131,7 @@ bridge still owes the slave:
 | 2 | ARVALID held after a timeout or RESET |
 | 3 | discarding the beats of an abandoned read |
 | 4 | burst write being collected (not on the bus yet) |
-| 5 | anything owed to the slave (0, 2 or 3); test this one for idle |
+| 5 | anything on the bus: 0, 2, 3, or a read still in flight; test this one for idle |
 
 Bits 0 to 4 cross into the TCK domain independently, so while an
 obligation passes from one to another (a held AR the slave takes
@@ -319,7 +319,13 @@ beat per JTAG scan.
   than its FIFO holds.  The host enforces this and raises
   `ValueError` with a remediation hint that tells you to rebuild
   the bitstream with a larger `FIFO_DEPTH` parameter if you need
-  longer bursts.
+  longer bursts.  The bridge checks it too (`FEATURES[25]`): a burst
+  read goes on the bus only if all its beats fit in the room left in
+  the FIFO, otherwise it answers SLVERR without an AR.  The R channel
+  then never waits on a full FIFO, so a host that stops draining
+  cannot hold the read channel of a shared bus.  Words left in the
+  FIFO by an aborted read count against the room until a RESET (the
+  host sends one after any error).
 - `count ≤ 256` — AXI4 maximum burst length.
 
 ### AXI4 burst write

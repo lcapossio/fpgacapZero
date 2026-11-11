@@ -235,6 +235,8 @@ architecture rtl of fcapz_ejtagaxi is
 
     signal fifo_wr_en_i : std_logic;
     signal fifo_full : std_logic;
+    signal fifo_wr_count : std_logic_vector(FIFO_AW downto 0);
+    signal rd_active : std_logic;  -- a read is on the AR/R channels
     signal fifo_rd_en_i : std_logic := '0';
     signal fifo_rdata : std_logic_vector(DATA_W - 1 downto 0);
     signal fifo_empty : std_logic;
@@ -319,7 +321,7 @@ architecture rtl of fcapz_ejtagaxi is
     signal we_done : std_logic := '0';
     signal we_bresp : std_logic_vector(1 downto 0) := "00";
     signal we_progress : std_logic := '0';
-    signal axi_owed : std_logic := '0';  -- registered chan_busy (CFG_AXI_STATUS[5])
+    signal axi_owed : std_logic := '0';  -- registered chan_busy or rd_active (CFG_AXI_STATUS[5])
     signal axi_status_axi : std_logic_vector(5 downto 0);
     signal axi_status_sync1_tck : std_logic_vector(5 downto 0) := (others => '0');
     signal axi_status_sync2_tck : std_logic_vector(5 downto 0) := (others => '0');
@@ -402,10 +404,14 @@ begin
     -- after a timeout/RESET.  Write channel owes something: we_busy.
     rd_busy <= r_drain or ar_orphan;
     chan_busy <= r_drain or ar_orphan or we_busy;
+    -- Any read on the bus, ours or abandoned: AR up or beats still to come.
+    rd_active <= m_axi_arvalid_i or r_inflight or r_drain;
     -- CFG_AXI_STATUS bits: flags, each a flop, synced per bit.  Bits can pass
     -- the synchronizers a TCK apart (an AR handed from ar_orphan to r_drain
     -- may show neither for a moment), so "anything owed" is its own flop,
-    -- axi_owed, which stays high across such hand-overs; hosts test it.
+    -- axi_owed, which stays high across such hand-overs; hosts test it.  It
+    -- also covers a read the host still waits for (rd_active), so idle
+    -- means the bridge has nothing at all on the bus.
     axi_status_axi <= axi_owed & wb_collecting & r_drain & ar_orphan & we_detached & we_busy;
 
     p_owed : process(axi_clk, axi_rst)
@@ -413,7 +419,7 @@ begin
         if axi_rst = '1' then
             axi_owed <= '0';
         elsif rising_edge(axi_clk) then
-            axi_owed <= chan_busy;
+            axi_owed <= chan_busy or rd_active;
         end if;
     end process;
     fifo_wr_en_i <= '1' when axi_state = ST_BURST_R_FILL and m_axi_rvalid = '1'
@@ -509,7 +515,7 @@ begin
             rd_empty => fifo_empty,
             rd_rst_busy => open,
             rd_count => fifo_rd_count,
-            wr_count => open
+            wr_count => fifo_wr_count
         );
 
     p_tck : process(tck)
@@ -589,7 +595,10 @@ begin
 
                     case sr_cmd is
                         when CMD_NOP =>
-                            null;
+                            -- As in Verilog: a CONFIG answer is captured once,
+                            -- so NOP polls after it see the queued AXI
+                            -- completions, not the CONFIG data again.
+                            last_cmd <= CMD_NOP;
                         when CMD_SET_ADDR =>
                             auto_inc_addr <= cmd_addr;
                             last_cmd <= sr_cmd;
@@ -1126,7 +1135,15 @@ begin
                             elsif cmd_cmd = CMD_BURST_RSTART then
                                 if rd_busy = '1' then
                                     axi_state <= ST_TIMEOUT_ERR;
-                                elsif not burst_ok(cmd_addr, cmd_len, cmd_size, cmd_burst) then
+                                -- All its beats must fit in the burst FIFO now:
+                                -- R then never waits on a full FIFO, so a host
+                                -- that stops draining cannot hold the read
+                                -- channel.  wr_count counts every word not yet
+                                -- seen read (it can pass FIFO_DEPTH by the FWFT
+                                -- output register).
+                                elsif not burst_ok(cmd_addr, cmd_len, cmd_size, cmd_burst) or
+                                      to_integer(unsigned(fifo_wr_count)) +
+                                      to_integer(unsigned(cmd_len)) + 1 > FIFO_DEPTH then
                                     resp_code <= "10";
                                     axi_state <= ST_DONE;
                                 else
