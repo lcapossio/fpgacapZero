@@ -173,6 +173,22 @@ def _channel_key(dev: FtdiDevice) -> tuple[int, str, str] | None:
     return dev.usb_id, serial, letter
 
 
+def _same_channel(a: FtdiDevice, b: FtdiDevice) -> bool:
+    """Whether *a* and *b* are the same physical channel.  Two libusb
+    channels compare by where libusb found them, which also tells apart
+    clones that share a serial number or have none; across backends only
+    the serial-based :func:`_channel_key` can match them."""
+    if a.backend == b.backend == "libusb":
+        return (a.location, a.interface) == (b.location, b.interface)
+    key = _channel_key(a)
+    return key is not None and key == _channel_key(b)
+
+
+def _is_default(device: str | None) -> bool:
+    """Whether the selector names no channel: ``None``, or ``usb:`` alone."""
+    return device is None or device == USB_PREFIX
+
+
 def _selects(dev: FtdiDevice, device: str) -> bool:
     """Whether the ``device=`` selector names *dev*: by description or
     serial; a ``usb:`` selector names a libusb channel only."""
@@ -545,7 +561,6 @@ class _OpenChannel:
     def __init__(self, io, adapter: FtdiDevice, *, exclusive: bool = False) -> None:
         self.io = io
         self.adapter = adapter
-        self.key = _channel_key(adapter)
         self.exclusive = exclusive
         self.broken: str | None = None
         self.lock = threading.RLock()
@@ -580,10 +595,14 @@ def _find_open_channel(device: str | None) -> _OpenChannel | None:
     enumerating, as a driver may list an open channel without its name.
     Refuses a channel held by ``open_pins()``."""
     live = _live_channels()
-    if device is None:
-        # The one channel transports share; a pin channel is never the
-        # default, and enumeration refuses it if the default is its channel.
-        shared = [c for c in live if not c.exclusive]
+    if _is_default(device):
+        # The one channel transports share (of libusb's, for ``usb:``); a
+        # pin channel is never the default, and enumeration refuses it if
+        # the default is its channel.
+        shared = [
+            c for c in live
+            if not c.exclusive and (device is None or c.adapter.backend == "libusb")
+        ]
         ch = shared[0] if len(shared) == 1 else None
     else:
         ch = next((c for c in live if _selects(c.adapter, device)), None)
@@ -595,10 +614,7 @@ def _find_open_channel(device: str | None) -> _OpenChannel | None:
 def _channel_open_as(dev: FtdiDevice) -> _OpenChannel | None:
     """The open channel on the same physical channel as *dev*, however it
     was named or enumerated.  Refuses a channel held by ``open_pins()``."""
-    key = _channel_key(dev)
-    if key is None:
-        return None
-    ch = next((c for c in _live_channels() if c.key == key), None)
+    ch = next((c for c in _live_channels() if _same_channel(c.adapter, dev)), None)
     if ch is not None and ch.exclusive:
         raise RuntimeError(_PIN_CHANNEL_BUSY.format(ch.adapter.description))
     return ch
@@ -842,19 +858,14 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._session_count = count
             # A pin session reaches no core: nothing to claim or release.
             self._forget_hub_state()
-            if self.device is not None:
+            held = None
+            if not _is_default(self.device):
                 held = next(
                     (c for c in _live_channels() if _selects(c.adapter, self.device)), None
                 )
-            else:
-                held = None
             if held is None:
                 dev = _pick_device(_list_devices(self.device), self.device)
-                held = next(
-                    (c for c in _live_channels()
-                     if c.key is not None and c.key == _channel_key(dev)),
-                    None,
-                )
+                held = next((c for c in _live_channels() if _same_channel(c.adapter, dev)), None)
             if held is not None:
                 raise RuntimeError(
                     f"FTDI channel {held.adapter.description!r} is already open "

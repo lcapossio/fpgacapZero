@@ -233,6 +233,7 @@ class LibusbTransportTests(unittest.TestCase):
     def setUp(self):
         self.lib = _FakeD2xx()
         self.ports: list[_FakeChipPort] = []
+        self.usb_devices = [_USB_FP5]
 
         def open_port(dev, timeout_ms):
             port = _FakeChipPort(self.lib)
@@ -241,7 +242,7 @@ class LibusbTransportTests(unittest.TestCase):
 
         for patcher in (
             mock.patch.object(ft, "_load_d2xx", lambda: self.lib),
-            mock.patch.object(fl, "list_usb_devices", lambda: [_USB_FP5]),
+            mock.patch.object(fl, "list_usb_devices", lambda: list(self.usb_devices)),
             mock.patch.object(fl, "open_port", open_port),
         ):
             patcher.start()
@@ -286,6 +287,24 @@ class LibusbTransportTests(unittest.TestCase):
         self.assertEqual(b.adapter.backend, "d2xx")
         self.assertEqual(a.read_reg(0x0000), b.read_reg(0x0000))
 
+    def test_usb_default_does_not_guess_between_open_channels(self):
+        digilent = FtdiDevice(1, "Digilent USB Device A", "210319A", 0x04036010, False,
+                              backend="libusb", interface=0, location="libusb1:1:9")
+        self.usb_devices.append(digilent)
+        self._transport(device="usb:Embedded FlashPro5 A")
+        self._transport(device="usb:Digilent USB Device A")
+        with self.assertRaisesRegex(RuntimeError, "several FTDI JTAG adapters"):
+            FtdiMpsseTransport(device="usb:").connect()
+
+    def test_pin_channel_without_serial_is_still_reserved(self):
+        self.usb_devices[:] = [_USB_FP5._replace(serial="")]
+        pins = FtdiMpsseTransport(device="usb:")
+        self.addCleanup(pins.close)
+        pins.open_pins()
+        with self.assertRaisesRegex(RuntimeError, "held by open_pins"):
+            FtdiMpsseTransport(device="usb:").connect()
+        self.assertEqual(len(self.ports), 1)
+
     def test_usb_error_breaks_the_channel(self):
         a = self._transport(device="usb:")
         b = self._transport(device="usb:")
@@ -298,6 +317,26 @@ class LibusbTransportTests(unittest.TestCase):
         b.connect()
         self.assertEqual(len(self.ports), 2)
         self.assertEqual(b.read_reg(0x0000), 0x46430004)
+
+
+class SameChannelTests(unittest.TestCase):
+    def test_libusb_channels_compare_by_location(self):
+        clone = FtdiDevice(0, "Dual RS232-HS A", "00000000A", 0x04036010, False,
+                           backend="libusb", interface=0, location="libusb1:1:3")
+        twin = clone._replace(location="libusb1:1:4")  # same serial, other chip
+        self.assertFalse(ft._same_channel(clone, twin))
+        self.assertTrue(ft._same_channel(clone, clone._replace(index=5)))
+        self.assertFalse(ft._same_channel(clone, clone._replace(interface=1)))
+        no_serial = clone._replace(serial="")
+        self.assertTrue(ft._same_channel(no_serial, no_serial))
+
+    def test_across_backends_by_serial(self):
+        d2xx = FtdiDevice(0, "Embedded FlashPro5 A", "FP5SN0A", 0x15142008, False)
+        self.assertTrue(ft._same_channel(d2xx, _USB_FP5))
+        port_b = _USB_FP5._replace(interface=1, description="Embedded FlashPro5 B",
+                                   serial="FP5SN0B")
+        self.assertFalse(ft._same_channel(d2xx, port_b))
+        self.assertFalse(ft._same_channel(d2xx._replace(serial=""), _USB_FP5._replace(serial="")))
 
 
 class DiscoveryTests(unittest.TestCase):
