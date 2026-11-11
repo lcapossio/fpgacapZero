@@ -175,11 +175,11 @@ polling.
 | `0x5` | SET_ADDR | Set the auto-increment base address |
 | `0x6` | BURST_SETUP | Configure burst (len, size, type in payload) |
 | `0x7` | BURST_WDATA | Push one word into burst write buffer |
-| `0x8` | BURST_RDATA | Pop one word from burst read FIFO |
+| `0x8` | BURST_RDATA | Pop one word from burst read FIFO (the word a scan captures after a BURST_RDATA is popped on that scan's update, whatever its command) |
 | `0x9` | BURST_RSTART | Initiate burst read (starts the address phase) |
 | `0xA` | STREAM_RSTART | Start a streaming read (addr = start, payload = word count); `STREAM_EN=1` only |
 | `0xE` | CONFIG | Read bridge config register (addr selects which) |
-| `0xF` | RESET | Reset bridge state machines |
+| `0xF` | RESET | Reset bridge state machines (a RESET sent while one is still in flight, status `busy`, is folded into it) |
 
 **Status bits `[71:68]`:**
 

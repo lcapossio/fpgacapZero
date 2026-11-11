@@ -202,6 +202,9 @@ architecture rtl of fcapz_ejtagaxi is
     signal burst_w_beats_left : unsigned(8 downto 0) := (others => '0');
     signal burst_rdata_ready : std_logic := '0';
     signal prev_valid : std_logic := '0';
+    -- This scan's capture showed a burst FIFO word: pop it on UPDATE,
+    -- whatever the new command, so a word is never shown twice.
+    signal burst_pop_pending : std_logic := '0';
     signal error_sticky : std_logic := '0';
     signal pending_count : unsigned(CMD_FIFO_AW downto 0) := (others => '0');
     signal last_cmd : std_logic_vector(3 downto 0) := CMD_NOP;
@@ -544,6 +547,7 @@ begin
                     capture_rdata := (others => '0');
                     capture_resp := "00";
                     capture_valid := '0';
+                    burst_pop_pending <= '0';
 
                     if last_cmd = CMD_CONFIG then
                         capture_rdata := config_rdata;
@@ -551,6 +555,7 @@ begin
                     elsif last_cmd = CMD_BURST_RDATA and burst_rdata_ready = '1' and fifo_empty = '0' then
                         capture_rdata := low32(fifo_rdata);
                         capture_valid := '1';
+                        burst_pop_pending <= '1';
                     elsif respq_empty = '0' and respq_rd_rst_busy = '0' then
                         capture_rdata := low32(respq_rd_data(DATA_W - 1 downto 0));
                         capture_resp := respq_rd_data(DATA_W + 1 downto DATA_W);
@@ -586,6 +591,11 @@ begin
                     sr <= tdi & sr(DR_W - 1 downto 1);
                 elsif update = '1' then
                     prev_valid <= '0';
+                    burst_pop_pending <= '0';
+                    -- CMD_RESET clears the FIFO itself.
+                    if burst_pop_pending = '1' and sr_cmd /= CMD_RESET then
+                        fifo_rd_en_i <= '1';
+                    end if;
 
                     cmd_addr := sr_addr(ADDR_W - 1 downto 0);
                     enqueue_data := sr_cmd & cmd_addr &
@@ -703,9 +713,7 @@ begin
                                 last_cmd <= sr_cmd;
                             end if;
                         when CMD_BURST_RDATA =>
-                            if burst_rdata_ready = '1' and fifo_empty = '0' and last_cmd = CMD_BURST_RDATA then
-                                fifo_rd_en_i <= '1';
-                            end if;
+                            -- The FIFO pop is burst_pop_pending, above.
                             burst_rdata_ready <= '1';
                             last_cmd <= sr_cmd;
                         when CMD_CONFIG =>
@@ -740,7 +748,11 @@ begin
                             burst_rdata_ready <= '0';
                             config_rdata <= (others => '0');
                             last_cmd <= CMD_NOP;
-                            reset_req_toggle <= not reset_req_toggle;
+                            -- A RESET still in flight covers this one: a
+                            -- second flip before the ack would cancel the first.
+                            if reset_busy_tck = '0' then
+                                reset_req_toggle <= not reset_req_toggle;
+                            end if;
                         when others =>
                             null;
                     end case;
@@ -760,6 +772,7 @@ begin
                 fifo_rd_en_i <= '0';
                 error_sticky <= '0';
                 prev_valid <= '0';
+                burst_pop_pending <= '0';
                 pending_count <= (others => '0');
                 auto_inc_addr <= (others => '0');
                 burst_awlen <= (others => '0');

@@ -165,6 +165,8 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "ar_reset_held",
         "read_room_refused",
         "status_owed_read",
+        "burst_word_once",
+        "reset_coalesced",
         "axi_valid_stable",
     ),
 )
@@ -2548,12 +2550,17 @@ class AxiTrace:
             self._check("ar", d.m_axi_arvalid, d.m_axi_arready, self.ar)
 
 
-async def init_ejtagaxi(dut) -> tuple[AxiRam, AxiTrace]:
+async def init_ejtagaxi(dut, axi_clock=None) -> tuple[AxiRam, AxiTrace]:
+    """*axi_clock*, if given, is a coroutine that drives axi_clk instead of
+    the free-running 30 ns clock (a test that must stop the AXI side)."""
     axi_ram = AxiRam(axi_no_id_bus(dut), dut.axi_clk, dut.axi_rst, size=4096)
     axi_trace = AxiTrace(dut)
     cocotb.start_soon(axi_trace.monitor())
     cocotb.start_soon(Clock(dut.tck, 100, unit="ns").start())
-    cocotb.start_soon(Clock(dut.axi_clk, 30, unit="ns").start())
+    if axi_clock is None:
+        cocotb.start_soon(Clock(dut.axi_clk, 30, unit="ns").start())
+    else:
+        cocotb.start_soon(axi_clock)
     dut.tdi.value = 0
     dut.capture.value = 0
     dut.shift_en.value = 0
@@ -2854,6 +2861,86 @@ async def fcapz_ejtagaxi_burst_fill(dut):
     await clear_after_error(dut)
     assert not trace.violations, trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("read_room_refused")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_tck_order(dut):
+    """TCK-side ordering (BUG-310, BUG-311).
+
+    A burst word shown by a scan's CAPTURE is popped on that scan's UPDATE
+    whatever the new command is, so it is never shown twice.  A second
+    CMD_RESET sent before the first is acknowledged (AXI clock stopped) must
+    not cancel the first: the AXI side must still drop the queued read.
+    """
+    axi_run = [True]
+
+    async def gated_axi_clk() -> None:
+        dut.axi_clk.value = 0
+        while True:
+            await Timer(15, unit="ns")
+            if axi_run[0]:
+                dut.axi_clk.value = 1
+            await Timer(15, unit="ns")
+            dut.axi_clk.value = 0
+
+    axi_ram, trace = await init_ejtagaxi(dut, gated_axi_clk())
+    base = 0x0000_0100
+    values = [0xD000_0000 + i for i in range(4)]
+    for i, value in enumerate(values):
+        axi_ram.write_dword(base + 4 * i, value)
+
+    # BUG-310: drain two words, then a NOP scan shows (and must pop) the third.
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, base, burst_cfg(3), 0))
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut, 40)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming scan
+    await axi_cdc_wait(dut)
+    for i in range(2):
+        out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+        assert axi_rdata(out) == values[i], hex(axi_rdata(out))
+        await axi_cdc_wait(dut)
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    assert axi_status(out) & 0x1 and axi_rdata(out) == values[2], (
+        f"NOP after RDATA: status 0x{axi_status(out):x} data 0x{axi_rdata(out):08X}")
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming again
+    await axi_cdc_wait(dut)
+    out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+    assert axi_rdata(out) == values[3], (
+        f"word shown twice: got 0x{axi_rdata(out):08X}, expected 0x{values[3]:08X}")
+    await axi_cdc_wait(dut)
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    assert not (axi_status(out) & 0x8), "burst FIFO not empty after the last word"
+    await clear_after_error(dut)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_word_once")
+
+    # BUG-311: a read waits on ARREADY; the AXI clock stops; RESET twice.
+    # The AXI side must still run the reset (hold the AR, drain the read), so
+    # no response of that read may reach the host afterwards.
+    rif = axi_ram.read_if
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, base, 0, 0))
+    await axi_cdc_wait(dut, 6)
+    assert _signal_is_one(dut.m_axi_arvalid), "read not on the bus yet"
+    axi_run[0] = False
+    await Timer(100, unit="ns")
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    rif.ar_channel.pause = False
+    axi_run[0] = True
+    await axi_cdc_wait(dut, 40)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x1), "the read's response survived the RESETs"
+    for _ in range(4):
+        out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        assert not (axi_status(out) & 0x1), "the read's response survived the RESETs"
+        await axi_cdc_wait(dut)
+    await axi_wait_bus_idle(dut, "after two RESETs")
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, base + 4, 0, 0), "read after RESETs")
+    assert axi_resp(out) == 0 and axi_rdata(out) == values[1], hex(axi_rdata(out))
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_coalesced")
 
 
 @cocotb.test()
