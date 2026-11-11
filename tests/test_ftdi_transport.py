@@ -348,7 +348,36 @@ class OpenPinsTests(_FtdiTestCase):
         self.assertEqual(t.adapter.description, "Embedded FlashPro5 A")
         self.assertIsNone(t.idcode)  # no chain scan
         self.assertEqual(self.lib.dev.state, "RESET")
-        self.assertEqual(ft._OPEN_CHANNELS, [])  # no transport can join it
+        # Registered, so nothing else opens it, but no transport joins it.
+        self.assertEqual([ch.exclusive for ch in ft._OPEN_CHANNELS], [True])
+        for device in ("Embedded FlashPro5 A", "FP5SN0A"):
+            with self.subTest(device=device):
+                with self.assertRaisesRegex(RuntimeError, "held by open_pins"):
+                    FtdiMpsseTransport(device=device).connect()
+        # The default pick lands on the same channel: refused as well.
+        with self.assertRaisesRegex(RuntimeError, "held by open_pins"):
+            FtdiMpsseTransport().connect()
+        self.assertEqual(self.lib.opens, 1)
+        t.close()
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+        again = FtdiMpsseTransport()
+        again.open_pins()  # free again
+        again.close()
+
+    def test_refused_on_a_channel_a_transport_holds(self):
+        self._transport()
+        for device in (None, "FP5SN0A"):
+            with self.subTest(device=device):
+                with self.assertRaisesRegex(RuntimeError, "already open in this process"):
+                    FtdiMpsseTransport(device=device).open_pins()
+        self.assertEqual(self.lib.opens, 1)
+
+    def test_other_channel_of_the_chip_stays_free(self):
+        pins = FtdiMpsseTransport(device="Embedded FlashPro5 B")
+        self.addCleanup(pins.close)
+        pins.open_pins()
+        self.assertEqual(self._transport().adapter.description, "Embedded FlashPro5 A")
+        self.assertEqual(self.lib.opens, 2)
 
     def test_exchange_and_close(self):
         t = FtdiMpsseTransport()
@@ -532,7 +561,40 @@ class RegisterTests(_FtdiTestCase):
         self.assertGreater(self.lib.writes - before, 1)
 
 
+class ChannelKeyTests(unittest.TestCase):
+    def test_d2xx_channel_letter_comes_off_the_serial(self):
+        key = ft._channel_key
+        self.assertEqual(
+            key(FtdiDevice(0, "Digilent USB Device B", "210319A5F2B", 0x04036010, False)),
+            (0x04036010, "210319A5F2", "B"),
+        )
+        # Letter on the description but not the serial: the serial stays.
+        self.assertEqual(
+            key(FtdiDevice(0, "Dual RS232-HS A", "FT9XYZ", 0x04036010, False)),
+            (0x04036010, "FT9XYZ", "A"),
+        )
+        # Single-channel chip: channel A, serial as is.
+        self.assertEqual(
+            key(FtdiDevice(0, "USB Debugger", "FT1234B", 0x04036014, False)),
+            (0x04036014, "FT1234B", "A"),
+        )
+
+    def test_no_serial_no_identity(self):
+        self.assertIsNone(ft._channel_key(FtdiDevice(0, "Clone A", "", 0x04036010, False)))
+        self.assertIsNone(ft._channel_key(FtdiDevice(0, "Clone A", "A", 0x04036010, False)))
+
+
 class SharedChannelTests(_FtdiTestCase):
+    def test_joins_the_same_physical_channel_under_another_name(self):
+        self._transport(device="Embedded FlashPro5 A")
+        # The same channel enumerated under another description (as another
+        # driver would list it): same VID/PID, serial and channel letter.
+        a = self.lib.devices[0]
+        self.lib.devices[0] = a._replace(description="FlashPro5 Port A", serial="FP5SN0")
+        b = self._transport(device="FlashPro5 Port A")
+        self.assertEqual(self.lib.opens, 1)
+        self.assertEqual(b.adapter.description, "Embedded FlashPro5 A")
+
     def test_second_transport_shares_the_open_channel(self):
         a = self._transport()
         b = self._transport()

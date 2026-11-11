@@ -143,13 +143,38 @@ def _layout_for(description: str) -> tuple[int, int] | None:
     return None
 
 
+def _channel_key(dev: FtdiDevice) -> tuple[int, str, str] | None:
+    """The physical channel *dev* names: ``(VID/PID, USB serial, channel
+    letter)``, the same whichever driver enumerated it, or ``None`` when the
+    chip has no serial number to tell it from a twin.
+
+    D2XX appends the channel letter to the serial of a multi-channel chip
+    ("FT1234A") and to its description ("... A"); the letter comes off the
+    serial only when the description ends with the same one.
+    """
+    serial, letter = dev.serial, "A"
+    desc = dev.description
+    if len(desc) >= 2 and desc[-2] == " " and desc[-1] in "ABCD":
+        letter = desc[-1]
+        if serial.endswith(letter):
+            serial = serial[:-1]
+    if not serial:
+        return None
+    return dev.usb_id, serial, letter
+
+
+def _selects(dev: FtdiDevice, device: str) -> bool:
+    """Whether the ``device=`` selector names *dev*."""
+    return device in (dev.description, dev.serial)
+
+
 def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
     """Pick the adapter channel: by exact description or serial, or the
     single known JTAG adapter's channel A."""
     listing = ", ".join(repr(d.description) for d in devices) or "none"
     if device:
         for d in devices:
-            if device in (d.description, d.serial):
+            if _selects(d, device):
                 return d
         raise RuntimeError(
             f"no FTDI channel with description or serial {device!r}; found: {listing}"
@@ -164,7 +189,8 @@ def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
         busy = sum(1 for d in devices if d.opened)
         hint = (
             f" {busy} FTDI channel(s) are open in another program (Libero, "
-            "FlashPro Express, hw_server, OpenOCD) and cannot be named; close it."
+            "FlashPro Express, hw_server, OpenOCD) or held by open_pins() in "
+            "this process, and cannot be named; close it."
             if busy else ""
         )
         raise RuntimeError(
@@ -451,11 +477,16 @@ class _OpenChannel:
 
     ``broken`` is set when a USB transfer failed partway: MPSSE may be left
     mid-command and the TAP mid-scan, so every transport on the channel
-    refuses I/O until it reconnects, which opens the channel afresh."""
+    refuses I/O until it reconnects, which opens the channel afresh.
 
-    def __init__(self, io, adapter: FtdiDevice) -> None:
+    ``exclusive`` marks a channel opened with ``open_pins()``: registered so
+    that nothing else in the process opens it, but never shared."""
+
+    def __init__(self, io, adapter: FtdiDevice, *, exclusive: bool = False) -> None:
         self.io = io
         self.adapter = adapter
+        self.key = _channel_key(adapter)
+        self.exclusive = exclusive
         self.broken: str | None = None
         self.lock = threading.RLock()
         self.users = 0
@@ -470,16 +501,47 @@ _OPEN_CHANNELS: list[_OpenChannel] = []
 _OPEN_CHANNELS_LOCK = threading.Lock()
 
 
-def _find_open_channel(device: str | None) -> _OpenChannel | None:
-    # A broken channel is already closed; its transports leave it on their
-    # next call.  Called with _OPEN_CHANNELS_LOCK held.
+_PIN_CHANNEL_BUSY = (
+    "FTDI channel {!r} is held by open_pins() in this process "
+    "(fcapz openocd-bridge); close that first"
+)
+
+
+def _live_channels() -> list[_OpenChannel]:
+    """The registry, less broken channels: those are already closed, and
+    their transports leave them on their next call.  Called with
+    ``_OPEN_CHANNELS_LOCK`` held."""
     _OPEN_CHANNELS[:] = [ch for ch in _OPEN_CHANNELS if ch.broken is None]
+    return _OPEN_CHANNELS
+
+
+def _find_open_channel(device: str | None) -> _OpenChannel | None:
+    """The open channel the ``device=`` selector names, if any; before
+    enumerating, as a driver may list an open channel without its name.
+    Refuses a channel held by ``open_pins()``."""
+    live = _live_channels()
     if device is None:
-        return _OPEN_CHANNELS[0] if len(_OPEN_CHANNELS) == 1 else None
-    for ch in _OPEN_CHANNELS:
-        if device in (ch.adapter.description, ch.adapter.serial):
-            return ch
-    return None
+        # The one channel transports share; a pin channel is never the
+        # default, and enumeration refuses it if the default is its channel.
+        shared = [c for c in live if not c.exclusive]
+        ch = shared[0] if len(shared) == 1 else None
+    else:
+        ch = next((c for c in live if _selects(c.adapter, device)), None)
+    if ch is not None and ch.exclusive:
+        raise RuntimeError(_PIN_CHANNEL_BUSY.format(ch.adapter.description))
+    return ch
+
+
+def _channel_open_as(dev: FtdiDevice) -> _OpenChannel | None:
+    """The open channel on the same physical channel as *dev*, however it
+    was named or enumerated.  Refuses a channel held by ``open_pins()``."""
+    key = _channel_key(dev)
+    if key is None:
+        return None
+    ch = next((c for c in _live_channels() if c.key == key), None)
+    if ch is not None and ch.exclusive:
+        raise RuntimeError(_PIN_CHANNEL_BUSY.format(ch.adapter.description))
+    return ch
 
 
 def _in_one_session(method):
@@ -625,9 +687,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     self._detach(retire=False)
             self._session_count = count
             ch = _find_open_channel(self.device)
+            if ch is None:
+                dev = _pick_device(list_ftdi_devices(), self.device)
+                ch = _channel_open_as(dev)
             opened = ch is None
             if opened:
-                ch = self._open_channel()
+                ch = self._open_channel(dev)
             ch.users += 1
             self._channel = ch
             self._handle, self.adapter = ch.io, ch.adapter
@@ -654,11 +719,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             if opened:
                 _OPEN_CHANNELS.append(ch)
 
-    def _open_mpsse(self) -> tuple[_D2xxIo, FtdiDevice, tuple[int, int]]:
-        """Open the device and put it in MPSSE mode: ``(io, device, layout)``,
+    def _open_mpsse(self, dev: FtdiDevice) -> tuple[_D2xxIo, tuple[int, int]]:
+        """Open channel *dev* and put it in MPSSE mode: ``(io, layout)``,
         with ``_handle`` set.  Released again on failure."""
         lib = _load_d2xx()
-        dev = _pick_device(list_ftdi_devices(), self.device)
         layout = self.layout or _layout_for(dev.description) or DEFAULT_LAYOUT
         handle = ctypes.c_void_p()
         status = lib.FT_Open(dev.index, ctypes.byref(handle))
@@ -675,11 +739,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._handle = None
             io.close()
             raise
-        return io, dev, layout
+        return io, layout
 
-    def _open_channel(self) -> _OpenChannel:
+    def _open_channel(self, dev: FtdiDevice) -> _OpenChannel:
         """Open, set up and identify a channel no transport holds yet."""
-        io, dev, _layout = self._open_mpsse()
+        io, _layout = self._open_mpsse(dev)
         try:
             self._identify()
         except Exception:
@@ -697,7 +761,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
         Sets up MPSSE like :meth:`connect` but does not scan the chain, so any
         chain works, and the channel is not shared: no transport in this
-        process can join it.  Drive it with :meth:`exchange`; :meth:`close`
+        process can join or open it.  Drive it with :meth:`exchange`; :meth:`close`
         releases it.  Returns the ``(ADBUS value, direction)`` layout in
         force, and sets :attr:`gpio`.  For ``fcapz openocd-bridge``.
         """
@@ -712,12 +776,31 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._session_count = count
             # A pin session reaches no core: nothing to claim or release.
             self._forget_hub_state()
-            io, dev, layout = self._open_mpsse()
-            ch = _OpenChannel(io, dev)
+            if self.device is not None:
+                held = next(
+                    (c for c in _live_channels() if _selects(c.adapter, self.device)), None
+                )
+            else:
+                held = None
+            if held is None:
+                dev = _pick_device(list_ftdi_devices(), self.device)
+                held = next(
+                    (c for c in _live_channels()
+                     if c.key is not None and c.key == _channel_key(dev)),
+                    None,
+                )
+            if held is not None:
+                raise RuntimeError(
+                    f"FTDI channel {held.adapter.description!r} is already open "
+                    "in this process; close its other users first"
+                )
+            io, layout = self._open_mpsse(dev)
+            ch = _OpenChannel(io, dev, exclusive=True)
             ch.users = 1
             self._channel, self.adapter = ch, dev
             self._io_lock = ch.lock
             self.pin_layout = layout
+            _OPEN_CHANNELS.append(ch)
         try:
             self.gpio = self._gpio_works(layout)
         except Exception:
@@ -783,7 +866,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             ch.users -= 1
             if ch.users > 0:
                 return
-            if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
+            if ch in _OPEN_CHANNELS:  # gone already if it broke
                 _OPEN_CHANNELS.remove(ch)
             ch.io.close()
 
