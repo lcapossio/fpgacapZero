@@ -554,6 +554,49 @@ class SharedChannelTests(_FtdiTestCase):
         b = self._transport(tck_hz=6e6)
         self.assertTrue(b.sample_falling)
 
+    def _break_reads(self):
+        """The next FT_Read comes back one byte short."""
+        real = self.lib.FT_Read
+
+        def short(handle, buf, n, got):
+            self.lib.FT_Read = real
+            status = real(handle, buf, n, got)
+            got._obj.value = max(0, got._obj.value - 1)
+            return status
+
+        self.lib.FT_Read = short
+
+    def test_failed_transfer_breaks_the_channel_for_every_user(self):
+        a = self._transport()
+        b = self._transport()
+        self._break_reads()
+        with self.assertRaisesRegex(RuntimeError, "read timed out"):
+            a.read_reg(0x0000)
+        self.assertEqual(self.lib.closes, 1)  # MPSSE may be mid-command
+        for t in (a, b):
+            with self.assertRaisesRegex(RuntimeError, "channel broken"):
+                t.read_reg(0x0000)
+        # A new transport does not join the broken channel.
+        c = self._transport()
+        self.assertEqual(self.lib.opens, 2)
+        self.assertEqual(c.read_reg(0x0000), 0x46430004)
+
+    def test_reconnect_reopens_a_broken_channel(self):
+        a = self._transport()
+        b = self._transport()
+        self._break_reads()
+        with self.assertRaises(RuntimeError):
+            a.read_reg(0x0000)
+        b.connect()
+        self.assertEqual(self.lib.opens, 2)
+        self.assertEqual(b.read_reg(0x0000), 0x46430004)
+        a.connect()  # joins the fresh channel
+        self.assertEqual(self.lib.opens, 2)
+        self.assertEqual(a.read_reg(0x0000), 0x46430004)
+        a.close()
+        b.close()
+        self.assertEqual(self.lib.closes, 2)  # the broken handle once, the new once
+
 
 class ProgramTests(_FtdiTestCase):
     """program(): JTAG configuration of an AMD/Xilinx 7-series FPGA."""

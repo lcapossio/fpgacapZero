@@ -25,7 +25,7 @@ import os
 import sys
 import threading
 import time
-from typing import Any, List, NamedTuple
+from typing import List, NamedTuple
 
 from .transport import (
     BurstIntegrityError,
@@ -177,12 +177,74 @@ def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
     )
 
 
-def _release(lib, handle: ctypes.c_void_p) -> None:
-    """Leave MPSSE mode and close a D2XX handle."""
-    try:
-        lib.FT_SetBitMode(handle, 0, 0)
-    finally:
-        lib.FT_Close(handle)
+class _D2xxIo:
+    """Byte I/O on one channel through a D2XX handle.
+
+    The transport's MPSSE logic sits on top of this: :meth:`setup` puts the
+    chip in MPSSE mode, :meth:`write` / :meth:`read` move bytes, and
+    :meth:`transfer` sends commands and reads their whole reply.  The D2XX
+    driver keeps reading from the chip in the background, so a write never
+    stalls on replies the host has not read yet and :meth:`transfer` is a
+    plain write then read.
+    """
+
+    backend = "d2xx"
+
+    def __init__(self, lib, handle: ctypes.c_void_p) -> None:
+        self.lib = lib
+        self.handle = handle
+        self.closed = False
+
+    def _call(self, name: str, *args) -> None:
+        status = getattr(self.lib, name)(self.handle, *args)
+        if status != _FT_OK:
+            raise RuntimeError(f"{name} failed: D2XX status {status}")
+
+    def setup(self, timeout_ms: int) -> None:
+        """Reset the channel, set its timeouts and put it in MPSSE mode."""
+        self._call("FT_ResetDevice")
+        self._call("FT_SetUSBParameters", 65536, 65536)
+        self._call("FT_SetChars", 0, 0, 0, 0)
+        self._call("FT_SetTimeouts", timeout_ms, timeout_ms)
+        self._call("FT_SetLatencyTimer", 1)
+        self._call("FT_SetFlowControl", 0x0100, 0, 0)  # RTS/CTS, per AN_135
+        self._call("FT_SetBitMode", 0, 0)
+        self._call("FT_SetBitMode", 0, 2)  # MPSSE
+        self._call("FT_Purge", 3)
+
+    def write(self, data: bytes) -> None:
+        written = ctypes.c_ulong()
+        self._call("FT_Write", data, len(data), ctypes.byref(written))
+        if written.value != len(data):
+            raise RuntimeError(f"FTDI write short: {written.value} of {len(data)} bytes")
+
+    def read(self, n: int) -> bytes:
+        if n == 0:
+            return b""
+        buf = ctypes.create_string_buffer(n)
+        got = ctypes.c_ulong()
+        self._call("FT_Read", buf, n, ctypes.byref(got))
+        if got.value != n:
+            raise RuntimeError(
+                f"FTDI read timed out: {got.value} of {n} bytes (adapter unplugged "
+                "or held by another program?)"
+            )
+        return buf.raw[:n]
+
+    def transfer(self, cmd: bytes, reply_bytes: int) -> bytes:
+        """Send *cmd* and read its *reply_bytes* bytes of reply."""
+        self.write(cmd)
+        return self.read(reply_bytes)
+
+    def close(self) -> None:
+        """Leave MPSSE mode and close the handle (once)."""
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.lib.FT_SetBitMode(self.handle, 0, 0)
+        finally:
+            self.lib.FT_Close(self.handle)
 
 
 # -- MPSSE JTAG batches ----------------------------------------------------
@@ -381,16 +443,20 @@ def bitstream_idcode(data: bytes) -> int | None:
 
 
 class _OpenChannel:
-    """One D2XX handle, shared by every transport on that channel in this
-    process: D2XX opens a channel exclusively, and the ELA, EIO and bridge
+    """One open adapter channel, shared by every transport on it in this
+    process: a channel opens exclusively, and the ELA, EIO and bridge
     sessions of one server each hold their own transport.  Every scan batch
     starts with its own IR scan, so instances interleave safely under
-    ``lock``."""
+    ``lock``.
 
-    def __init__(self, lib, handle: ctypes.c_void_p, adapter: FtdiDevice) -> None:
-        self.lib = lib
-        self.handle = handle
+    ``broken`` is set when a USB transfer failed partway: MPSSE may be left
+    mid-command and the TAP mid-scan, so every transport on the channel
+    refuses I/O until it reconnects, which opens the channel afresh."""
+
+    def __init__(self, io, adapter: FtdiDevice) -> None:
+        self.io = io
         self.adapter = adapter
+        self.broken: str | None = None
         self.lock = threading.RLock()
         self.users = 0
         self.idcode: int | None = None
@@ -405,6 +471,9 @@ _OPEN_CHANNELS_LOCK = threading.Lock()
 
 
 def _find_open_channel(device: str | None) -> _OpenChannel | None:
+    # A broken channel is already closed; its transports leave it on their
+    # next call.  Called with _OPEN_CHANNELS_LOCK held.
+    _OPEN_CHANNELS[:] = [ch for ch in _OPEN_CHANNELS if ch.broken is None]
     if device is None:
         return _OPEN_CHANNELS[0] if len(_OPEN_CHANNELS) == 1 else None
     for ch in _OPEN_CHANNELS:
@@ -519,8 +588,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         #: :func:`_in_one_session`).
         self._call_local = threading.local()
         self._active_chain = 1
-        self._handle: ctypes.c_void_p | None = None
-        self._lib = None
+        #: The channel's byte I/O (:class:`_D2xxIo`) while connected.
+        self._handle: _D2xxIo | None = None
         self._channel: _OpenChannel | None = None
         self._io_lock = threading.RLock()
         #: Filled by :meth:`connect`.
@@ -546,13 +615,14 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
-                if not self._cancelled:
+                if not self._cancelled and self._channel.broken is None:
                     return
                 # A cancelled session: let its call in flight end (it fails
                 # at its next write; a read already waiting ends within the
                 # D2XX timeout, as close() may wait), then start a new one.
+                # A broken channel is reopened the same way.
                 with self._io_lock:
-                    self._detach(retire=False)  # already cancelled
+                    self._detach(retire=False)
             self._session_count = count
             ch = _find_open_channel(self.device)
             opened = ch is None
@@ -560,7 +630,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 ch = self._open_channel()
             ch.users += 1
             self._channel = ch
-            self._lib, self._handle, self.adapter = ch.lib, ch.handle, ch.adapter
+            self._handle, self.adapter = ch.io, ch.adapter
             self._io_lock = ch.lock
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
@@ -579,14 +649,14 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 self._channel = self._handle = None
                 ch.users -= 1
                 if opened:
-                    _release(ch.lib, ch.handle)
+                    ch.io.close()
                 raise
             if opened:
                 _OPEN_CHANNELS.append(ch)
 
-    def _open_mpsse(self) -> tuple[Any, ctypes.c_void_p, FtdiDevice, tuple[int, int]]:
-        """Open the device and put it in MPSSE mode: ``(lib, handle, device,
-        layout)``, with ``_lib``/``_handle`` set.  Released again on failure."""
+    def _open_mpsse(self) -> tuple[_D2xxIo, FtdiDevice, tuple[int, int]]:
+        """Open the device and put it in MPSSE mode: ``(io, device, layout)``,
+        with ``_handle`` set.  Released again on failure."""
         lib = _load_d2xx()
         dev = _pick_device(list_ftdi_devices(), self.device)
         layout = self.layout or _layout_for(dev.description) or DEFAULT_LAYOUT
@@ -597,25 +667,26 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             raise RuntimeError(
                 f"cannot open FTDI channel {dev.description!r}{busy}: D2XX status {status}"
             )
-        self._lib, self._handle = lib, handle
+        io = _D2xxIo(lib, handle)
+        self._handle = io
         try:
             self._setup_mpsse(layout)
         except Exception:
             self._handle = None
-            _release(lib, handle)
+            io.close()
             raise
-        return lib, handle, dev, layout
+        return io, dev, layout
 
     def _open_channel(self) -> _OpenChannel:
         """Open, set up and identify a channel no transport holds yet."""
-        lib, handle, dev, _layout = self._open_mpsse()
+        io, dev, _layout = self._open_mpsse()
         try:
             self._identify()
         except Exception:
             self._handle = None
-            _release(lib, handle)
+            io.close()
             raise
-        ch = _OpenChannel(lib, handle, dev)
+        ch = _OpenChannel(io, dev)
         ch.idcode, ch.ir_length = self.idcode, self.ir_length
         ch.family, ch.actual_tck_hz = self.family, self.actual_tck_hz
         ch.sample_falling = self.sample_falling
@@ -641,8 +712,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._session_count = count
             # A pin session reaches no core: nothing to claim or release.
             self._forget_hub_state()
-            lib, handle, dev, layout = self._open_mpsse()
-            ch = _OpenChannel(lib, handle, dev)
+            io, dev, layout = self._open_mpsse()
+            ch = _OpenChannel(io, dev)
             ch.users = 1
             self._channel, self.adapter = ch, dev
             self._io_lock = ch.lock
@@ -667,7 +738,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 # Waited on a channel that a reopen has since replaced.
                 raise RuntimeError("FTDI transport reconnected; call again")
             if commands:
-                self._write(commands)
+                return self._transfer(commands, reply_bytes)
             return self._read(reply_bytes)
 
     def close(self) -> None:
@@ -714,7 +785,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 return
             if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
                 _OPEN_CHANNELS.remove(ch)
-            _release(ch.lib, ch.handle)
+            ch.io.close()
 
     def cancel(self) -> None:
         """Abort the call in flight from another thread, without a lock.
@@ -769,21 +840,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def _call(self, name: str, *args) -> None:
-        status = getattr(self._lib, name)(self._handle, *args)
-        if status != _FT_OK:
-            raise RuntimeError(f"{name} failed: D2XX status {status}")
-
     def _setup_mpsse(self, layout: tuple[int, int]) -> None:
-        self._call("FT_ResetDevice")
-        self._call("FT_SetUSBParameters", 65536, 65536)
-        self._call("FT_SetChars", 0, 0, 0, 0)
-        self._call("FT_SetTimeouts", self.timeout_ms, self.timeout_ms)
-        self._call("FT_SetLatencyTimer", 1)
-        self._call("FT_SetFlowControl", 0x0100, 0, 0)  # RTS/CTS, per AN_135
-        self._call("FT_SetBitMode", 0, 0)
-        self._call("FT_SetBitMode", 0, 2)  # MPSSE
-        self._call("FT_Purge", 3)
+        self._handle.setup(self.timeout_ms)
         # An invalid opcode must come back as 0xFA <opcode>: MPSSE is in sync.
         self._write(bytes((0xAA, _SEND_IMMEDIATE)))
         echo = self._read(2)
@@ -843,34 +901,60 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         mask = _PIN_TCK | both
         return reply[0] & mask == both and reply[1] & mask == 0
 
+    def _io(self) -> _D2xxIo:
+        """The channel's I/O, if this session may use it."""
+        io = self._handle
+        if io is None:
+            raise RuntimeError("not connected — call connect() first")
+        ch = self._channel
+        if ch is not None and ch.broken is not None:
+            raise RuntimeError(f"FTDI channel broken ({ch.broken}); reconnect")
+        return io
+
+    def _io_call(self, fn, *args):
+        """Run one I/O call; a failure breaks the channel (see
+        :class:`_OpenChannel`).  During connect there is no channel yet: the
+        caller releases the half-open handle."""
+        try:
+            return fn(*args)
+        except Exception as exc:
+            ch = self._channel
+            if ch is not None and ch.broken is None:
+                # Under the channel lock (every I/O path holds it): the
+                # handle closes now, so a peer that reconnects opens it anew.
+                ch.broken = str(exc) or type(exc).__name__
+                try:
+                    ch.io.close()
+                except Exception:
+                    pass
+            raise
+
     def _write(self, data: bytes) -> None:
+        io = self._io()
         if self._call_cancelled:
             raise RuntimeError("FTDI transport cancelled; reconnect")
-        written = ctypes.c_ulong()
-        self._call("FT_Write", data, len(data), ctypes.byref(written))
-        if written.value != len(data):
-            raise RuntimeError(f"FTDI write short: {written.value} of {len(data)} bytes")
+        self._io_call(io.write, data)
 
     def _read(self, n: int) -> bytes:
         if n == 0:
             return b""
-        buf = ctypes.create_string_buffer(n)
-        got = ctypes.c_ulong()
-        self._call("FT_Read", buf, n, ctypes.byref(got))
-        if got.value != n:
-            raise RuntimeError(
-                f"FTDI read timed out: {got.value} of {n} bytes (adapter unplugged "
-                "or held by another program?)"
-            )
-        return buf.raw[:n]
+        io = self._io()
+        return self._io_call(io.read, n)
+
+    def _transfer(self, cmd: bytes, reply_bytes: int) -> bytes:
+        """Send *cmd* and read its whole reply.  The backend keeps reading
+        while it writes, so a reply larger than the chip's buffer cannot
+        stall the write."""
+        io = self._io()
+        if self._call_cancelled:
+            raise RuntimeError("FTDI transport cancelled; reconnect")
+        return self._io_call(io.transfer, cmd, reply_bytes)
 
     def _flush(self, batch: _Batch) -> list[int]:
         if not batch.cmd:
             return []
-        if self._handle is None:
-            raise RuntimeError("not connected — call connect() first")
-        self._write(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)))
-        return batch.decode(self._read(batch.read_bytes))
+        rx = self._transfer(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)), batch.read_bytes)
+        return batch.decode(rx)
 
     # -- chain discovery -----------------------------------------------------
 
@@ -1106,8 +1190,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         it answers only then.  Commands that read nothing return as soon as
         the adapter buffers them, and its buffer holds seconds of clocks at
         a slow TCK, enough to delay the next read past the D2XX timeout."""
-        self._write(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)))
-        self._read(1)
+        self._transfer(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
 
     def _config_status(self) -> int:
         """The IR capture: configuration status bits over the fixed ``01``."""
