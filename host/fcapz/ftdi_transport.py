@@ -530,6 +530,10 @@ _FAMILY_BURST: dict[str, bool] = {
 #: The family field (IDCODE bits 27:21) of AMD/Xilinx parts by their IR
 #: length: 7-series and Zynq-7000, and Zynq UltraScale+ MPSoC.
 _XILINX_FAMILY_IR = {0x1B: 6, 0x23: 12}
+#: Multi-die (SSI) 7-series parts share family 0x1B with longer IRs, by
+#: IDCODE bits 27:12 (UG470 table 1-1).  The 7V2000T's bits 13:12 vary.
+_XILINX_SSI_IR = {0x36D5: 24, 0x36D9: 22, 0x36DB: 38}
+_XILINX_7V2000T = 0x36B0  # IR 24
 
 
 def family_from_idcode(idcode: int, ir_length: int) -> str | None:
@@ -554,6 +558,11 @@ def known_ir_length(idcode: int | None) -> int | None:
     if idcode & 0x0FFF0FFF == 0x0BA00477:  # ARM JTAG-DP (Zynq's DAP)
         return 4
     if (idcode >> 1) & 0x7FF == _MFG_XILINX:
+        part = (idcode >> 12) & 0xFFFF
+        if part & 0xFFFC == _XILINX_7V2000T:
+            return 24
+        if part in _XILINX_SSI_IR:
+            return _XILINX_SSI_IR[part]
         return _XILINX_FAMILY_IR.get((idcode >> 21) & 0x7F)
     return None
 
@@ -1370,8 +1379,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         return codes
 
     def _measure_ir_length(self) -> int:
-        """Fill the IR with ones, then time a single zero through it."""
-        width, mark = 256, 128
+        """Fill the IR with ones, then time a single zero through it.  The
+        zero goes in past every capture bit of a chain of up to 511 IR bits
+        (eight multi-die parts of 38 bits fit)."""
+        width, mark = 1024, 512
         pattern = ((1 << width) - 1) & ~(1 << mark)
         batch = _Batch(self.sample_falling)
         batch.scan(True, pattern, width, True)

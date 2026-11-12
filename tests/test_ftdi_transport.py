@@ -1376,6 +1376,30 @@ class ChainTests(_FtdiTestCase):
         self._check_core(t, target)
         self._assert_bypassed(other)
 
+    def test_multi_die_7series_ir_is_not_taken_for_six_bits(self):
+        # Family 0x1B, but a 24-bit IR (UG470): read as six bits, the
+        # PolarFire would get 26 and the XC7V2000T would be picked.
+        target, ssi = _Device(), _Device(0x236B3093, ir_len=24, user1=0x3C2, idcode_ir=0x3C9)
+        self.lib.dev = _Chain(target, ssi)
+        t = self._transport()
+        self.assertEqual(t.chain, [(POLARFIRE_IDCODE, 8), (0x236B3093, 24)])
+        self.assertEqual((t.chain_tap, t.family), (0, "polarfire"))
+        self._check_core(t, target)
+        self._assert_bypassed(ssi)
+
+    def test_chain_with_more_than_127_ir_bits(self):
+        ssis = [
+            _Device(0x236B3093 + (i << 28), ir_len=24, user1=0x3C2, idcode_ir=0x3C9)
+            for i in range(5)
+        ]
+        target = _Device()
+        self.lib.dev = _Chain(*ssis, target)  # 5 * 24 + 8 = 128 IR bits
+        t = self._transport()
+        self.assertEqual([n for _c, n in t.chain], [24] * 5 + [8])
+        self.assertEqual(t.chain_tap, 5)
+        self._check_core(t, target)
+        self._assert_bypassed(*ssis)
+
     def test_tap_past_the_chain(self):
         self.lib.dev = _Chain(_dap(), _zynqus())
         with self.assertRaisesRegex(RuntimeError, r"tap=2 but the JTAG chain has 2"):
@@ -1463,6 +1487,13 @@ class KnownIrLengthTests(unittest.TestCase):
         self.assertEqual(ft.known_ir_length(XILINX_IDCODE), 6)
         self.assertEqual(ft.known_ir_length(0x03722093), 6)  # xc7z010 PL
         self.assertEqual(ft.known_ir_length(ZYNQUS_IDCODE), 12)
+        # Multi-die 7-series (UG470 table 1-1); the 7V2000T ignores bits 13:12.
+        self.assertEqual(ft.known_ir_length(0x236B3093), 24)
+        self.assertEqual(ft.known_ir_length(0x236B0093), 24)
+        self.assertEqual(ft.known_ir_length(0x236D5093), 24)
+        self.assertEqual(ft.known_ir_length(0x236D9093), 22)
+        self.assertEqual(ft.known_ir_length(0x236DB093), 38)
+        self.assertEqual(ft.known_ir_length(0x23691093), 6)  # 7VX690T: one die
         self.assertIsNone(ft.known_ir_length(POLARFIRE_IDCODE))
         self.assertIsNone(ft.known_ir_length(None))
         self.assertEqual(family_from_idcode(ZYNQUS_IDCODE, 12), "zynqus")
