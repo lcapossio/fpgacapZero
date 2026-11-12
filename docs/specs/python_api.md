@@ -1956,6 +1956,8 @@ FtdiMpsseTransport(
     timeout_ms: int = 2000,
     tdo_sample_edge: str | None = None,
     bitfile: str | None = None,
+    tap: int | None = None,
+    ir_lengths: Sequence[int] | None = None,
 )
 ```
 
@@ -1971,6 +1973,13 @@ AMD/Xilinx 7-series and single-die UltraScale (`0x02` / `0x03` /
 `0x22` / `0x23`) or Gowin.  `burst` defaults to that
 family's wrapper default (on for PolarFire and AMD/Xilinx, off for
 Gowin).  `layout` overrides the adapter's `(ADBUS value, direction)`.
+A chain of several devices (a Zynq's ARM DAP beside its PL, say) is
+reached through one of them, *tap*, numbered from the TDO end as the
+IDCODEs are read (0 is nearest TDO); by default the one device whose
+family is known.  The others are kept in BYPASS.  Each device's IR
+length comes from its IDCODE where known (AMD/Xilinx 7-series, Zynq
+UltraScale+, ARM DAP), a single unknown one from the measured total;
+otherwise pass *ir_lengths*, in the same order.
 `tdo_sample_edge` is `"rising"` or `"falling"`; by default TDO is
 sampled on the rising edge up to 15 MHz and on the falling edge above,
 where a cable's TDO round trip can exceed half a TCK period (the Arty

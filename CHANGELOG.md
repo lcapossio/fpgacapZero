@@ -48,6 +48,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   TAP models in Verilog and VHDL: identity, a capture triggered on a write
   address, and readback through the register window and the burst path. No
   hardware build yet.
+- **FTDI: JTAG chains of several devices.** `FtdiMpsseTransport` scans
+  one device of the chain and keeps the others in BYPASS, so a Zynq's PL
+  is reached past its ARM DAP. `tap=` picks the device (numbered from the
+  TDO end); by default it is the one of a known family. IR lengths come
+  from the IDCODEs (AMD/Xilinx 7-series and Zynq UltraScale+, ARM DAP),
+  one unknown device's from the measured total, or from `ir_lengths=`.
+  `program()` pads its bitstream shift for the devices in BYPASS. New
+  Zynq UltraScale+ family (12-bit IR, USER codes `0x902`/`0x903`/`0x922`/
+  `0x923`) and the Kria KV260 carrier card's pin layout (ADBUS5 low);
+  the KV260 suite runs over FTDI with `FPGACAP_BACKEND=ftdi` and passes
+  (33 tests at 15 and 30 MHz).
 - **FTDI adapters through libusb.** `FtdiMpsseTransport` also drives a
   channel through libusb (pyusb), for adapters bound to WinUSB or libusbK
   on Windows and for Linux or macOS without FTDI's D2XX library. Install
@@ -58,7 +69,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   backends' channels. Validated on an FT2232H bound to WinUSB (channel B, an
   Efinix Trion T8 chain), through both libusb-1.0 and libusb-0.1: 307,200
   random bytes shifted through BYPASS come back bit-exact at 1, 6, 15 and
-  30 MHz, 3.3 MB/s at 30 MHz.
+  30 MHz, 3.3 MB/s at 30 MHz. A full `connect()` session over libusb is not
+  yet hardware-tested.
 
 ### Changed
 

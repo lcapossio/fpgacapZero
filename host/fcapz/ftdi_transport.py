@@ -25,7 +25,7 @@ import os
 import sys
 import threading
 import time
-from typing import List, NamedTuple
+from typing import List, NamedTuple, Sequence
 
 from .transport import (
     BurstIntegrityError,
@@ -131,6 +131,9 @@ ADAPTER_LAYOUTS: tuple[tuple[str, int, int], ...] = (
     ("FlashPro", 0x18, 0x1B),
     # Digilent adapters (Arty, HS1/HS2-style): ADBUS7 enables the JTAG buffer.
     ("Digilent", 0x88, 0x8B),
+    # AMD Kria KV260 carrier card (FT4232H, channel A): the chain answers
+    # only with ADBUS5 driven low.
+    ("ML Carrier Card", 0x08, 0x2B),
 )
 #: Layout for adapters not listed above: TMS high, TCK/TDI/TMS outputs.
 DEFAULT_LAYOUT = (0x08, 0x0B)
@@ -414,13 +417,22 @@ _LAST_BIT_TO_IDLE = (1, 1, 0)
 
 class _Batch:
     """MPSSE command bytes for a run of JTAG scans, plus how to decode the
-    bytes they return."""
+    bytes they return.
 
-    def __init__(self, sample_falling: bool = False) -> None:
+    *pad* puts the scans through one device of a multi-device chain:
+    ``(IR bits, DR bits)`` of the other devices on the TDO side, then on
+    the TDI side.  Their IRs get all ones (BYPASS), their 1-bit BYPASS DRs
+    a zero; callers pass and get back the target's bits only."""
+
+    def __init__(
+        self, sample_falling: bool = False, pad: tuple[int, int, int, int] = (0, 0, 0, 0)
+    ) -> None:
         self.cmd = bytearray()
         self.read_bytes = 0
-        # Per captured scan: (width, whole data bytes, leftover bits).
-        self.captures: list[tuple[int, int, int]] = []
+        self._pad = pad
+        # Per captured scan: (shifted width, whole data bytes, leftover
+        # bits, target offset, target width).
+        self.captures: list[tuple[int, int, int, int, int]] = []
         edge = _READ_FALLING if sample_falling else 0
         self._bytes_inout = _DATA_BYTES_INOUT | edge
         self._bits_inout = _DATA_BITS_INOUT | edge
@@ -443,6 +455,15 @@ class _Batch:
         """One IR or DR scan from Run-Test/Idle back to Run-Test/Idle."""
         if width < 1:
             raise ValueError(f"scan width must be >= 1, got {width}")
+        tdo_ir, tdo_dr, tdi_ir, tdi_dr = self._pad
+        before, after = (tdo_ir, tdi_ir) if ir else (tdo_dr, tdi_dr)
+        target_width = width
+        if before or after:
+            # The first bits shifted end up nearest TDO.
+            value = (value & ((1 << width) - 1)) << before
+            if ir:
+                value |= ((1 << before) - 1) | (((1 << after) - 1) << (before + width))
+            width += before + after
         self.tms(_IDLE_TO_SHIFT_IR if ir else _IDLE_TO_SHIFT_DR)
         body = width - 1
         nbytes, rem = divmod(body, 8)
@@ -466,13 +487,13 @@ class _Batch:
             (self._tms_inout if capture else _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)
         )
         if capture:
-            self.captures.append((width, nbytes, rem))
+            self.captures.append((width, nbytes, rem, before, target_width))
             self.read_bytes += nbytes + (1 if rem else 0) + 1
 
     def decode(self, rx: bytes) -> list[int]:
         values: list[int] = []
         pos = 0
-        for width, nbytes, rem in self.captures:
+        for width, nbytes, rem, before, target_width in self.captures:
             value = int.from_bytes(rx[pos:pos + nbytes], "little")
             pos += nbytes
             if rem:
@@ -483,7 +504,8 @@ class _Batch:
             # The last data bit is the first of the TMS read's clocks.
             last = (rx[pos] >> (8 - len(_LAST_BIT_TO_IDLE))) & 1
             pos += 1
-            values.append(value | (last << (width - 1)))
+            value |= last << (width - 1)
+            values.append((value >> before) & ((1 << target_width) - 1))
         return values
 
 
@@ -497,9 +519,17 @@ _FAMILY_IR_TABLES: dict[str, dict[int, int]] = {
     "xilinx7": {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23},
     "polarfire": {1: 0x20, 2: 0x21},
     "gowin": {1: 0x42, 2: 0x43},
+    # Zynq UltraScale+ MPSoC PL (12-bit IR, PS and PL TAP in series): the
+    # BSDL's USER1-4.
+    "zynqus": {1: 0x902, 2: 0x903, 3: 0x922, 4: 0x923},
 }
 #: Whether each family's wrappers build a burst path by default.
-_FAMILY_BURST: dict[str, bool] = {"xilinx7": True, "polarfire": True, "gowin": False}
+_FAMILY_BURST: dict[str, bool] = {
+    "xilinx7": True, "polarfire": True, "gowin": False, "zynqus": True,
+}
+#: The family field (IDCODE bits 27:21) of AMD/Xilinx parts by their IR
+#: length: 7-series and Zynq-7000, and Zynq UltraScale+ MPSoC.
+_XILINX_FAMILY_IR = {0x1B: 6, 0x23: 12}
 
 
 def family_from_idcode(idcode: int, ir_length: int) -> str | None:
@@ -509,8 +539,22 @@ def family_from_idcode(idcode: int, ir_length: int) -> str | None:
         return "polarfire"
     if mfg == _MFG_XILINX and ir_length == 6:
         return "xilinx7"
+    if mfg == _MFG_XILINX and ir_length == 12 and (idcode >> 21) & 0x7F == 0x23:
+        return "zynqus"
     if mfg == _MFG_GOWIN and ir_length == 8:
         return "gowin"
+    return None
+
+
+def known_ir_length(idcode: int | None) -> int | None:
+    """The IR length of a device with *idcode*, where the IDCODE tells it;
+    ``None`` for a device in BYPASS or one not known."""
+    if idcode is None:
+        return None
+    if idcode & 0x0FFF0FFF == 0x0BA00477:  # ARM JTAG-DP (Zynq's DAP)
+        return 4
+    if (idcode >> 1) & 0x7FF == _MFG_XILINX:
+        return _XILINX_FAMILY_IR.get((idcode >> 21) & 0x7F)
     return None
 
 
@@ -603,6 +647,8 @@ class _OpenChannel:
         self.family: str | None = None
         self.actual_tck_hz: float | None = None
         self.sample_falling = False
+        self.chain: list[tuple[int | None, int]] = []
+        self.chain_tap = 0
 
 
 _OPEN_CHANNELS: list[_OpenChannel] = []
@@ -688,6 +734,13 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     ``0x22`` / ``0x23``) or Gowin.  ``burst`` defaults to that
     family's wrapper default (on for PolarFire and AMD/Xilinx, off for
     Gowin).  ``layout`` overrides the adapter's ``(ADBUS value, direction)``.
+    A chain of several devices (a Zynq's ARM DAP beside its PL, say) is
+    reached through one of them, *tap*, numbered from the TDO end as the
+    IDCODEs are read (0 is nearest TDO); by default the one device whose
+    family is known.  The others are kept in BYPASS.  Each device's IR
+    length comes from its IDCODE where known (AMD/Xilinx 7-series, Zynq
+    UltraScale+, ARM DAP), a single unknown one from the measured total;
+    otherwise pass *ir_lengths*, in the same order.
     ``tdo_sample_edge`` is ``"rising"`` or ``"falling"``; by default TDO is
     sampled on the rising edge up to 15 MHz and on the falling edge above,
     where a cable's TDO round trip can exceed half a TCK period (the Arty
@@ -730,6 +783,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         timeout_ms: int = 2000,
         tdo_sample_edge: str | None = None,
         bitfile: str | None = None,
+        tap: int | None = None,
+        ir_lengths: Sequence[int] | None = None,
     ):
         if not 1_000 <= tck_hz <= 30_000_000:
             raise ValueError(f"tck_hz must be 1 kHz..30 MHz, got {tck_hz}")
@@ -737,6 +792,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             raise ValueError(
                 f"tdo_sample_edge must be 'rising' or 'falling', got {tdo_sample_edge!r}"
             )
+        if tap is not None and not 0 <= tap < self.MAX_DEVICES:
+            raise ValueError(f"tap must be 0..{self.MAX_DEVICES - 1}, got {tap}")
+        if ir_lengths is not None and not all(int(n) >= 2 for n in ir_lengths):
+            raise ValueError(f"every IR length must be >= 2, got {list(ir_lengths)}")
+        self.tap = tap
+        self.ir_lengths = [int(n) for n in ir_lengths] if ir_lengths is not None else None
         self.tdo_sample_edge = tdo_sample_edge
         #: Set from the clock by connect(), or taken from a shared channel.
         self.sample_falling = False
@@ -770,6 +831,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.ir_length: int | None = None
         self.family: str | None = None
         self.actual_tck_hz: float | None = None
+        #: The chain read at connect: ``(IDCODE or None for BYPASS, IR
+        #: length)`` per device from the TDO end, and the one scanned.
+        self.chain: list[tuple[int | None, int]] = []
+        self.chain_tap = 0
         #: ``(ADBUS value, direction)`` set up by :meth:`open_pins`.
         self.pin_layout: tuple[int, int] | None = None
         #: Set by :meth:`open_pins`: whether the MPSSE pin commands work
@@ -815,9 +880,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
             self.sample_falling = ch.sample_falling
+            self.chain, self.chain_tap = ch.chain, ch.chain_tap
             # The FPGA may hold another bitstream than on a past connection.
             self._forget_hub_state()
             try:
+                if not opened:
+                    self._check_joined_chain()
                 self._apply_family_defaults()
                 if opened and self.bitfile:
                     # Before the channel is published: no transport joins
@@ -874,6 +942,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         ch.idcode, ch.ir_length = self.idcode, self.ir_length
         ch.family, ch.actual_tck_hz = self.family, self.actual_tck_hz
         ch.sample_falling = self.sample_falling
+        ch.chain, ch.chain_tap = self.chain, self.chain_tap
         return ch
 
     def open_pins(self) -> tuple[int, int]:
@@ -1029,7 +1098,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         if self.idcode is None:
             return None
         family = f" ({self.family})" if self.family else ""
-        return f"IDCODE 0x{self.idcode:08x}{family}"
+        where = (
+            f", device {self.chain_tap} of {len(self.chain)}" if len(self.chain) > 1 else ""
+        )
+        return f"IDCODE 0x{self.idcode:08x}{family}{where}"
 
     def __enter__(self) -> "FtdiMpsseTransport":
         self.connect()
@@ -1166,23 +1238,99 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         batch.scan(False, (1 << width) - 1, width, True)
         (chain,) = self._flush(batch)
         idcodes = self._parse_idcodes(chain, width)
-        if len(idcodes) != 1:
-            found = ", ".join(
-                f"0x{c:08x}" if c is not None else "BYPASS" for c in idcodes
-            )
-            raise RuntimeError(
-                f"FtdiMpsseTransport supports one device on the JTAG chain; "
-                f"found {len(idcodes)}: {found}"
-            )
-        self.idcode = idcodes[0]
-        self.ir_length = self._measure_ir_length()
+        if len(idcodes) > self.MAX_DEVICES:
+            raise RuntimeError(f"more than {self.MAX_DEVICES} devices on the JTAG chain")
+        total = self._measure_ir_length()
         batch = _Batch(self.sample_falling)
         batch.reset()  # back to IDCODE / BYPASS after the IR probe
         self._flush(batch)
+        lengths = self._ir_lengths_for(idcodes, total)
+        tap = self._pick_tap(idcodes, lengths)
+        self.chain = list(zip(idcodes, lengths))
+        self.chain_tap = tap
+        self.idcode, self.ir_length = idcodes[tap], lengths[tap]
         self.family = (
             family_from_idcode(self.idcode, self.ir_length)
             if self.idcode is not None else None
         )
+
+    @staticmethod
+    def _describe_chain(idcodes: list[int | None]) -> str:
+        return ", ".join(
+            f"{i}: " + (f"0x{c:08x}" if c is not None else "BYPASS")
+            for i, c in enumerate(idcodes)
+        )
+
+    def _ir_lengths_for(self, idcodes: list[int | None], total: int) -> list[int]:
+        """Each device's IR length, checked against the measured *total*."""
+        found = self._describe_chain(idcodes)
+        if len(idcodes) == 1 and self.ir_lengths is None:
+            return [total]
+        if self.ir_lengths is not None:
+            if len(self.ir_lengths) != len(idcodes) or sum(self.ir_lengths) != total:
+                raise RuntimeError(
+                    f"ir_lengths={self.ir_lengths} does not match the JTAG chain: "
+                    f"{len(idcodes)} device(s) ({found}), {total} IR bits in all"
+                )
+            return list(self.ir_lengths)
+        lengths = [known_ir_length(c) for c in idcodes]
+        unknown = [i for i, n in enumerate(lengths) if n is None]
+        rest = total - sum(n for n in lengths if n is not None)
+        if len(unknown) == 1 and rest >= 2:
+            lengths[unknown[0]] = rest
+            unknown = []
+        if unknown or sum(lengths) != total:
+            raise RuntimeError(
+                f"cannot tell the IR length of each device on the JTAG chain "
+                f"({found}; {total} IR bits in all); pass ir_lengths=[...] "
+                f"from the TDO end"
+            )
+        return lengths
+
+    def _pick_tap(self, idcodes: list[int | None], lengths: list[int]) -> int:
+        """The device to scan: *tap*, or the one device of a known family."""
+        found = self._describe_chain(idcodes)
+        if self.tap is not None:
+            if self.tap >= len(idcodes):
+                raise RuntimeError(
+                    f"tap={self.tap} but the JTAG chain has {len(idcodes)} "
+                    f"device(s): {found}"
+                )
+            return self.tap
+        if len(idcodes) == 1:
+            return 0
+        known = [
+            i for i, (c, n) in enumerate(zip(idcodes, lengths))
+            if c is not None and family_from_idcode(c, n) is not None
+        ]
+        if len(known) != 1:
+            raise RuntimeError(
+                f"{len(idcodes)} devices on the JTAG chain ({found}); pass "
+                f"tap=<index from the TDO end> to choose one"
+            )
+        return known[0]
+
+    def _check_joined_chain(self) -> None:
+        """A transport joining an open channel scans the device the channel
+        was identified for: refuse another *tap* or *ir_lengths*."""
+        if self.tap is not None and self.tap != self.chain_tap:
+            raise RuntimeError(
+                f"the FTDI channel is open for JTAG device {self.chain_tap}, "
+                f"not tap={self.tap}; close its other transports first"
+            )
+        lengths = [n for _code, n in self.chain]
+        if self.ir_lengths is not None and self.ir_lengths != lengths:
+            raise RuntimeError(
+                f"the FTDI channel is open with IR lengths {lengths}, not "
+                f"ir_lengths={self.ir_lengths}"
+            )
+
+    def _batch(self) -> _Batch:
+        """A scan batch that reaches the selected device of the chain."""
+        lengths = [n for _code, n in self.chain]
+        t = self.chain_tap
+        pad = (sum(lengths[:t]), t, sum(lengths[t + 1:]), max(0, len(lengths) - 1 - t))
+        return _Batch(self.sample_falling, pad)
 
     def _apply_family_defaults(self) -> None:
         """IR table and burst default from the detected family, unless given."""
@@ -1245,7 +1393,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             if lock is not self._io_lock:
                 # Waited on a channel that a reconnect has since replaced.
                 raise RuntimeError("FTDI transport reconnected; call again")
-            batch = _Batch(self.sample_falling)
+            batch = self._batch()
             for op in ops:
                 kind = op[0]
                 if kind == "ir":
@@ -1265,7 +1413,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     or batch.read_bytes >= self._FLUSH_READ_BYTES
                 ):
                     out.extend(self._flush(batch))
-                    batch = _Batch(self.sample_falling)
+                    batch = self._batch()
             out.extend(self._flush(batch))
         return out
 
@@ -1340,7 +1488,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         any other exception may leave MPSSE mid-command."""
         with self._io_lock:
             try:
-                batch = _Batch(self.sample_falling)
+                batch = self._batch()
                 batch.reset()
                 batch.scan(True, _XC_JPROGRAM, self.ir_length, False)
                 self._flush(batch)
@@ -1350,11 +1498,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     "the FPGA did not finish clearing after JPROGRAM (INIT_COMPLETE "
                     "stayed low)",
                 )
-                batch = _Batch(self.sample_falling)
+                batch = self._batch()
                 batch.scan(True, _XC_CFG_IN, self.ir_length, False)
                 self._flush(batch)
                 self._shift_dr_bytes(data.translate(_BIT_REVERSE))
-                batch = _Batch(self.sample_falling)
+                batch = self._batch()
                 batch.scan(True, _XC_JSTART, self.ir_length, False)
                 self._flush(batch)
                 self._idle(self.STARTUP_IDLE_CYCLES)
@@ -1373,7 +1521,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             self._reset_tap()
 
     def _reset_tap(self) -> None:
-        batch = _Batch(self.sample_falling)
+        batch = self._batch()
         batch.reset()  # back to IDCODE / BYPASS
         self._flush(batch)
 
@@ -1382,7 +1530,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         second of TCK, each waited for (see :meth:`_write_paced`)."""
         piece = max(7, int(self.actual_tck_hz * 0.25))
         for done in range(0, cycles, piece):
-            batch = _Batch(self.sample_falling)
+            batch = self._batch()
             batch.idle(min(piece, cycles - done))
             self._write_paced(bytes(batch.cmd))
 
@@ -1395,7 +1543,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     def _config_status(self) -> int:
         """The IR capture: configuration status bits over the fixed ``01``."""
-        batch = _Batch(self.sample_falling)
+        batch = self._batch()
         batch.scan(True, _XC_BYPASS, self.ir_length, True)
         (status,) = self._flush(batch)
         if status & 0b11 != 0b01:
@@ -1418,24 +1566,28 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
         Written in pieces of about a quarter second of TCK, each waited
         for, so no write or read outlasts the D2XX timeout at a slow clock.
+        The device streams the data in as it arrives, so devices on the
+        TDO side need nothing; each BYPASS bit on the TDI side delays it by
+        a clock, made up with zero bits after it.
         """
         if not data:
             raise ValueError("no data to shift")
+        after = max(0, len(self.chain) - 1 - self.chain_tap)
         piece = max(1, min(0x10000, int(self.actual_tck_hz * 0.25) // 8))
-        batch = _Batch(self.sample_falling)
+        batch = self._batch()
         batch.tms(_IDLE_TO_SHIFT_DR)
         self._write(bytes(batch.cmd))
-        body, last = data[:-1], data[-1]
+        body, last = (data, 0) if after else (data[:-1], data[-1])
         for pos in range(0, len(body), piece):
             chunk = body[pos:pos + piece]
             n = len(chunk) - 1
             self._write_paced(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk)
-        # The last byte's top bit leaves Shift-DR with TMS.
+        # The last bit (the last byte's top bit, or the last padding bit)
+        # leaves Shift-DR with TMS.
         tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | ((last >> 7) << 7)
-        self._write(bytes((
-            _DATA_BITS_OUT, 6, last & 0x7F,
-            _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value,
-        )))
+        bits = after - 1 if after else 7
+        tail = bytes((_DATA_BITS_OUT, bits - 1, last & 0x7F)) if bits else b""
+        self._write(tail + bytes((_TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)))
 
     # -- Transport API -----------------------------------------------------------
 

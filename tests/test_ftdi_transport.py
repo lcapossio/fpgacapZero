@@ -68,7 +68,7 @@ class _Device:
         self.writes: list[tuple[int, int]] = []
 
     def _dr_len(self):
-        if self.ir == self.idcode_ir:
+        if self.ir == self.idcode_ir and self.idcode is not None:
             return 32
         if self.ir == self.user1:
             return 49
@@ -79,7 +79,7 @@ class _Device:
         tdo = self.sr & 1 if shifting else 0
         if self.state == "CAPTURE_DR":
             self.sr_len = self._dr_len()
-            if self.ir == self.idcode_ir:
+            if self.ir == self.idcode_ir and self.idcode is not None:
                 self.sr = self.idcode
             elif self.ir == self.user1:
                 self.sr = self.read_data
@@ -107,6 +107,39 @@ class _Device:
         return tdo
 
 
+class _Chain:
+    """TAPs in series, listed from the TDO end: TDI enters the last one."""
+
+    def __init__(self, *devices: _Device) -> None:
+        self.devices = list(devices)
+
+    @property
+    def state(self) -> str:
+        return self.devices[0].state
+
+    @property
+    def sr(self) -> int:
+        return self.devices[0].sr
+
+    def clock(self, tms: int, tdi: int) -> int:
+        for dev in reversed(self.devices):
+            tdi = dev.clock(tms, tdi)  # each passes on its bit from before
+        return tdi
+
+
+def _dap(idcode: int | None = None) -> _Device:
+    """An ARM DAP: 4-bit IR; with no *idcode* it comes up in BYPASS, as a
+    Zynq UltraScale+ one does."""
+    return _Device(idcode=idcode, ir_len=4, user1=0x0A, idcode_ir=0x0E)
+
+
+ZYNQUS_IDCODE = 0x04724093  # xck26
+
+
+def _zynqus() -> _Device:
+    return _Device(ZYNQUS_IDCODE, ir_len=12, user1=0x902, idcode_ir=0x249)
+
+
 class _Xilinx7Device(_Device):
     """A 7-series TAP with its JTAG configuration logic (UG470): JPROGRAM
     clears the FPGA for *clear_clocks* TCKs, CFG_IN collects the bitstream,
@@ -125,8 +158,12 @@ class _Xilinx7Device(_Device):
         self.startup_clocks = 0
         self.programs = 0
 
+    #: Bits CFG_IN sees before the bitstream: one per BYPASS device on its
+    #: TDI side, still holding their captured zero.
+    lead = 0
+
     def loaded(self) -> bytes:
-        bits = self.cfg_bits
+        bits = self.cfg_bits[self.lead:]
         return bytes(
             sum(bits[i + k] << (7 - k) for k in range(8)) for i in range(0, len(bits) - 7, 8)
         )
@@ -1260,6 +1297,177 @@ class FamilyTests(unittest.TestCase):
             FtdiMpsseTransport._parse_idcodes(0, 64)
         with self.assertRaisesRegex(RuntimeError, "all ones"):
             FtdiMpsseTransport._parse_idcodes((1 << 64) - 1, 64)
+
+
+class ChainTests(_FtdiTestCase):
+    """A JTAG chain of several devices: one is scanned, the others are kept
+    in BYPASS."""
+
+    def _check_core(self, t: FtdiMpsseTransport, dev: _Device) -> None:
+        t.write_reg(0x0010, 0x1234ABCD)
+        self.assertEqual(dev.writes, [(0x0010, 0x1234ABCD)])
+        self.assertEqual(t.read_reg(0x0010), 0x1234ABCD)
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+        self.assertEqual(
+            t.read_window_block(0x0000, 3), [0x46430004, 0x0004 ^ 0xA5A5, 0x0008 ^ 0xA5A5]
+        )
+
+    def _assert_bypassed(self, *devices: _Device) -> None:
+        for dev in devices:
+            self.assertEqual(dev.ir, (1 << dev.ir_len) - 1)
+            self.assertEqual(dev.writes, [])
+
+    def test_zynqus_behind_a_dap_in_bypass(self):
+        # The KV260's chain: the DAP nearest TDO, reading BYPASS after reset.
+        dap, pl = _dap(), _zynqus()
+        self.lib.dev = _Chain(dap, pl)
+        t = self._transport()
+        self.assertEqual(t.chain, [(None, 4), (ZYNQUS_IDCODE, 12)])
+        self.assertEqual((t.chain_tap, t.idcode, t.ir_length), (1, ZYNQUS_IDCODE, 12))
+        self.assertEqual(t.family, "zynqus")
+        self.assertEqual(t.ir_table, {1: 0x902, 2: 0x903, 3: 0x922, 4: 0x923})
+        self.assertIn("device 1 of 2", t.opened_device)
+        self._check_core(t, pl)
+        self._assert_bypassed(dap)
+
+    def test_device_nearest_tdi_side_dap_known_by_idcode(self):
+        dap, pl = _dap(0x5BA00477), _zynqus()
+        self.lib.dev = _Chain(pl, dap)
+        t = self._transport()
+        self.assertEqual(t.chain, [(ZYNQUS_IDCODE, 12), (0x5BA00477, 4)])
+        self.assertEqual(t.chain_tap, 0)
+        self._check_core(t, pl)
+        self._assert_bypassed(dap)
+
+    def test_middle_device_and_one_ir_length_from_the_total(self):
+        a, mid, b = _dap(0x4BA00477), _Device(), _dap(0x5BA00477)  # PolarFire
+        self.lib.dev = _Chain(a, mid, b)
+        t = self._transport()
+        self.assertEqual([n for _c, n in t.chain], [4, 8, 4])  # 8 = 16 - 4 - 4
+        self.assertEqual((t.chain_tap, t.family), (1, "polarfire"))
+        self._check_core(t, mid)
+        self._assert_bypassed(a, b)
+
+    def test_two_known_devices_need_tap(self):
+        first = _Device(XILINX_IDCODE, ir_len=6, user1=0x02, idcode_ir=0x09)
+        second = _Device(0x03631093, ir_len=6, user1=0x02, idcode_ir=0x09)
+        self.lib.dev = _Chain(first, second)
+        with self.assertRaisesRegex(
+            RuntimeError, r"2 devices on the JTAG chain \(0: 0x13631093, 1: 0x03631093\)"
+            r".*pass tap="
+        ):
+            FtdiMpsseTransport().connect()
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+        t = self._transport(tap=1)
+        self._check_core(t, second)
+        self._assert_bypassed(first)
+
+    def test_unknown_ir_lengths_need_ir_lengths(self):
+        other, target = _Device(idcode=0x12345001, ir_len=5), _Device()
+        self.lib.dev = _Chain(other, target)
+        with self.assertRaisesRegex(RuntimeError, r"13 IR bits in all\); pass ir_lengths="):
+            FtdiMpsseTransport().connect()
+        with self.assertRaisesRegex(RuntimeError, r"ir_lengths=\[6, 8\] does not match"):
+            FtdiMpsseTransport(ir_lengths=[6, 8]).connect()
+        with self.assertRaisesRegex(RuntimeError, r"ir_lengths=\[13\] does not match"):
+            FtdiMpsseTransport(ir_lengths=[13]).connect()
+        t = self._transport(ir_lengths=[5, 8])
+        self.assertEqual(t.chain_tap, 1)
+        self._check_core(t, target)
+        self._assert_bypassed(other)
+
+    def test_tap_past_the_chain(self):
+        self.lib.dev = _Chain(_dap(), _zynqus())
+        with self.assertRaisesRegex(RuntimeError, r"tap=2 but the JTAG chain has 2"):
+            FtdiMpsseTransport(tap=2).connect()
+        with self.assertRaises(ValueError):
+            FtdiMpsseTransport(tap=-1)
+        with self.assertRaises(ValueError):
+            FtdiMpsseTransport(ir_lengths=[4, 1])
+
+    def test_single_device_ignores_nothing_it_is_given(self):
+        t = self._transport(tap=0, ir_lengths=[8])
+        self.assertEqual(t.chain, [(POLARFIRE_IDCODE, 8)])
+        self.assertNotIn("device", t.opened_device)
+        with self.assertRaisesRegex(RuntimeError, r"tap=1 but the JTAG chain has 1"):
+            FtdiMpsseTransport(device="Embedded FlashPro5 B", tap=1).connect()
+
+    def test_joining_with_another_tap_is_refused(self):
+        self.lib.dev = _Chain(_dap(0x5BA00477), _zynqus())
+        a = self._transport()
+        with self.assertRaisesRegex(RuntimeError, r"open for JTAG device 1, not tap=0"):
+            FtdiMpsseTransport(tap=0).connect()
+        with self.assertRaisesRegex(RuntimeError, r"IR lengths \[4, 12\], not"):
+            FtdiMpsseTransport(ir_lengths=[12, 4]).connect()
+        b = self._transport(tap=1)
+        self.assertEqual(b.read_reg(0x0000), 0x46430004)
+        self.assertEqual(a._channel, b._channel)
+
+    def _program(self, tdo_side: int, tdi_side: int) -> _Xilinx7Device:
+        data = _bitstream()
+        fpga = _Xilinx7Device(accepts=data)
+        fpga.lead = tdi_side
+        before = [_dap(0x4BA00477) for _ in range(tdo_side)]
+        after = [_dap(0x5BA00477) for _ in range(tdi_side)]
+        self.lib.dev = _Chain(*before, fpga, *after)
+        t = self._transport()
+        self.assertEqual((t.chain_tap, t.family), (tdo_side, "xilinx7"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "design.bin"
+            path.write_bytes(data)
+            t.program(str(path))
+        self.assertEqual(fpga.programs, 1)
+        self.assertEqual(fpga.loaded(), data)
+        # The whole bitstream reached the FPGA, and nothing after it.
+        self.assertEqual(len(fpga.cfg_bits), tdi_side + 8 * len(data))
+        self.assertTrue(fpga.done)
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+        self._assert_bypassed(*before, *after)
+        t.close()  # the next chain opens the channel afresh
+        return fpga
+
+    def test_program_with_a_device_on_the_tdo_side(self):
+        self._program(tdo_side=1, tdi_side=0)
+
+    def test_program_with_devices_on_the_tdi_side(self):
+        self._program(tdo_side=0, tdi_side=1)
+        self._program(tdo_side=1, tdi_side=2)
+
+
+class PaddedBatchTests(unittest.TestCase):
+    def test_target_bits_only(self):
+        # TDO side: a 4-bit IR; TDI side: a 6-bit and a 5-bit IR.
+        tdo, target, tdi1, tdi2 = _dap(), _Device(), _Device(ir_len=6), _Device(ir_len=5)
+        chain = _Chain(tdo, target, tdi1, tdi2)
+        lib = _FakeD2xx(chain)
+        for dev in chain.devices:
+            dev.state = "IDLE"
+        batch = _Batch(pad=(4, 1, 11, 2))
+        batch.scan(True, 0x20, 8, True)  # USER1
+        batch.scan(False, 0x1_2345_6789_ABCD, 49, False)  # write 0x2345
+        batch.scan(False, 0x2345 << 32, 49, False)  # read it
+        batch.idle(5)
+        batch.scan(False, 0, 49, True)
+        lib._run(bytes(batch.cmd))
+        ir_capture, read = batch.decode(bytes(lib.rx))
+        self.assertEqual(ir_capture, 0b01)
+        self.assertEqual(target.writes, [(0x2345, 0x6789ABCD)])
+        self.assertEqual(read, 0x6789ABCD)
+        self.assertEqual([d.ir for d in chain.devices], [0xF, 0x20, 0x3F, 0x1F])
+
+
+class KnownIrLengthTests(unittest.TestCase):
+    def test_lengths(self):
+        self.assertEqual(ft.known_ir_length(0x5BA00477), 4)
+        self.assertEqual(ft.known_ir_length(0x4BA00477), 4)
+        self.assertEqual(ft.known_ir_length(XILINX_IDCODE), 6)
+        self.assertEqual(ft.known_ir_length(0x03722093), 6)  # xc7z010 PL
+        self.assertEqual(ft.known_ir_length(ZYNQUS_IDCODE), 12)
+        self.assertIsNone(ft.known_ir_length(POLARFIRE_IDCODE))
+        self.assertIsNone(ft.known_ir_length(None))
+        self.assertEqual(family_from_idcode(ZYNQUS_IDCODE, 12), "zynqus")
+        # A 12-bit Xilinx IR outside Zynq UltraScale+ (a multi-die part).
+        self.assertIsNone(family_from_idcode(0x0390D093, 12))
 
 
 if __name__ == "__main__":
