@@ -1247,19 +1247,23 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         try:
             return fn(*args)
         except BaseException as exc:
-            ch = self._channel
-            if ch is not None and ch.broken is None:
-                # Under the channel lock (every I/O path holds it).  The
-                # handle closes before the channel is marked: the registry
-                # drops a broken channel without its lock, and a peer must
-                # not reopen the adapter while this close is still running.
-                try:
-                    ch.io.close()
-                except Exception:
-                    pass
-                finally:
-                    ch.broken = str(exc) or type(exc).__name__
+            self._break_channel(exc)
             raise
+
+    def _break_channel(self, exc: BaseException) -> None:
+        """Close the channel's handle and mark it broken by *exc*, once."""
+        ch = self._channel
+        if ch is not None and ch.broken is None:
+            # Under the channel lock (every I/O path holds it).  The
+            # handle closes before the channel is marked: the registry
+            # drops a broken channel without its lock, and a peer must
+            # not reopen the adapter while this close is still running.
+            try:
+                ch.io.close()
+            except Exception:
+                pass
+            finally:
+                ch.broken = str(exc) or type(exc).__name__
 
     def _write(self, data: bytes) -> None:
         io = self._io()
@@ -1294,25 +1298,34 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             rx = self._transfer(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)), batch.read_bytes)
             return batch.decode(rx)
         rx = bytearray()
-        started = False
-        for cmd, reply in batch.pieces(limit):
-            if started and self._call_cancelled:
-                # Mid-scan: leave the TAP in Test-Logic-Reset / Idle, not
-                # in a shift state a peer would inherit.
-                reset = _Batch()
-                reset.reset()
-                self._io_call(self._io().transfer,
-                              bytes(reset.cmd) + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
-                raise RuntimeError("FTDI transport cancelled; reconnect")
-            # The pin read answers only once the piece has been clocked.
-            # Past the first piece the check above is the only cancel gate:
-            # _transfer's own would refuse mid-scan without the reset.
-            cmd += bytes((_READ_PINS, _SEND_IMMEDIATE))
+        started = False  # the TAP may be mid-scan from here on
+        try:
+            for cmd, reply in batch.pieces(limit):
+                if started and self._call_cancelled:
+                    # Leave the TAP in Run-Test/Idle, not in a shift state
+                    # a peer would inherit.
+                    reset = _Batch()
+                    reset.reset()
+                    self._io_call(self._io().transfer,
+                                  bytes(reset.cmd) + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
+                    started = False
+                    raise RuntimeError("FTDI transport cancelled; reconnect")
+                # The pin read answers only once the piece has been clocked.
+                # Past the first piece the check above is the only cancel
+                # gate: _transfer's own would refuse mid-scan without the
+                # reset.
+                cmd += bytes((_READ_PINS, _SEND_IMMEDIATE))
+                if started:
+                    rx += self._io_call(self._io().transfer, cmd, reply + 1)[:-1]
+                else:
+                    rx += self._transfer(cmd, reply + 1)[:-1]
+                started = True
+        except BaseException as exc:
+            # Anything else between pieces (Ctrl-C) leaves the TAP where the
+            # last piece did: no peer may scan through it.
             if started:
-                rx += self._io_call(self._io().transfer, cmd, reply + 1)[:-1]
-            else:
-                rx += self._transfer(cmd, reply + 1)[:-1]
-            started = True
+                self._break_channel(exc)
+            raise
         return batch.decode(bytes(rx))
 
     def _piece_clocks(self) -> int:

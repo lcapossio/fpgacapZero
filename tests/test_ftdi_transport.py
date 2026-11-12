@@ -680,6 +680,27 @@ class LongScanTests(_FtdiTestCase):
         self.assertIsNone(a._channel.broken)
         self.assertEqual(b.raw_dr_scan(0xB4, 9), 0xB4 << 1 & 0x1FF)
 
+    def test_interrupt_between_pieces_breaks_the_channel(self):
+        # Ctrl-C outside any USB call, with the TAP left mid-scan: no peer
+        # may go on scanning through it.
+        a = self._transport(ir_table={1: 0xFF})
+        b = self._transport(ir_table={1: 0xFF})
+        io = a._io
+        calls = []
+
+        def interrupt_on_the_second(*args):
+            calls.append(1)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return io(*args)
+
+        a._io = interrupt_on_the_second
+        with self.assertRaises(KeyboardInterrupt):
+            a.raw_dr_scan(0, 20_001)
+        self.assertIsNotNone(a._channel.broken)
+        with self.assertRaisesRegex(RuntimeError, "channel broken"):
+            b.raw_dr_scan(0xB4, 9)
+
     def test_piece_size_follows_tck_and_the_channel_timeout(self):
         t = self._transport(tck_hz=1_000_000)
         piece = LongScanTests._real_piece_clocks
