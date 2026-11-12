@@ -381,12 +381,18 @@ class LibusbIo:
                 if release:
                     self._release_port()
 
+        if self._reader_busy:
+            raise RuntimeError("FTDI read still in flight from an earlier transfer")
         thread = threading.Thread(target=reader, name="fcapz-ftdi-read", daemon=True)
         # Recorded before anything can be interrupted, so close() sees a
         # reader even after a KeyboardInterrupt in the join below.
         self._reader_busy = True
         self._reader = thread
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError:  # no thread started: nothing holds the port
+            self._reader_busy, self._reader = False, None
+            raise
         try:
             self.write(cmd, deadline)
         finally:

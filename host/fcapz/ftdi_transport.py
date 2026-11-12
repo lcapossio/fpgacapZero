@@ -1192,11 +1192,13 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     def _io_call(self, fn, *args):
         """Run one I/O call; a failure breaks the channel (see
-        :class:`_OpenChannel`).  During connect there is no channel yet: the
-        caller releases the half-open handle."""
+        :class:`_OpenChannel`).  So does an interrupt (Ctrl-C): the reply
+        stream is out of step and a read may still be in flight.  During
+        connect there is no channel yet: the caller releases the half-open
+        handle."""
         try:
             return fn(*args)
-        except Exception as exc:
+        except BaseException as exc:
             ch = self._channel
             if ch is not None and ch.broken is None:
                 # Under the channel lock (every I/O path holds it).  The

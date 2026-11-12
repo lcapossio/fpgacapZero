@@ -112,6 +112,8 @@ class _FakeChipPort:
 
     def read(self, size, timeout_ms):
         if self.fail_reads:
+            if isinstance(self.fail_reads, BaseException):
+                raise self.fail_reads
             raise OSError("USB error (fake)")
         payload = self.packet_size - 2
         with self.cond:
@@ -368,6 +370,26 @@ class TransferTests(unittest.TestCase):
         io.close()  # a second close does nothing
         self._assert_reader_releases(io, events, release)
 
+    def test_thread_that_cannot_start_leaves_no_reader(self):
+        io = self._io()
+
+        class NoThread(threading.Thread):
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        with mock.patch.object(fl.threading, "Thread", NoThread):
+            with self.assertRaisesRegex(RuntimeError, "can't start"):
+                io.transfer(bytes((0x81,)) * 8192 + bytes((0x87,)), 8192)
+        self.assertEqual((io._reader_busy, io._reader), (False, None))
+        io.close()
+        self.assertEqual(io.port.closed, 1)
+
+    def test_no_transfer_while_an_earlier_read_is_in_flight(self):
+        io = self._io()
+        io._reader_busy = True
+        with self.assertRaisesRegex(RuntimeError, "still in flight"):
+            io.transfer(bytes((0x81,)) * 8192 + bytes((0x87,)), 8192)
+
     def test_reader_that_just_ended_is_not_left_to_release_the_port(self):
         # The reader has run its cleanup, but its thread is not yet reported
         # dead: close() must release the port itself.
@@ -497,6 +519,18 @@ class LibusbTransportTests(unittest.TestCase):
         b.connect()
         self.assertEqual(len(self.ports), 2)
         self.assertEqual(b.read_reg(0x0000), 0x46430004)
+
+    def test_interrupt_breaks_the_channel(self):
+        # Ctrl-C mid-transfer leaves the reply stream out of step: a peer
+        # must not go on using the channel.
+        a = self._transport(device="usb:")
+        b = self._transport(device="usb:")
+        self.ports[0].fail_reads = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            a.read_reg(0x0000)
+        self.assertEqual(self.ports[0].closed, 1)
+        with self.assertRaisesRegex(RuntimeError, "channel broken"):
+            b.read_reg(0x0000)
 
 
 class SameChannelTests(unittest.TestCase):
