@@ -107,6 +107,10 @@ def list_usb_devices() -> list[FtdiDevice]:
             continue
         for dev in devices:
             try:
+                if not (dev.iProduct or dev.iSerialNumber):
+                    # No string to read: open it some other way, so a chip
+                    # its driver keeps from libusb is left out all the same.
+                    dev.ctrl_transfer(0x80, 6, 0x0100, 0, 18, 500)  # device descriptor
                 product = usb.util.get_string(dev, dev.iProduct) if dev.iProduct else ""
                 serial = usb.util.get_string(dev, dev.iSerialNumber) if dev.iSerialNumber else ""
                 numbers = sorted({intf.bInterfaceNumber for cfg in dev for intf in cfg})
@@ -288,6 +292,9 @@ class LibusbIo:
         #: Port release left to that reader (see :meth:`close`).
         self._release_lock = threading.Lock()
         self._release_pending = False
+        #: A reader is inside :meth:`read` (cleared under ``_release_lock``
+        #: as it ends: ``Thread.is_alive`` lags behind that).
+        self._reader_busy = False
 
     def setup(self, timeout_ms: int) -> None:
         """Reset the channel and put it in MPSSE mode (as D2XX does)."""
@@ -369,11 +376,13 @@ class LibusbIo:
                 result.append(exc)
             finally:
                 with self._release_lock:
+                    self._reader_busy = False
                     release, self._release_pending = self._release_pending, False
                 if release:
                     self._release_port()
 
         thread = threading.Thread(target=reader, name="fcapz-ftdi-read", daemon=True)
+        self._reader_busy = True
         thread.start()
         try:
             self.write(cmd, deadline)
@@ -399,7 +408,7 @@ class LibusbIo:
             # A USB read still in flight must end before the device goes.
             reader.join(self.timeout_ms / 1000 + 1.0)
             with self._release_lock:
-                if reader.is_alive():
+                if self._reader_busy:
                     # Still in the backend (libusb-win32 can wait without
                     # bound to cancel a timed-out read): the reader releases
                     # the port when it returns.  Until then the interface

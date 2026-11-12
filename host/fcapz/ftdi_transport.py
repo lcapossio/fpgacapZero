@@ -264,11 +264,11 @@ def _list_devices(device: str | None) -> list[FtdiDevice]:
         return list_usb_devices()
     try:
         return list_ftdi_devices()
-    except RuntimeError:
+    except RuntimeError as exc:
         try:
             import usb.core  # noqa: F401
         except ImportError:
-            raise
+            raise exc from None  # the D2XX error says what to install
         from .ftdi_libusb import list_usb_devices
 
         return list_usb_devices()

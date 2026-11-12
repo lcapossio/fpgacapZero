@@ -7,8 +7,10 @@ asks, as with a real one."""
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -305,6 +307,22 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(events, ["read done", "close"])
         self.assertEqual(io.port.closed, 1)
 
+    def test_reader_that_just_ended_is_not_left_to_release_the_port(self):
+        # The reader has run its cleanup, but its thread is not yet reported
+        # dead: close() must release the port itself.
+        io = self._io()
+
+        class EndingThread:
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return True
+
+        io._reader, io._reader_busy = EndingThread(), False
+        io.close()
+        self.assertEqual(io.port.closed, 1)
+
     def test_close_leaves_mpsse_once(self):
         io = self._io()
         io.close()
@@ -445,10 +463,16 @@ class _UsbDev:
 
     def __init__(self, serial, bus, address, interfaces=(0, 1), product="Dual RS232-HS"):
         self.idVendor, self.idProduct, self.bcdDevice = 0x0403, 0x6010, 0x0700
-        self.iProduct, self.iSerialNumber = 1, 2 if serial else 0
+        self.iProduct, self.iSerialNumber = 1 if product else 0, 2 if serial else 0
         self.strings = {1: product, 2: serial}
         self.bus, self.address = bus, address
         self.configs = [[mock.Mock(bInterfaceNumber=n) for n in interfaces]]
+        self.openable = True
+
+    def ctrl_transfer(self, *args):
+        if not self.openable:
+            raise OSError("held by another driver (fake)")
+        return b"" + bytes(17)
 
     def __iter__(self):
         return iter(self.configs)
@@ -482,6 +506,14 @@ class EnumerationTests(unittest.TestCase):
             ("Dual RS232-HS A", "libusb1:1:3"), ("Dual RS232-HS B", "libusb1:1:3"),
         ])
 
+    def test_stringless_chip_its_driver_holds_is_left_out(self):
+        held = _UsbDev("", 1, 3, product="")
+        held.openable = False
+        free = _UsbDev("", 1, 4, product="")
+        found = self._list({"libusb1": [held, free]})
+        self.assertEqual([(d.description, d.location) for d in found],
+                         [("FTDI A", "libusb1:1:4"), ("FTDI B", "libusb1:1:4")])
+
     def test_serial_less_chips_are_kept_per_backend(self):
         found = self._list({
             "libusb1": [_UsbDev("", 1, 3)],
@@ -509,11 +541,18 @@ class DiscoveryTests(unittest.TestCase):
         def no_pyusb():
             raise RuntimeError("usb: devices need pyusb")
 
+        pyusb = {"usb": types.ModuleType("usb"), "usb.core": types.ModuleType("usb.core")}
+        no_pyusb_module = {"usb": None, "usb.core": None}  # import fails
         with mock.patch.object(ft, "_load_d2xx", no_d2xx):
             with mock.patch.object(fl, "list_usb_devices", lambda: [_USB_FP5]):
                 self.assertEqual(ft.list_ftdi_targets(), ["usb:Embedded FlashPro5 A"])
                 # Without D2XX a plain selector picks from libusb's channels.
-                self.assertEqual(ft._list_devices("Embedded FlashPro5 A"), [_USB_FP5])
+                with mock.patch.dict(sys.modules, pyusb):
+                    self.assertEqual(ft._list_devices("Embedded FlashPro5 A"), [_USB_FP5])
+                # Without pyusb either, the D2XX error says what to install.
+                with mock.patch.dict(sys.modules, no_pyusb_module):
+                    with self.assertRaisesRegex(RuntimeError, "D2XX library missing"):
+                        ft._list_devices("Embedded FlashPro5 A")
             with mock.patch.object(fl, "list_usb_devices", no_pyusb):
                 with self.assertRaisesRegex(RuntimeError, "D2XX library missing"):
                     ft.list_ftdi_targets()
