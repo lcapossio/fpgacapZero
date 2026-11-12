@@ -382,7 +382,10 @@ class LibusbIo:
                     self._release_port()
 
         thread = threading.Thread(target=reader, name="fcapz-ftdi-read", daemon=True)
+        # Recorded before anything can be interrupted, so close() sees a
+        # reader even after a KeyboardInterrupt in the join below.
         self._reader_busy = True
+        self._reader = thread
         thread.start()
         try:
             self.write(cmd, deadline)
@@ -390,8 +393,8 @@ class LibusbIo:
             # The reader ends by the same deadline; never leave it running
             # on the port.
             thread.join(max(0.0, deadline - time.monotonic()) + 1.0)
-            if thread.is_alive():
-                self._reader = thread  # close() waits for it
+            if not thread.is_alive():
+                self._reader = None
         if thread.is_alive() or not result:
             raise RuntimeError("FTDI read did not finish")
         if isinstance(result[0], BaseException):
@@ -404,18 +407,17 @@ class LibusbIo:
             return
         self.closed = True
         reader, self._reader = self._reader, None
-        if reader is not None:
-            # A USB read still in flight must end before the device goes.
+        with self._release_lock:
+            # A USB read still in flight must end before the device goes:
+            # the reader releases the port when it returns, so an interrupt
+            # while waiting below still releases it.  libusb-win32 can wait
+            # without bound to cancel a timed-out read; until it returns the
+            # interface stays claimed, so nothing else can open it.
+            busy = self._release_pending = self._reader_busy
+        if not busy:
+            self._release_port()
+        elif reader is not None:
             reader.join(self.timeout_ms / 1000 + 1.0)
-            with self._release_lock:
-                if self._reader_busy:
-                    # Still in the backend (libusb-win32 can wait without
-                    # bound to cancel a timed-out read): the reader releases
-                    # the port when it returns.  Until then the interface
-                    # stays claimed, so nothing else can open it.
-                    self._release_pending = True
-                    return
-        self._release_port()
 
     def _release_port(self) -> None:
         try:

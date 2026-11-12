@@ -307,6 +307,67 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(events, ["read done", "close"])
         self.assertEqual(io.port.closed, 1)
 
+    def _interrupted_join_on(self, call):
+        """A Thread whose *call*-th join (1-based) raises KeyboardInterrupt."""
+        calls = []
+
+        class InterruptedJoin(threading.Thread):
+            def join(self, timeout=None):
+                calls.append(timeout)
+                if len(calls) == call:
+                    raise KeyboardInterrupt
+                super().join(timeout)
+
+        return InterruptedJoin
+
+    def _stuck_port(self, events, release, write_fails):
+        class StuckPort(_FakeChipPort):
+            def write(self, data, timeout_ms):
+                if write_fails:
+                    raise RuntimeError("USB write failed (fake)")
+                return super().write(data, timeout_ms)
+
+            def read(self, size, timeout_ms):
+                release.wait(10)  # stuck in the backend
+                events.append("read done")
+                return self.STATUS
+
+            def close(self):
+                events.append("close")
+                super().close()
+
+        return StuckPort(_FakeD2xx())
+
+    def _assert_reader_releases(self, io, events, release):
+        self.assertEqual(events, [])  # the port is not released under it
+        release.set()
+        for _ in range(200):
+            if "close" in events:
+                break
+            time.sleep(0.01)
+        self.assertEqual(events, ["read done", "close"])
+        self.assertEqual(io.port.closed, 1)
+
+    def test_interrupt_while_waiting_for_the_reader_keeps_the_port(self):
+        events, release = [], threading.Event()
+        io = fl.LibusbIo(self._stuck_port(events, release, False), timeout_ms=2000)
+        with mock.patch.object(fl.threading, "Thread", self._interrupted_join_on(1)):
+            with self.assertRaises(KeyboardInterrupt):
+                io.transfer(bytes((0x81,)) * 1024, 1024)
+        io.close()  # the reader is still inside read()
+        self._assert_reader_releases(io, events, release)
+
+    def test_interrupt_in_close_still_releases_the_port(self):
+        events, release = [], threading.Event()
+        io = fl.LibusbIo(self._stuck_port(events, release, True), timeout_ms=50)
+        with mock.patch.object(fl.threading, "Thread", self._interrupted_join_on(2)):
+            with self.assertRaisesRegex(RuntimeError, "write failed"):
+                io.transfer(bytes((0x81,)) * 1024, 1024)
+            with self.assertRaises(KeyboardInterrupt):
+                io.close()
+        io.close()  # a second close does nothing
+        self._assert_reader_releases(io, events, release)
+
     def test_reader_that_just_ended_is_not_left_to_release_the_port(self):
         # The reader has run its cleanup, but its thread is not yet reported
         # dead: close() must release the port itself.
