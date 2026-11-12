@@ -882,6 +882,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             opened = ch is None
             if opened:
                 ch = self._open_channel(dev)
+            else:
+                self._check_joined_chain(ch)
             ch.users += 1
             self._channel = ch
             self._handle, self.adapter = ch.io, ch.adapter
@@ -893,8 +895,6 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             # The FPGA may hold another bitstream than on a past connection.
             self._forget_hub_state()
             try:
-                if not opened:
-                    self._check_joined_chain()
                 self._apply_family_defaults()
                 if opened and self.bitfile:
                     # Before the channel is published: no transport joins
@@ -1319,15 +1319,16 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             )
         return known[0]
 
-    def _check_joined_chain(self) -> None:
-        """A transport joining an open channel scans the device the channel
-        was identified for: refuse another *tap* or *ir_lengths*."""
-        if self.tap is not None and self.tap != self.chain_tap:
+    def _check_joined_chain(self, ch: _OpenChannel) -> None:
+        """A transport joining open channel *ch* scans the device the channel
+        was identified for: refuse another *tap* or *ir_lengths*, before
+        this transport takes anything from the channel."""
+        if self.tap is not None and self.tap != ch.chain_tap:
             raise RuntimeError(
-                f"the FTDI channel is open for JTAG device {self.chain_tap}, "
+                f"the FTDI channel is open for JTAG device {ch.chain_tap}, "
                 f"not tap={self.tap}; close its other transports first"
             )
-        lengths = [n for _code, n in self.chain]
+        lengths = [n for _code, n in ch.chain]
         if self.ir_lengths is not None and self.ir_lengths != lengths:
             raise RuntimeError(
                 f"the FTDI channel is open with IR lengths {lengths}, not "

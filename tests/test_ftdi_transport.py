@@ -1419,8 +1419,12 @@ class ChainTests(_FtdiTestCase):
     def test_joining_with_another_tap_is_refused(self):
         self.lib.dev = _Chain(_dap(0x5BA00477), _zynqus())
         a = self._transport()
+        refused = FtdiMpsseTransport(tap=0)
         with self.assertRaisesRegex(RuntimeError, r"open for JTAG device 1, not tap=0"):
-            FtdiMpsseTransport(tap=0).connect()
+            refused.connect()
+        # Nothing of the channel it was refused is left on it.
+        self.assertEqual((refused.idcode, refused.chain, refused.opened_device), (None, [], None))
+        self.assertEqual(a._channel.users, 1)
         with self.assertRaisesRegex(RuntimeError, r"IR lengths \[4, 12\], not"):
             FtdiMpsseTransport(ir_lengths=[12, 4]).connect()
         b = self._transport(tap=1)
