@@ -55,7 +55,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `usb:<description>` or `usb:<serial>`. A transfer whose reply could fill
   the chip's buffer reads on a second thread while it writes, so wide scans
   do not stall. `list_ftdi_targets()` (and RPC/GUI discovery) lists both
-  backends' channels. Not yet hardware-validated.
+  backends' channels. Validated on an FT2232H bound to WinUSB (channel B, an
+  Efinix Trion T8 chain), through both libusb-1.0 and libusb-0.1: 307,200
+  random bytes shifted through BYPASS come back bit-exact at 1, 6, 15 and
+  30 MHz, 3.3 MB/s at 30 MHz.
 
 ### Changed
 

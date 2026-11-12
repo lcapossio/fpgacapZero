@@ -714,7 +714,9 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   `device` picks from the libusb channels too.  `list_ftdi_targets()` lists
   the selectors of both.  Nothing reads the chip in the background as D2XX
   does, so a transfer whose reply could fill the chip's buffer reads on a
-  second thread while it writes.
+  second thread while it writes.  On an FT2232H bound to WinUSB (through
+  libusb-1.0 and libusb-0.1 alike) 307,200 bytes shifted through BYPASS come
+  back bit-exact at 1 to 30 MHz, 3.3 MB/s at 30 MHz.
 - **Sharing in one process.** Transports on the same channel in one Python
   process share one handle: for example the ELA, EIO and bridge sessions of
   the RPC server or the GUI.  The first transport's clock, layout and sample
