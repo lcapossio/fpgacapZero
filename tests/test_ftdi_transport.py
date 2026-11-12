@@ -659,6 +659,27 @@ class LongScanTests(_FtdiTestCase):
         self.assertEqual(self.lib.dev.state, "IDLE")  # not left in Shift-DR
         self.assertEqual(b.raw_dr_scan(0x5A, 9), 0x5A << 1 & 0x1FF)
 
+    def test_cancel_racing_the_next_piece_still_resets_the_tap(self):
+        # The cancel lands after the loop's check, while the next piece is
+        # on its way out: the piece goes, and the reset follows it.
+        a = self._transport(ir_table={1: 0xFF})
+        b = self._transport(ir_table={1: 0xFF})
+        io = a._io
+        calls = []
+
+        def cancel_on_the_second(*args):
+            calls.append(1)
+            if len(calls) == 2:
+                a.cancel()
+            return io(*args)
+
+        a._io = cancel_on_the_second
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            a.raw_dr_scan(0, 20_001)
+        self.assertEqual(self.lib.dev.state, "IDLE")
+        self.assertIsNone(a._channel.broken)
+        self.assertEqual(b.raw_dr_scan(0xB4, 9), 0xB4 << 1 & 0x1FF)
+
     def test_piece_size_follows_tck_and_the_channel_timeout(self):
         t = self._transport(tck_hz=1_000_000)
         piece = LongScanTests._real_piece_clocks

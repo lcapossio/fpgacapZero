@@ -1305,7 +1305,13 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                               bytes(reset.cmd) + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
                 raise RuntimeError("FTDI transport cancelled; reconnect")
             # The pin read answers only once the piece has been clocked.
-            rx += self._transfer(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)), reply + 1)[:-1]
+            # Past the first piece the check above is the only cancel gate:
+            # _transfer's own would refuse mid-scan without the reset.
+            cmd += bytes((_READ_PINS, _SEND_IMMEDIATE))
+            if started:
+                rx += self._io_call(self._io().transfer, cmd, reply + 1)[:-1]
+            else:
+                rx += self._transfer(cmd, reply + 1)[:-1]
             started = True
         return batch.decode(bytes(rx))
 
