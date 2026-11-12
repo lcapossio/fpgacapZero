@@ -1267,9 +1267,9 @@ class RpcServer:
                 )
                 return self._ok(backend="hw_server", targets=targets)
             if backend == "ftdi":
-                from .ftdi_transport import list_ftdi_devices
+                from .ftdi_transport import list_ftdi_targets
 
-                targets = [d.description for d in list_ftdi_devices() if d.description]
+                targets = list_ftdi_targets()
                 return self._ok(backend="ftdi", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
 

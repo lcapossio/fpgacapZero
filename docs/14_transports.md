@@ -677,14 +677,31 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   the channel A of the one known adapter (FlashPro or Digilent).  If there
   are several, it asks you to name one.  `list_ftdi_devices()` lists the
   channels.  Known adapters get their pin layout (FlashPro5: nTRST on ADBUS4;
-  Digilent: buffer enable on ADBUS7).  For other adapters, pass
+  Digilent: buffer enable on ADBUS7; the Kria KV260 carrier card, `"ML
+  Carrier Card A"`: ADBUS5 driven low).  For other adapters, pass
   `layout=(value, direction)`.
-- **One device on the chain.** `connect()` reads the IDCODE chain and
-  measures the IR length.  Only single-device chains are supported.  The IR
-  table comes from the IDCODE: PolarFire (`0x20` / `0x21`), AMD/Xilinx
-  (IR length 6: 7-series and single-die UltraScale, which share the USER
-  codes) or Gowin.  For anything else, multi-die UltraScale(+) included,
-  pass `ir_table=` with the part's codes from its BSDL.
+- **Device and IR table.** `connect()` reads the IDCODE chain and
+  measures the IR length.  The IR table comes from the IDCODE: PolarFire
+  (`0x20` / `0x21`), AMD/Xilinx with IR length 6 (7-series, Zynq-7000 PL
+  and single-die UltraScale, which share the USER codes), Zynq
+  UltraScale+ MPSoC (IR length 12: `0x902` / `0x903` / `0x922` / `0x923`)
+  or Gowin.  For anything else, multi-die UltraScale(+) included, pass
+  `ir_table=` with the part's codes from its BSDL.
+- **Several devices on the chain.** The transport scans one device and
+  keeps the others in BYPASS: their IRs get all ones and each adds one
+  bit to every DR scan, which the transport pads and strips.  Devices are
+  numbered from the TDO end, in the order their IDCODEs are read; a device
+  in BYPASS after reset (a Zynq UltraScale+ ARM DAP) shows up without an
+  IDCODE.  `tap=` picks one; by default it is the one device whose family
+  is known, and a chain with none or several asks for `tap=`.  Each
+  device's IR length comes from its IDCODE where known (AMD/Xilinx
+  7-series and Zynq UltraScale+, ARM DAP: 4), and a single device left
+  over gets the rest of the measured total; otherwise pass
+  `ir_lengths=[...]` in the same order.  `chain` and `chain_tap` report
+  what `connect()` found.  `program()` works through such a chain too.
+  Transports sharing a channel all scan the device it was opened for.
+  Validated on a Kria KV260 (ARM DAP in BYPASS on the TDO side, then the
+  `xck26`): its hardware suite passes over FTDI at 15 and 30 MHz.
 - **Burst.** `burst` defaults to the family's wrapper default: on for
   PolarFire and AMD/Xilinx (single chain), off for Gowin.  `burst=False`
   (CLI `--no-burst`) reads through the pipelined register window instead.
@@ -703,11 +720,34 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   disconnect before programming with them.  On Linux, install FTDI's D2XX library and
   detach `ftdi_sio` from the adapter.  `$FCAPZ_D2XX_LIBRARY` names the
   library explicitly.
+- **libusb.** An adapter bound to WinUSB or libusbK on Windows (as OpenOCD
+  or Zadig sets it up), or any adapter on Linux and macOS without FTDI's
+  library, works through libusb: `pip install fpgacapzero[usb]` (pyusb and
+  a bundled libusb), then name the channel with a `usb:` selector.  `usb:`
+  alone picks the one known adapter, `usb:Digilent USB Device A` names it
+  by description and `usb:<serial>` by serial.  libusb channels are named as
+  D2XX names them (product string, channel letter on a multi-channel chip),
+  so the known pin layouts apply.  Without the D2XX library a plain
+  `device` picks from the libusb channels too.  `list_ftdi_targets()` lists
+  the selectors of both.  Nothing reads the chip in the background as D2XX
+  does, so a transfer whose reply could fill the chip's buffer reads on a
+  second thread while it writes.  On an FT2232H bound to WinUSB (through
+  libusb-1.0 and libusb-0.1 alike) 307,200 bytes shifted through BYPASS come
+  back bit-exact at 1 to 30 MHz, 3.3 MB/s at 30 MHz.  A full `connect()`
+  session (identification, register access, captures) over libusb has not
+  been run on hardware yet; it shares every scan path with D2XX, which has.
 - **Sharing in one process.** Transports on the same channel in one Python
   process share one handle: for example the ELA, EIO and bridge sessions of
   the RPC server or the GUI.  The first transport's clock, layout and sample
   edge apply,
-  and the channel closes with the last transport.
+  and the channel closes with the last transport.  A channel is matched by
+  USB VID/PID, serial and channel letter, so a D2XX name and a `usb:` name
+  for the same channel share it.  If a USB transfer fails partway, the
+  channel closes for every transport on it (the adapter may be left
+  mid-command); each refuses I/O until it connects again, which opens the
+  channel afresh.  A channel opened with `open_pins()` (`fcapz
+  openocd-bridge`) is never shared: other transports in the process are
+  refused it.
 - **Programming.** `program(bitfile)`, or `bitfile=` (CLI `--program`, RPC
   and MCP `program`, the desktop GUI's *Program on connect*), configures an
   AMD/Xilinx 7-series FPGA over JTAG with a Vivado `.bit` or a raw `.bin`,

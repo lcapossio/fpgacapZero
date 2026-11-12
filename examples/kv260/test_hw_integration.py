@@ -10,15 +10,24 @@ The bitstream is programmed once, through the same RPC ``connect`` the web
 UI and MCP server use, so the hw_server PS TAP programming path and the
 MPSoC chain shape (xsdb ``-register userN``) are both on the tested path.
 
+With ``FPGACAP_BACKEND=ftdi`` the suite runs over the carrier card's FTDI
+channel A through D2XX instead, scanning the PL TAP past the ARM DAP that
+shares the chain.  FTDI does not program a Zynq UltraScale+, so load the
+bitstream first (a hw_server run of this suite does) and stop hw_server.
+
 Environment:
 
 FPGACAP_SKIP_HW=1                  skip every hardware test
 FPGACAP_BITFILE=<path>             override the bitstream
 FPGACAP_HW_SERVER_PORT=<port>      hw_server port (default 3121)
+FPGACAP_BACKEND=hw_server|ftdi     default hw_server
+FPGACAP_FTDI_DEVICE=<name>         ftdi only (default "ML Carrier Card A")
+FPGACAP_FTDI_TCK_MHZ=<mhz>         ftdi only (default 15)
 
 Run:
 
     python -m pytest examples/kv260/test_hw_integration.py -v
+    FPGACAP_BACKEND=ftdi python -m pytest examples/kv260/test_hw_integration.py -v
 """
 
 from __future__ import annotations
@@ -37,6 +46,11 @@ BITFILE = os.environ.get(
 )
 PORT = int(os.environ.get("FPGACAP_HW_SERVER_PORT", "3121"))
 FPGA = "xck26"
+_BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
+if _BACKEND not in ("hw_server", "ftdi"):
+    raise RuntimeError(f"FPGACAP_BACKEND must be hw_server or ftdi, got {_BACKEND!r}")
+_FTDI_DEVICE = os.environ.get("FPGACAP_FTDI_DEVICE") or "ML Carrier Card A"
+_FTDI_TCK_MHZ = float(os.environ.get("FPGACAP_FTDI_TCK_MHZ", "15"))
 
 # The PS IP constrains pl_clk0 at this rate; the clock actually runs at
 # whatever the boot firmware programmed, which the tests measure.
@@ -88,6 +102,10 @@ if _STALE_MSG:
 
 
 def _make_transport():
+    if _BACKEND == "ftdi":
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+
+        return FtdiMpsseTransport(device=_FTDI_DEVICE, tck_hz=_FTDI_TCK_MHZ * 1e6)
     from fcapz.transport import (
         XilinxHwServerTransport,
         hw_server_chain_shape_kwargs,
@@ -99,12 +117,15 @@ def _make_transport():
 
 
 def _rpc_req(cmd: str, **extra) -> dict:
+    if _BACKEND == "ftdi":
+        return {"cmd": cmd, "backend": "ftdi", "hardware": _FTDI_DEVICE,
+                "tck_mhz": _FTDI_TCK_MHZ, **extra}
     return {"cmd": cmd, "backend": "hw_server", "host": "127.0.0.1",
             "port": PORT, "tap": FPGA, **extra}
 
 
 def setUpModule():
-    if _SKIP:
+    if _SKIP or _BACKEND == "ftdi":
         return
     # Program once through RPC; every later transport attaches to the loaded
     # design.  connect() itself waits until USER1 answers.
