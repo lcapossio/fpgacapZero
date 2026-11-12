@@ -340,6 +340,7 @@ class _D2xxIo:
 
     def setup(self, timeout_ms: int) -> None:
         """Reset the channel, set its timeouts and put it in MPSSE mode."""
+        self.timeout_ms = timeout_ms
         self._call("FT_ResetDevice")
         self._call("FT_SetUSBParameters", 65536, 65536)
         self._call("FT_SetChars", 0, 0, 0, 0)
@@ -422,13 +423,19 @@ class _Batch:
     *pad* puts the scans through one device of a multi-device chain:
     ``(IR bits, DR bits)`` of the other devices on the TDO side, then on
     the TDI side.  Their IRs get all ones (BYPASS), their 1-bit BYPASS DRs
-    a zero; callers pass and get back the target's bits only."""
+    a zero; callers pass and get back the target's bits only.
+
+    Each MPSSE command is also kept with its TCK clocks and reply bytes,
+    so :meth:`pieces` can cut a long batch into short transfers."""
 
     def __init__(
         self, sample_falling: bool = False, pad: tuple[int, int, int, int] = (0, 0, 0, 0)
     ) -> None:
         self.cmd = bytearray()
         self.read_bytes = 0
+        self.clocks = 0
+        # Per command: (start in cmd, end, TCK clocks, reply bytes).
+        self._commands: list[tuple[int, int, int, int]] = []
         self._pad = pad
         # Per captured scan: (shifted width, whole data bytes, leftover
         # bits, target offset, target width).
@@ -438,12 +445,19 @@ class _Batch:
         self._bits_inout = _DATA_BITS_INOUT | edge
         self._tms_inout = _TMS_INOUT | edge
 
+    def _add(self, command: bytes, clocks: int, reply: int) -> None:
+        start = len(self.cmd)
+        self.cmd += command
+        self._commands.append((start, len(self.cmd), clocks, reply))
+        self.clocks += clocks
+        self.read_bytes += reply
+
     def tms(self, bits, tdi: int = 0) -> None:
         bits = list(bits)
         while bits:
             chunk, bits = bits[:7], bits[7:]
             value = sum(b << i for i, b in enumerate(chunk)) | ((tdi & 1) << 7)
-            self.cmd += bytes((_TMS_OUT, len(chunk) - 1, value))
+            self._add(bytes((_TMS_OUT, len(chunk) - 1, value)), len(chunk), 0)
 
     def idle(self, n: int) -> None:
         self.tms([0] * max(0, int(n)))
@@ -474,21 +488,55 @@ class _Batch:
                 n = min(nbytes - done, 0x10000)
                 chunk = (value >> (done * 8)) & ((1 << (n * 8)) - 1)
                 op = self._bytes_inout if capture else _DATA_BYTES_OUT
-                self.cmd += bytes((op, (n - 1) & 0xFF, (n - 1) >> 8))
-                self.cmd += chunk.to_bytes(n, "little")
+                self._add(
+                    bytes((op, (n - 1) & 0xFF, (n - 1) >> 8)) + chunk.to_bytes(n, "little"),
+                    8 * n, n if capture else 0,
+                )
                 done += n
         if rem:
             op = self._bits_inout if capture else _DATA_BITS_OUT
             bits = (value >> (nbytes * 8)) & ((1 << rem) - 1)
-            self.cmd += bytes((op, rem - 1, bits))
+            self._add(bytes((op, rem - 1, bits)), rem, 1 if capture else 0)
         last = (value >> (width - 1)) & 1
         tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | (last << 7)
-        self.cmd += bytes(
-            (self._tms_inout if capture else _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)
+        self._add(
+            bytes((self._tms_inout if capture else _TMS_OUT,
+                   len(_LAST_BIT_TO_IDLE) - 1, tms_value)),
+            len(_LAST_BIT_TO_IDLE), 1 if capture else 0,
         )
         if capture:
             self.captures.append((width, nbytes, rem, before, target_width))
-            self.read_bytes += nbytes + (1 if rem else 0) + 1
+
+    def pieces(self, max_clocks: int):
+        """Yield ``(commands, reply bytes)`` of at most *max_clocks* TCK
+        each (one bit or TMS command may exceed it by its 7 clocks).  A byte
+        command is cut into shorter ones: the TAP stays in its shift state
+        between commands, so the pieces clock exactly what the batch does,
+        and their replies concatenate to the batch's."""
+        max_clocks = max(8, int(max_clocks))
+        cmd, clocks, reply = bytearray(), 0, 0
+        for start, end, n_clocks, n_reply in self._commands:
+            op = self.cmd[start]
+            if n_clocks > max_clocks and op in (_DATA_BYTES_OUT, self._bytes_inout):
+                data = self.cmd[start + 3:end]
+                step = max_clocks // 8
+                parts = []
+                for pos in range(0, len(data), step):
+                    part = data[pos:pos + step]
+                    n = len(part) - 1
+                    parts.append((bytes((op, n & 0xFF, n >> 8)) + part, 8 * len(part),
+                                  len(part) if n_reply else 0))
+            else:
+                parts = [(self.cmd[start:end], n_clocks, n_reply)]
+            for part, n_clocks, n_reply in parts:
+                if cmd and clocks + n_clocks > max_clocks:
+                    yield bytes(cmd), reply
+                    cmd, clocks, reply = bytearray(), 0, 0
+                cmd += part
+                clocks += n_clocks
+                reply += n_reply
+        if cmd:
+            yield bytes(cmd), reply
 
     def decode(self, rx: bytes) -> list[int]:
         values: list[int] = []
@@ -1235,10 +1283,40 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         return self._io_call(io.transfer, cmd, reply_bytes)
 
     def _flush(self, batch: _Batch) -> list[int]:
+        """Run *batch* and decode what it captured.  A batch longer than
+        :meth:`_piece_clocks` goes in pieces, each waited for, so no
+        transfer outlasts the USB timeout at a slow TCK and a cancel lands
+        between pieces."""
         if not batch.cmd:
             return []
-        rx = self._transfer(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)), batch.read_bytes)
-        return batch.decode(rx)
+        limit = self._piece_clocks()
+        if not limit or batch.clocks <= limit:
+            rx = self._transfer(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)), batch.read_bytes)
+            return batch.decode(rx)
+        rx = bytearray()
+        started = False
+        for cmd, reply in batch.pieces(limit):
+            if started and self._call_cancelled:
+                # Mid-scan: leave the TAP in Test-Logic-Reset / Idle, not
+                # in a shift state a peer would inherit.
+                reset = _Batch()
+                reset.reset()
+                self._io_call(self._io().transfer,
+                              bytes(reset.cmd) + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
+                raise RuntimeError("FTDI transport cancelled; reconnect")
+            # The pin read answers only once the piece has been clocked.
+            rx += self._transfer(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)), reply + 1)[:-1]
+            started = True
+        return batch.decode(bytes(rx))
+
+    def _piece_clocks(self) -> int:
+        """TCK clocks per transfer of a long batch: about a quarter second,
+        and at most half the USB timeout (the channel's: whoever opened
+        it set it).  0 before the clock is known."""
+        if not self.actual_tck_hz:
+            return 0
+        timeout_ms = getattr(self._handle, "timeout_ms", None) or self.timeout_ms
+        return int(self.actual_tck_hz * min(0.25, timeout_ms / 2000))
 
     # -- chain discovery -----------------------------------------------------
 

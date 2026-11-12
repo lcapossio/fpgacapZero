@@ -764,7 +764,11 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   Cancelling (the RPC and MCP watchdogs, the GUI's Cancel) takes no lock:
   programming stops within about a quarter second of TCK and closes the
   channel the same way, and any other call stops at its next USB transfer,
-  leaving other transports on the channel working.  The
+  leaving other transports on the channel working.  A batch of scans
+  longer than about a quarter second of TCK (a very wide `raw_dr_scan` at
+  a slow clock) goes in pieces of that length, each waited for, so no USB
+  transfer outlasts `timeout_ms`; a cancel between pieces returns the TAP
+  to Run-Test/Idle first.  The
   Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
   Single-die UltraScale takes the same sequence but is not
   hardware-validated; PolarFire and Gowin are not supported (use their
