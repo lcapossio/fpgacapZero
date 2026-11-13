@@ -237,15 +237,20 @@ Intel `sld_virtual_jtag` instances through a USB-Blaster cable.
 `@1`.  If your FPGA is elsewhere in the JTAG chain, pass the exact
 Quartus device name with `--tap`.
 
-### Option D: direct FTDI (FlashPro5, Digilent)
+### Option D: direct FTDI (FlashPro5, Digilent, KV260)
 
-`--backend ftdi` drives an FTDI MPSSE JTAG cable directly through FTDI's
-D2XX library, with no OpenOCD or vendor server.  It covers the embedded
-FlashPro5 on Microchip PolarFire boards and Digilent's FTDI-based cables.
+`--backend ftdi` drives an FTDI MPSSE JTAG cable directly, with no OpenOCD
+or vendor server.  It covers the embedded FlashPro5 on Microchip PolarFire
+boards, Digilent's FTDI-based cables (the Arty A7's onboard one), the Kria
+KV260 carrier, and any FT2232H/FT4232H JTAG adapter, which you name with
+`--hardware`.
 
 1. **Get the D2XX library.**  On Windows it is already installed with the
    cable's driver (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library
-   and detach `ftdi_sio` from the adapter.
+   and detach `ftdi_sio` from the adapter.  An adapter bound to WinUSB or
+   libusbK instead (on `main`, not yet released) goes through libusb:
+   `pip install fpgacapzero[usb]`, then name it with a `usb:` selector,
+   for example `--hardware usb:` for the one known adapter.
 
 2. **Close whatever holds the cable** (Libero's programmer, FlashPro
    Express, hw_server, OpenOCD): a channel opens for one program at a time.

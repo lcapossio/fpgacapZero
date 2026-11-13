@@ -237,13 +237,16 @@ infers one from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale,
 IDCODE; pass it when the tap name does
 not say which family the part is.
 
-`ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver, with no
-daemon: the PolarFire kits' embedded FlashPro5, a Digilent cable, or any
-FT2232H/FT4232H JTAG adapter (see [Transports](14_transports.md)). `hardware`
-names the adapter by its D2XX description (for example
-`"Embedded FlashPro5 A"`) or serial. Omit it only when a single FlashPro or
-Digilent adapter is attached: other FTDI adapters (a generic FT2232H board,
-say) are not recognised and must be named.
+`ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver or
+libusb, with no daemon: the PolarFire kits' embedded FlashPro5, a Digilent
+cable, the Kria KV260 carrier, or any FT2232H/FT4232H JTAG adapter (see
+[Transports](14_transports.md)). `hardware` names the adapter by its D2XX
+description (for example `"Embedded FlashPro5 A"`) or serial, or a libusb
+channel with a `usb:` selector (`"usb:"` alone picks the one known adapter).
+Omit it only when a single FlashPro, Digilent or KV260 adapter is attached:
+other FTDI adapters (a generic FT2232H board, say) are not recognised and
+must be named. On a chain of several devices the transport scans the one
+whose family it recognises.
 EIO, AXI and UART sessions on the same adapter share its handle.
 
 `serial` talks to the byte-stream TAP bridge (`rtl/fcapz_uart_tap.v`, used by

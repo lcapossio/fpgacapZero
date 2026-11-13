@@ -122,7 +122,8 @@ connected. The panels:
   `--quartus-stp` flag), never in the browser, and Connect goes straight to
   the local cable with no TCP scan. `ftdi` works the same way with an
   optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`, or
-  `Digilent USB Device A` for the Arty A7's onboard cable); the IR table
+  `Digilent USB Device A` for the Arty A7's onboard cable, or `usb:...`
+  for a channel on libusb); the IR table
   comes from the device IDCODE. Blank picks the only FTDI JTAG adapter, and
   with several attached Connect fails and lists their names. The UI has no
   clock field, so `ftdi` runs at the server's default TCK of 6 MHz. The

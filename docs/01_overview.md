@@ -206,9 +206,15 @@ The host stack supports three JTAG transports out of the box:
   [`specs/transport_api.md`](specs/transport_api.md) for the tested
   Quartus edition.
 - **Direct FTDI (`ftdi`)** — drives an FTDI MPSSE cable (the FlashPro5
-  on Microchip boards, Digilent cables) through FTDI's D2XX library, with
-  no OpenOCD or vendor server.  The IR table comes from the device
-  IDCODE.  Hardware-validated on the PolarFire SoC Discovery Kit.
+  on Microchip boards, Digilent cables, the Kria KV260 carrier, or any
+  FT2232H/FT4232H) through FTDI's D2XX library or libusb, with no OpenOCD
+  or vendor server.  The IR table comes from the device IDCODE, and on a
+  chain of several devices (the KV260's ARM DAP and FPGA) it scans the
+  one it recognises, the others in BYPASS.  Programs AMD/Xilinx 7-series
+  FPGAs.  Hardware-validated over D2XX on the PolarFire SoC Discovery Kit,
+  the Arty A7 and the Kria KV260; libusb and multi-device chains are on
+  `main`, not yet released, and libusb is validated for raw JTAG scans
+  only.
 - **Serial TAP bridge (`serial`)** — for boards with no JTAG to the
   fabric.  The design instantiates `fcapz_ela_uart`, which rebuilds the
   TAP contract from a byte stream on two pins, and the host talks to it
