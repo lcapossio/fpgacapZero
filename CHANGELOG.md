@@ -84,6 +84,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **FTDI: scans longer than the USB timeout.** One batch of scans that took
+  longer to clock than `timeout_ms` (2 s) failed partway with "FTDI write
+  short" (D2XX) or "write timed out" (libusb), for example a 2.4 Mbit
+  `raw_dr_scan` at 1 MHz.  Such a batch now goes in pieces of about a
+  quarter second of TCK, each waited for; a cancel between pieces returns
+  the TAP to Run-Test/Idle so other transports on the channel carry on.
+  Bit-exact on hardware at 1-30 MHz over D2XX (KV260) and libusb (FT2232H).
+
 - **EJTAG-AXI: a second RESET could cancel the first.** RESET crosses to
   the AXI clock as a toggle; a second RESET before the first was
   acknowledged flipped it back, so the AXI side never reset: a read or

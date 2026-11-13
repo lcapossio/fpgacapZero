@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import itertools
+import random
 import tempfile
 import threading
 import unittest
@@ -596,6 +597,116 @@ class RegisterTests(_FtdiTestCase):
         out = t.raw_dr_scan_batch([(0, 49)] * 3000)
         self.assertEqual(len(out), 3000)
         self.assertGreater(self.lib.writes - before, 1)
+
+
+class LongScanTests(_FtdiTestCase):
+    """A batch longer than a quarter second of TCK goes in pieces, each
+    waited for, so no transfer outlasts the USB timeout."""
+
+    PIECE = 1000
+    _real_piece_clocks = FtdiMpsseTransport._piece_clocks
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(FtdiMpsseTransport, "_piece_clocks",
+                                    lambda _self: self.PIECE)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _assert_paced(self, first_write):
+        clocks = self.lib.write_clocks[first_write:]
+        self.assertGreater(len(clocks), 1)
+        self.assertLessEqual(max(clocks), self.PIECE + 7)
+
+    def test_long_scan_is_bit_exact(self):
+        t = self._transport(ir_table={1: 0xFF})  # BYPASS: one-bit DR
+        width = 20_001
+        value = random.Random(1).getrandbits(width)
+        first = len(self.lib.write_clocks)
+        out = t.raw_dr_scan(value, width)
+        mask = (1 << width) - 1
+        self.assertEqual(out, (value << 1) & mask)
+        self._assert_paced(first)
+
+    def test_captures_through_a_chain_in_pieces(self):
+        target = _zynqus()
+        self.lib.dev = _Chain(_dap(), target)
+        t = self._transport()
+        t.burst = False
+        for i in range(300):
+            target.regs[0x0100 + 4 * i] = i * 7 + 3
+        first = len(self.lib.write_clocks)
+        self.assertEqual(t.read_block(0x0100, 300), [i * 7 + 3 for i in range(300)])
+        self._assert_paced(first)
+
+    def test_cancel_between_pieces_resets_the_tap_and_spares_peers(self):
+        a = self._transport(ir_table={1: 0xFF})
+        b = self._transport(ir_table={1: 0xFF})
+        transfer = a._transfer
+        calls = []
+
+        def cancel_after_the_first(cmd, reply_bytes):
+            out = transfer(cmd, reply_bytes)
+            calls.append(len(cmd))
+            if len(calls) == 1:
+                a.cancel()
+            return out
+
+        a._transfer = cancel_after_the_first
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            a.raw_dr_scan(0, 20_001)
+        self.assertEqual(len(calls), 1)  # nothing sent after the cancel
+        self.assertEqual(self.lib.dev.state, "IDLE")  # not left in Shift-DR
+        self.assertEqual(b.raw_dr_scan(0x5A, 9), 0x5A << 1 & 0x1FF)
+
+    def test_cancel_racing_the_next_piece_still_resets_the_tap(self):
+        # The cancel lands after the loop's check, while the next piece is
+        # on its way out: the piece goes, and the reset follows it.
+        a = self._transport(ir_table={1: 0xFF})
+        b = self._transport(ir_table={1: 0xFF})
+        io = a._io
+        calls = []
+
+        def cancel_on_the_second(*args):
+            calls.append(1)
+            if len(calls) == 2:
+                a.cancel()
+            return io(*args)
+
+        a._io = cancel_on_the_second
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            a.raw_dr_scan(0, 20_001)
+        self.assertEqual(self.lib.dev.state, "IDLE")
+        self.assertIsNone(a._channel.broken)
+        self.assertEqual(b.raw_dr_scan(0xB4, 9), 0xB4 << 1 & 0x1FF)
+
+    def test_interrupt_between_pieces_breaks_the_channel(self):
+        # Ctrl-C outside any USB call, with the TAP left mid-scan: no peer
+        # may go on scanning through it.
+        a = self._transport(ir_table={1: 0xFF})
+        b = self._transport(ir_table={1: 0xFF})
+        io = a._io
+        calls = []
+
+        def interrupt_on_the_second(*args):
+            calls.append(1)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return io(*args)
+
+        a._io = interrupt_on_the_second
+        with self.assertRaises(KeyboardInterrupt):
+            a.raw_dr_scan(0, 20_001)
+        self.assertIsNotNone(a._channel.broken)
+        with self.assertRaisesRegex(RuntimeError, "channel broken"):
+            b.raw_dr_scan(0xB4, 9)
+
+    def test_piece_size_follows_tck_and_the_channel_timeout(self):
+        t = self._transport(tck_hz=1_000_000)
+        piece = LongScanTests._real_piece_clocks
+        self.assertEqual(piece(t), int(t.actual_tck_hz * 0.25))
+        t._handle.timeout_ms = 200  # the opener's timeout, not this one's
+        self.assertEqual(piece(t), int(t.actual_tck_hz * 0.1))
 
 
 class ChannelKeyTests(unittest.TestCase):
