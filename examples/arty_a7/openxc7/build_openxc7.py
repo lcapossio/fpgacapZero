@@ -81,17 +81,28 @@ def _tool(flag: str | None, env: str, default: str) -> str:
 
 
 def _revision(path: Path) -> str:
-    """Git revision of a checkout (with a dirty marker), or '' if not a repo."""
+    """Git revision of a checkout (with a dirty marker), or '' if path is not
+    the root of its own repository: git would otherwise report an enclosing
+    repository, such as this one for a database unpacked under build/."""
+    def git(*cmd: str) -> str:
+        return subprocess.run(["git", "-C", str(path), *cmd],
+                              capture_output=True, text=True, check=True).stdout.strip()
     try:
-        return subprocess.run(
-            ["git", "-C", str(path), "describe", "--always", "--dirty", "--abbrev=40"],
-            capture_output=True, text=True, check=True).stdout.strip()
+        if Path(git("rev-parse", "--show-toplevel")).resolve() != path.resolve():
+            return ""
+        return git("describe", "--always", "--dirty", "--abbrev=40")
     except (OSError, subprocess.CalledProcessError):
         return ""
 
 
+def _partial(path: Path) -> Path:
+    """A temporary name beside path, unique to this run, so concurrent builds
+    never write or publish each other's file. It keeps path's suffix."""
+    return path.with_name(f"{path.stem}.{os.getpid()}.partial{path.suffix}")
+
+
 def _publish_text(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".partial")
+    tmp = _partial(path)
     tmp.write_text(text, newline="\n")
     os.replace(tmp, path)
 
@@ -198,7 +209,7 @@ def main() -> int:
         src = Path(src).expanduser().resolve()
         chipdb = out / f"{PART}.bin"
         stamp = chipdb.with_suffix(".stamp")
-        revs = (_revision(src), _revision(family_db))
+        revs = (_revision(src), _revision(family_db.parent))
         want = (f"nextpnr-xilinx {revs[0]}\n"
                 f"prjxray-db {family_db} {revs[1]}\n")
         # An unknown (not a git checkout) or dirty revision forces a rebuild.
@@ -216,9 +227,12 @@ def main() -> int:
             built = [p for p in (src / "build" / "bbasm", src / "build" / "bba" / "bbasm")
                      if p.exists()]
             bbasm = _tool(args.bbasm, "BBASM", str(built[0]) if built else "bbasm")
-            partial = chipdb.with_suffix(".bin.partial")
-            _run([bbasm, "-l", str(bba), str(partial)], out / "bbasm.log", out)
-            os.replace(partial, chipdb)
+            partial = _partial(chipdb)
+            try:
+                _run([bbasm, "-l", str(bba), str(partial)], out / "bbasm.log", out)
+                os.replace(partial, chipdb)
+            finally:
+                partial.unlink(missing_ok=True)
             _publish_text(stamp, want)
             bba.unlink()
 
@@ -234,20 +248,29 @@ def main() -> int:
     f2f = _tool(args.fasm2frames, "FASM2FRAMES", "fasm2frames")
     # prjxray's installed fasm2frames entry point cannot import its own utils
     # package, so utils/fasm2frames.py from the checkout is accepted too.
+    # A bare script name is looked up on PATH here: python itself would only
+    # look in the build directory.
+    if f2f.endswith(".py") and not Path(f2f).is_absolute():
+        found = shutil.which(f2f)
+        if not found:
+            sys.exit(f"[openxc7] {f2f} not found on PATH")
+        f2f = str(Path(found).resolve())
     f2f_cmd = [sys.executable, f2f] if f2f.endswith(".py") else [f2f]
     _run([*f2f_cmd, "--part", PART, "--db-root", str(family_db), str(fasm), str(frames)],
          out / "fasm2frames.log", out)
     # Written beside the final name and checked before it replaces it: the
     # hardware tests trust a .bit by its mtime, and xc7frames2bit can exit 0
     # without writing its output.
-    partial_bit = BITFILE.with_suffix(".bit.partial")
-    partial_bit.unlink(missing_ok=True)
-    _run([_tool(args.xc7frames2bit, "XC7FRAMES2BIT", "xc7frames2bit"),
-          "--part_file", str(family_db / PART / "part.yaml"), "--part_name", PART,
-          "--frm_file", str(frames), "--output_file", str(partial_bit)],
-         out / "xc7frames2bit.log", out)
-    _check_bitstream(partial_bit)
-    os.replace(partial_bit, BITFILE)
+    partial_bit = _partial(BITFILE)
+    try:
+        _run([_tool(args.xc7frames2bit, "XC7FRAMES2BIT", "xc7frames2bit"),
+              "--part_file", str(family_db / PART / "part.yaml"), "--part_name", PART,
+              "--frm_file", str(frames), "--output_file", str(partial_bit)],
+             out / "xc7frames2bit.log", out)
+        _check_bitstream(partial_bit)
+        os.replace(partial_bit, BITFILE)
+    finally:
+        partial_bit.unlink(missing_ok=True)
     print(f"[openxc7] wrote {BITFILE}")
     return 0
 
