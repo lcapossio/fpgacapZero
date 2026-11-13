@@ -194,8 +194,10 @@ something to report: `{"kind", "channel", "proto_version", "num_chains",
 "max_dr_bits"}` for the byte-stream bridge (plus `baudrate` over serial), and
 `null` for a JTAG probe, which negotiates nothing.
 
-For a direct FTDI cable (FlashPro5, Digilent), use `"backend": "ftdi"`.
-`hardware` optionally names the channel and `tck_mhz` sets the clock
+For a direct FTDI cable (FlashPro5, Digilent, the KV260 carrier), use
+`"backend": "ftdi"`. `hardware` optionally names the channel, by D2XX
+description or serial, or as `usb:<description>` / `usb:<serial>` for a
+libusb channel, and `tck_mhz` sets the clock
 (default 6). `program` configures an AMD/Xilinx 7-series FPGA with a `.bit`
 or `.bin` over JTAG first. On every backend, EIO, AXI and UART side
 connects ignore `program`, so they never reprogram the FPGA under the session.
@@ -336,7 +338,8 @@ Releases the transport.
 List JTAG targets before connecting (no active session needed). For
 `backend: "hw_server"` it returns the XSDB `jtag targets` names; for
 `backend: "openocd"` it returns the tap names (`jtag names`); for
-`backend: "ftdi"` it returns the FTDI channel descriptions. `discover_boards`
+`backend: "ftdi"` it returns the FTDI selectors: D2XX channel descriptions
+and `usb:`-prefixed libusb ones. `discover_boards`
 is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
 
 ```json

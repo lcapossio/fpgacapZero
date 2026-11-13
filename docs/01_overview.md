@@ -179,9 +179,10 @@ automatically, applies the readiness wait after programming the FPGA,
 and surfaces protocol errors with actionable messages.  Bypassing it
 loses all of that.
 
-## Three JTAG transports
+## JTAG transports
 
-The host stack supports three JTAG transports out of the box:
+The host stack supports four JTAG transports out of the box, plus a serial
+TAP bridge for boards with no JTAG to the fabric:
 
 - **AMD/Xilinx hw_server / XSDB** — the default for AMD/Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
@@ -206,9 +207,16 @@ The host stack supports three JTAG transports out of the box:
   [`specs/transport_api.md`](specs/transport_api.md) for the tested
   Quartus edition.
 - **Direct FTDI (`ftdi`)** — drives an FTDI MPSSE cable (the FlashPro5
-  on Microchip boards, Digilent cables) through FTDI's D2XX library, with
-  no OpenOCD or vendor server.  The IR table comes from the device
-  IDCODE.  Hardware-validated on the PolarFire SoC Discovery Kit.
+  on Microchip boards, Digilent cables, the Kria KV260 carrier, or any
+  FT2232H/FT4232H) through FTDI's D2XX library or libusb, with no OpenOCD
+  or vendor server.  The IR table comes from the device IDCODE.  On a
+  chain of several devices (the KV260's ARM DAP and FPGA) it picks the
+  one device whose family it recognises, provided every IR length can be
+  worked out, and keeps the others in BYPASS; anything ambiguous needs the Python API's `tap=` / `ir_lengths=`, which the CLI, RPC, MCP, GUI and web interface do not expose.  Programs AMD/Xilinx 7-series
+  FPGAs.  Hardware-validated over D2XX on the PolarFire SoC Discovery Kit,
+  the Arty A7 and the Kria KV260; libusb and multi-device chains are on
+  `main`, not yet released, and libusb is validated for raw JTAG scans
+  only.
 - **Serial TAP bridge (`serial`)** — for boards with no JTAG to the
   fabric.  The design instantiates `fcapz_ela_uart`, which rebuilds the
   TAP contract from a byte stream on two pins, and the host talks to it

@@ -13,11 +13,11 @@
   `tomllib`, and `importlib.metadata`'s `PackageNotFoundError` shape
   that all require ≥3.10.
 - **Git** to clone the repository.
-- **A JTAG transport**, one of:
+- **A supported transport**, one of:
   - **Vivado / hw_server (2022.2 or later)** — required for the
-    AMD/Xilinx hw_server backend.  This is the path that has been
-    hardware-validated on Arty A7-100T.  If you already have Vivado
-    installed for your day job, you have hw_server.
+    AMD/Xilinx hw_server backend, hardware-validated on Arty A7-100T and
+    Kria KV260.  If you already have Vivado installed for your day job,
+    you have hw_server.
   - **OpenOCD** — cross-platform, vendor-neutral.  Works with any
     adapter OpenOCD supports (FTDI, WCH CH347, CMSIS-DAP, J-Link, …);
     FTDI is the most common.  Install from your distro package manager
@@ -27,6 +27,12 @@
     USB-Blaster access through `sld_virtual_jtag`.  See
     [`specs/transport_api.md`](specs/transport_api.md) for the
     hardware-validated Quartus edition.
+  - **Direct FTDI** — an FTDI MPSSE JTAG adapter through FTDI's D2XX
+    library or libusb, with no other software; see
+    [Option D](#option-d-direct-ftdi-flashpro5-digilent-kv260).
+  - **Serial TAP bridge** — a design built with the TAP bridge and a
+    serial port (pyserial); see
+    [Option E](#option-e-serial-tap-bridge-no-fabric-jtag).
 - **Optional**: `iverilog` if you want to run the RTL simulation
   testbenches locally.  Install from your distro or
   [iverilog.icarus.com](http://iverilog.icarus.com/).
@@ -237,15 +243,24 @@ Intel `sld_virtual_jtag` instances through a USB-Blaster cable.
 `@1`.  If your FPGA is elsewhere in the JTAG chain, pass the exact
 Quartus device name with `--tap`.
 
-### Option D: direct FTDI (FlashPro5, Digilent)
+### Option D: direct FTDI (FlashPro5, Digilent, KV260)
 
-`--backend ftdi` drives an FTDI MPSSE JTAG cable directly through FTDI's
-D2XX library, with no OpenOCD or vendor server.  It covers the embedded
-FlashPro5 on Microchip PolarFire boards and Digilent's FTDI-based cables.
+`--backend ftdi` drives an FTDI MPSSE JTAG cable directly, with no OpenOCD
+or vendor server.  It covers the embedded FlashPro5 on Microchip PolarFire
+boards, Digilent's FTDI-based cables (the Arty A7's onboard one), the Kria
+KV260 carrier, and any FT2232H/FT4232H JTAG adapter, which you name with
+`--hardware`.
 
-1. **Get the D2XX library.**  On Windows it is already installed with the
-   cable's driver (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library
-   and detach `ftdi_sio` from the adapter.
+1. **Get a driver.**  The released package uses FTDI's D2XX library.  On
+   Windows it is already installed with the cable's driver
+   (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library and detach
+   `ftdi_sio` from the adapter.
+
+   Alternatively, libusb needs no FTDI library: on Linux and macOS, or on
+   Windows for an adapter bound to WinUSB or libusbK.  It is on `main`,
+   not yet released, so install from a checkout with
+   `pip install -e ".[usb]"`, then name the channel with a `usb:`
+   selector, for example `--hardware usb:` for the one known adapter.
 
 2. **Close whatever holds the cable** (Libero's programmer, FlashPro
    Express, hw_server, OpenOCD): a channel opens for one program at a time.

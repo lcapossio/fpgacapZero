@@ -1963,14 +1963,18 @@ FtdiMpsseTransport(
 
 Subclass of `_ScanBurstMixin`, `Transport`.
 
-fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
+fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver, or
+libusb with a `usb:` selector).
 
 `device` names the adapter channel by its D2XX description (for
-example `"Embedded FlashPro5 A"`) or serial; by default the single
-known JTAG adapter's channel A is used.  `ir_table` defaults to the
+example `"Embedded FlashPro5 A"`) or serial, or a libusb channel as
+`usb:DESCRIPTION` or `usb:SERIAL` (`usb:` alone: the one known
+adapter); by default the single known JTAG adapter's channel A
+(FlashPro, Digilent or KV260 carrier) is used.  `ir_table` defaults to the
 family read from the device IDCODE: PolarFire (`0x20` / `0x21`),
 AMD/Xilinx 7-series and single-die UltraScale (`0x02` / `0x03` /
-`0x22` / `0x23`) or Gowin.  `burst` defaults to that
+`0x22` / `0x23`), Zynq UltraScale+ MPSoC (`0x902` / `0x903` /
+`0x922` / `0x923`) or Gowin.  `burst` defaults to that
 family's wrapper default (on for PolarFire and AMD/Xilinx, off for
 Gowin).  `layout` overrides the adapter's `(ADBUS value, direction)`.
 A chain of several devices (a Zynq's ARM DAP beside its PL, say) is

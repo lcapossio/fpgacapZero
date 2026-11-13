@@ -3502,8 +3502,9 @@ def build_mcp_server(
         quartus_stp executable — the latter spawns a host process, so it is
         rejected unless fcapz-mcp was started with --allow-program (omit it to
         use the server's configured toolchain). For ftdi, `hardware` names
-        the adapter by D2XX description or serial (omit it only when a
-        single FlashPro or Digilent adapter is attached; any other FTDI
+        the adapter by description or serial, optionally prefixed with
+        `usb:` for libusb (omit it only when exactly one recognised
+        FlashPro, Digilent or KV260 adapter is attached; any other FTDI
         adapter must be named) and `tck_mhz` sets TCK (default 6). For serial,
         `serial_port` (required) names a port this machine lists, e.g. "COM5"
         or "/dev/ttyACM0", and `baudrate` defaults to 1000000. The ELA
