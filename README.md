@@ -17,10 +17,11 @@ Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin
 and Microchip** parts (with **Efinix** support synthesized in Efinity, hardware validation pending), plus a Python / CLI / web
 host stack on top.
 
-It is also **built to be driven by AI coding agents**. The bundled **MCP
-server** lets Claude Code, or any other MCP client, run the whole debug loop
-on real hardware itself: connect, set triggers, capture, search the waveform,
-read and write registers, and then go back and fix the RTL.
+It is also **built to be driven by AI coding agents**. The bundled
+**Model Context Protocol (MCP) server** gives Claude Code, or any other MCP
+client, hardware-debug tools to use while it iterates on RTL: connect, set
+triggers, capture, search the waveform, and read or write registers on the
+real board.
 
 > 📖 **New here? Start with the [User Manual](https://github.com/lcapossio/fpgacapZero/blob/main/docs/README.md)** — especially
 > **[First capture in 10 minutes](https://github.com/lcapossio/fpgacapZero/blob/main/docs/03_first_capture.md)**. This page is just
@@ -58,42 +59,44 @@ controls to coding agents.
   when a design needs them.
 - **Verilog *and* VHDL** — the portable core ships as native Verilog and native
   VHDL, with shared regression coverage for both.
-- **Agent-ready** — an MCP server whose results are paged, searchable and
-  decoded, with every write to the target off until you allow it, so an
-  agent can debug a live board without flooding its context or touching
-  what it shouldn't. See [Let an agent drive the bench](#let-an-agent-drive-the-bench).
 - **Apache-2.0** — usable in proprietary designs.
 
 ## Let an agent drive the bench
 
 `fcapz-mcp` exposes the lab controls as MCP tools, so a coding agent can
-close the loop between the RTL it writes and what the FPGA actually does.
-Register it with your agent and point it at a board:
+check what the FPGA actually does while it writes the RTL. Register it with
+your agent:
 
 ```bash
 pip install "fpgacapzero[mcp]"
-claude mcp add fpgacapzero -- fcapz-mcp --read-only   # observe only, to start
+claude mcp add fpgacapzero -- fcapz-mcp --probe-root /abs/path/to/probes
 ```
 
-It is designed for agents, not just wrapped for them:
+`--probe-root` names the directory the agent may load probe maps (such as
+`axi.prob` below) from. For a session that only observes, use
+`fcapz-mcp --read-only`, which also disables capture control.
 
 - **Results sized for a context window.** A capture returns a summary. The
   agent then pages samples by probe name, jumps to the window around the
   trigger, searches for edges, values or runs of one signal, and reads
-  decoded AXI4-Lite transactions with the anomalies first, instead of
+  decoded AXI4-Lite transactions with the bus faults first, instead of
   receiving megabytes of raw samples.
-- **Self-describing.** `fcapz_list_cores` finds every debug core on the board
-  and its JTAG chain. `fcapz_status` reports the session state and exactly
-  what the agent is allowed to do, so it learns the policy without being
+- **Self-describing.** `fcapz_list_cores` reports the ELA, AXI monitor and
+  EIO cores on the board and their JTAG chains (AXI and UART bridge chains
+  are given explicitly). `fcapz_status` reports the session state and what
+  the agent is allowed to do, so it learns the policy without being
   refused.
-- **Safe by default.** Anything that changes the target is off until you
-  enable it: EIO writes, UART sends, bitstream programming (only from a
-  directory you name), and AXI writes, which you can confine to specific
-  address windows. `--read-only` limits the session to observing.
-- **Robust to long and stuck calls.** One thread owns the board. A second
-  caller gets `busy` instead of queueing behind a long capture, and a
-  watchdog bounds every call and reports when the session needs a
-  reconnect.
+- **Writes are opt-in.** EIO and AXI writes, UART sends and bitstream
+  programming are disabled until you enable them. AXI writes can be
+  confined to specific address windows, and programming to a directory
+  with `--bitfile-root`. `--read-only` additionally disables capture
+  control; reads stay available, including UART receives, which consume
+  the bytes they read.
+- **Long and stuck calls.** Hardware commands run on one owner thread, so a
+  concurrent hardware command returns `busy` instead of queueing behind a
+  long capture, while status and cached-capture tools stay usable. A
+  watchdog bounds every wait; after a timeout the agent reconnects once
+  `fcapz_status` reports `ready`.
 - **Local or remote.** Use stdio for an agent on the same machine, or HTTPS
   with a bearer token for a bench machine elsewhere on the network.
 
@@ -105,7 +108,7 @@ fcapz_list_cores()                              # find the AXI monitor's chain
 fcapz_connect(backend="hw_server", chain=<monitor chain>)
 fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 512,
                       "posttrigger": 3584}, timeout=10.0)
-fcapz_axi_transactions(only_anomalies=True)     # straight to the error responses
+fcapz_axi_transactions(only_anomalies=True)     # error responses and unaligned addresses
 fcapz_get_capture_samples(around_trigger=32)    # the raw signals around the trigger
 ```
 
@@ -124,10 +127,11 @@ Kria KV260, a Zynq UltraScale+ MPSoC), or **Quartus `quartus_stp`**
 (Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5), or
 **directly over an FTDI cable** (`--backend ftdi`: the FlashPro5 on Microchip
 boards, a Digilent cable, or any FT2232H/FT4232H, with no OpenOCD or vendor
-server, through FTDI's D2XX driver or libusb — hardware-validated on the
-PolarFire SoC Discovery Kit, the Arty A7, where it also programs the
-bitstream, and the Kria KV260, where it reaches the FPGA past the ARM DAP on
-the JTAG chain). A board with **no JTAG to the fabric** can
+server — hardware-validated through FTDI's D2XX driver on the PolarFire SoC
+Discovery Kit, the Arty A7, where it also programs the bitstream, and the
+Kria KV260, where it reaches the FPGA past the ARM DAP on the JTAG chain;
+the libusb driver and multi-device chains are on `main`, not yet in a
+release, and libusb is validated for raw JTAG scans only). A board with **no JTAG to the fabric** can
 use the **serial TAP bridge** instead: two spare pins and a UART
 (`--backend serial`; hardware-validated on the Forgix board's Efinix Trion). On
 Zynq UltraScale+ MPSoC parts (`xck*`, `xczu*`) the host picks the PS TAP's
@@ -207,7 +211,7 @@ The canonical register / shift maps live in
 | AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 and Kria KV260 (Zynq UltraScale+ MPSoC) |
 | OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100 and the PolarFire SoC Discovery Kit; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
 | Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) |
-| Direct FTDI backend (`--backend ftdi`, D2XX or libusb) | ✅ Hardware-validated over D2XX on the PolarFire SoC Discovery Kit's embedded FlashPro5, the Arty A7 (including 7-series programming) and the Kria KV260 (multi-device JTAG chain); libusb validated for raw JTAG scans, full sessions not yet |
+| Direct FTDI backend (`--backend ftdi`, D2XX or libusb) | ✅ Hardware-validated over D2XX on the PolarFire SoC Discovery Kit's embedded FlashPro5, the Arty A7 (including 7-series programming) and the Kria KV260 (multi-device JTAG chain, on `main`); libusb (on `main`, unreleased) validated for raw JTAG scans only, full sessions not yet |
 | Serial TAP bridge (`--backend serial`, `fcapz_ela_uart`) | ✅ Hardware-validated on Forgix (Efinix Trion T8F49, over its configuration pins) |
 | AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
