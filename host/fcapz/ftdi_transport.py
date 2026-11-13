@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Native JTAG over an FTDI MPSSE adapter, through FTDI's D2XX driver.
+"""Native JTAG over an FTDI MPSSE adapter, through FTDI's D2XX driver or
+libusb.
 
 :class:`FtdiMpsseTransport` drives an FT2232H / FT4232H JTAG channel
 directly: no OpenOCD, no vendor tool.  It uses the D2XX library
@@ -10,9 +11,11 @@ elsewhere), which is the driver Microchip's FlashPro and Digilent's
 adapters already use on Windows, so it coexists with Libero / Vivado: the
 transport holds the adapter only while connected.
 
-Scope: one device on the JTAG chain.  At connect the transport reads the
-IDCODE chain, measures the IR length, and picks the IR table from the
-IDCODE manufacturer unless one is given.  It can also configure an
+Scope: one selected device on the JTAG chain, the others in BYPASS.  At
+connect the transport reads the IDCODE chain, measures the IR length, and
+picks the IR table from the IDCODE unless one is given.  A ``usb:``
+selector opens the channel through libusb instead
+(:mod:`fcapz.ftdi_libusb`).  It can also configure an
 AMD/Xilinx 7-series FPGA (:meth:`FtdiMpsseTransport.program`).
 """
 
@@ -786,12 +789,13 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     ``device`` names the adapter channel by its D2XX description (for
     example ``"Embedded FlashPro5 A"``) or serial, or a libusb channel as
-    ``usb:<description or serial>`` (``usb:`` alone: the one known
+    ``usb:DESCRIPTION`` or ``usb:SERIAL`` (``usb:`` alone: the one known
     adapter); by default the single known JTAG adapter's channel A
     (FlashPro, Digilent or KV260 carrier) is used.  ``ir_table`` defaults to the
     family read from the device IDCODE: PolarFire (``0x20`` / ``0x21``),
     AMD/Xilinx 7-series and single-die UltraScale (``0x02`` / ``0x03`` /
-    ``0x22`` / ``0x23``) or Gowin.  ``burst`` defaults to that
+    ``0x22`` / ``0x23``), Zynq UltraScale+ MPSoC (``0x902`` / ``0x903`` /
+    ``0x922`` / ``0x923``) or Gowin.  ``burst`` defaults to that
     family's wrapper default (on for PolarFire and AMD/Xilinx, off for
     Gowin).  ``layout`` overrides the adapter's ``(ADBUS value, direction)``.
     A chain of several devices (a Zynq's ARM DAP beside its PL, say) is

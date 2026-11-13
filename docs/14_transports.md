@@ -2,7 +2,8 @@
 
 > [!NOTE]
 > **Goal**: understand the `Transport` abstract base class, the built-in
-> backends (AMD/Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
+> backends (AMD/Xilinx hw_server, OpenOCD, Quartus USB-Blaster, direct FTDI,
+> and the serial TAP bridge), the named
 > `IR_TABLE_*` presets that handle the AMD/Xilinx per-family IR opcode
 > differences, the readiness wait that catches "FPGA isn't programmed yet",
 > the TCL injection prevention, and how to add a new transport.
@@ -86,7 +87,7 @@ spec you implement against if you're adding a new backend.
 
 Drives Vivado's `hw_server` daemon via `xsdb` (the AMD/Xilinx system
 debugger console).  This is the **default for AMD/Xilinx boards** and
-the only path that has been hardware-validated on Arty A7-100T.
+hardware-validated on Arty A7-100T (direct FTDI is too).
 
 ```python
 from fcapz import XilinxHwServerTransport

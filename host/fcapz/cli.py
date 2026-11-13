@@ -325,8 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=(
             "usb_blaster: Quartus hardware name (default: first USB-Blaster); "
-            "ftdi: adapter channel description or serial, or usb:<description "
-            "or serial> for a libusb channel (default: the one "
+            "ftdi: adapter channel description or serial, or usb:DESCRIPTION / "
+            "usb:SERIAL for a libusb channel (default: the one "
             "FlashPro/Digilent/KV260 channel A found)"
         ),
     )
