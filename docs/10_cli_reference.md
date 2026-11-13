@@ -156,7 +156,8 @@ OpenOCD's `ftdi` driver cannot open; replacing it with WinUSB (Zadig) breaks
 the vendor tools.  The bridge opens the adapter through D2XX instead and
 OpenOCD connects to it, so OpenOCD-based flows keep working next to Libero or
 Vivado (one program at a time on the cable).  `--hardware` names the adapter
-(D2XX description or serial); omit it when one is attached.  The bridge
+(description or serial, optionally prefixed with `usb:` for libusb); omit it
+only when exactly one recognised adapter is attached.  The bridge
 listens on `127.0.0.1` only, prints the OpenOCD adapter lines to use, and
 exits when OpenOCD shuts down (or on Ctrl-C).
 
@@ -180,8 +181,9 @@ with the adapter lines.  SRST is never driven.  An FT2232-compatible adapter
 whose MPSSE pin commands do nothing (the BRS-100's) is served with clocked
 commands instead; the bridge says so when it starts.  OpenOCD's
 `remote_bitbang use_remote_sleep on` delays are honoured in order.  The pin
-layouts are the ones `--backend ftdi` knows (FlashPro5, and Digilent cables
-wired like the Arty's: buffer enable on ADBUS7); a Digilent JTAG-HS2 needs a
+layouts are the ones `--backend ftdi` knows (FlashPro5, Digilent cables
+wired like the Arty's: buffer enable on ADBUS7, and the KV260 carrier,
+`ML Carrier Card`: ADBUS5 low); a Digilent JTAG-HS2 needs a
 layout that is not there yet.  See
 [OpenOCD on Windows](14_transports.md#openocd-on-windows-through-fcapz-openocd-bridge).
 

@@ -245,8 +245,10 @@ description (for example `"Embedded FlashPro5 A"`) or serial, or a libusb
 channel with a `usb:` selector (`"usb:"` alone picks the one known adapter).
 Omit it only when a single FlashPro, Digilent or KV260 adapter is attached:
 other FTDI adapters (a generic FT2232H board, say) are not recognised and
-must be named. On a chain of several devices the transport scans the one
-whose family it recognises.
+must be named. On a chain of several devices the transport picks the one
+device whose family it recognises, provided every IR length can be worked
+out, and keeps the others in BYPASS; a chain it cannot resolve that way needs
+the Python API's `tap=` / `ir_lengths=`, which MCP does not expose.
 EIO, AXI and UART sessions on the same adapter share its handle.
 
 `serial` talks to the byte-stream TAP bridge (`rtl/fcapz_uart_tap.v`, used by

@@ -245,12 +245,16 @@ boards, Digilent's FTDI-based cables (the Arty A7's onboard one), the Kria
 KV260 carrier, and any FT2232H/FT4232H JTAG adapter, which you name with
 `--hardware`.
 
-1. **Get the D2XX library.**  On Windows it is already installed with the
-   cable's driver (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library
-   and detach `ftdi_sio` from the adapter.  An adapter bound to WinUSB or
-   libusbK instead (on `main`, not yet released) goes through libusb:
-   `pip install fpgacapzero[usb]`, then name it with a `usb:` selector,
-   for example `--hardware usb:` for the one known adapter.
+1. **Get a driver.**  The released package uses FTDI's D2XX library.  On
+   Windows it is already installed with the cable's driver
+   (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library and detach
+   `ftdi_sio` from the adapter.
+
+   Alternatively, libusb needs no FTDI library: on Linux and macOS, or on
+   Windows for an adapter bound to WinUSB or libusbK.  It is on `main`,
+   not yet released, so install from a checkout with
+   `pip install -e ".[usb]"`, then name the channel with a `usb:`
+   selector, for example `--hardware usb:` for the one known adapter.
 
 2. **Close whatever holds the cable** (Libero's programmer, FlashPro
    Express, hw_server, OpenOCD): a channel opens for one program at a time.

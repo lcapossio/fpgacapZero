@@ -656,14 +656,15 @@ literal device names.
 ### `FtdiMpsseTransport`
 
 Drives an FTDI MPSSE JTAG adapter directly through FTDI's D2XX library
-(`ftd2xx.dll`, `libftd2xx.so`), with no OpenOCD or vendor server in between.
+(`ftd2xx.dll`, `libftd2xx.so`) or, with a `usb:` selector, through libusb
+(see **libusb** below), with no OpenOCD or vendor server in between.
 Each register access is one USB round trip.  A whole burst or register-window
 block takes a few USB transfers.
 
 ```python
 from fcapz import FtdiMpsseTransport
 
-t = FtdiMpsseTransport()               # the single FlashPro / Digilent channel A
+t = FtdiMpsseTransport()               # the single FlashPro / Digilent / KV260 channel A
 # t = FtdiMpsseTransport("Embedded FlashPro5 A", tck_hz=15e6)
 t.connect()
 print(hex(t.idcode), t.family)         # 0xf8181cf polarfire (MPFS095T)
@@ -674,8 +675,9 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
 
 - **Adapter.** `device` is a D2XX channel description (for example
   `"Embedded FlashPro5 A"`) or a serial.  Left empty, the transport uses
-  the channel A of the one known adapter (FlashPro or Digilent).  If there
-  are several, it asks you to name one.  `list_ftdi_devices()` lists the
+  the channel A of the one known adapter (FlashPro, Digilent or the KV260
+  carrier); other adapters are never picked, so name them.  If there are
+  several known ones, it asks you to name one.  `list_ftdi_devices()` lists the
   channels.  Known adapters get their pin layout (FlashPro5: nTRST on ADBUS4;
   Digilent: buffer enable on ADBUS7; the Kria KV260 carrier card, `"ML
   Carrier Card A"`: ADBUS5 driven low).  For other adapters, pass
@@ -697,7 +699,9 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   device's IR length comes from its IDCODE where known (AMD/Xilinx
   7-series and Zynq UltraScale+, ARM DAP: 4), and a single device left
   over gets the rest of the measured total; otherwise pass
-  `ir_lengths=[...]` in the same order.  `chain` and `chain_tap` report
+  `ir_lengths=[...]` in the same order.  `tap=` and `ir_lengths=` are
+  Python API arguments only: the CLI, RPC, MCP, GUI and web interface rely
+  on the automatic choice.  `chain` and `chain_tap` report
   what `connect()` found.  `program()` works through such a chain too.
   Transports sharing a channel all scan the device it was opened for.
   Validated on a Kria KV260 (ARM DAP in BYPASS on the TDO side, then the
@@ -723,7 +727,8 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
 - **libusb.** An adapter bound to WinUSB or libusbK on Windows (as OpenOCD
   or Zadig sets it up), or any adapter on Linux and macOS without FTDI's
   library, works through libusb: `pip install fpgacapzero[usb]` (pyusb and
-  a bundled libusb), then name the channel with a `usb:` selector.  `usb:`
+  a bundled libusb; until the next release, `pip install -e ".[usb]"` from a
+  `main` checkout), then name the channel with a `usb:` selector.  `usb:`
   alone picks the one known adapter, `usb:Digilent USB Device A` names it
   by description and `usb:<serial>` by serial.  libusb channels are named as
   D2XX names them (product string, channel letter on a multi-channel chip),

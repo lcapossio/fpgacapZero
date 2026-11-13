@@ -781,11 +781,14 @@ def _in_one_session(method):
 
 
 class FtdiMpsseTransport(_ScanBurstMixin, Transport):
-    """fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
+    """fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver, or
+    libusb with a ``usb:`` selector).
 
     ``device`` names the adapter channel by its D2XX description (for
-    example ``"Embedded FlashPro5 A"``) or serial; by default the single
-    known JTAG adapter's channel A is used.  ``ir_table`` defaults to the
+    example ``"Embedded FlashPro5 A"``) or serial, or a libusb channel as
+    ``usb:<description or serial>`` (``usb:`` alone: the one known
+    adapter); by default the single known JTAG adapter's channel A
+    (FlashPro, Digilent or KV260 carrier) is used.  ``ir_table`` defaults to the
     family read from the device IDCODE: PolarFire (``0x20`` / ``0x21``),
     AMD/Xilinx 7-series and single-die UltraScale (``0x02`` / ``0x03`` /
     ``0x22`` / ``0x23``) or Gowin.  ``burst`` defaults to that

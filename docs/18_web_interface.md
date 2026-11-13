@@ -124,8 +124,9 @@ connected. The panels:
   optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`, or
   `Digilent USB Device A` for the Arty A7's onboard cable, or `usb:...`
   for a channel on libusb); the IR table
-  comes from the device IDCODE. Blank picks the only FTDI JTAG adapter, and
-  with several attached Connect fails and lists their names. The UI has no
+  comes from the device IDCODE. Blank picks channel A of the one recognised
+  adapter (FlashPro, Digilent or KV260); a generic FTDI adapter must be
+  named, and with several recognised ones Connect fails and lists them. The UI has no
   clock field, so `ftdi` runs at the server's default TCK of 6 MHz. The
   server holds the channel until Disconnect, so close `hw_server`, OpenOCD
   and vendor programmers first (see

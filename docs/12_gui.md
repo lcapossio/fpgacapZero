@@ -90,7 +90,7 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 | **Host** | TCP host of the transport, default `127.0.0.1` |
 | **Port** | TCP port, default `3121` for hw_server / `6666` for openocd; ignored by USB-Blaster |
 | **FPGA target / TAP** | hw_server target name (e.g. `xc7a100t`), OpenOCD TAP name (enter `auto` to use the first tap OpenOCD reports), or Quartus device name / `auto` for USB-Blaster |
-| **Quartus hardware** / **FTDI adapter** | Optional Quartus hardware name for USB-Blaster (e.g. `DE25-Nano [USB-1]`), or FTDI channel description or serial (e.g. `Embedded FlashPro5 A`, or `usb:...` for a libusb channel); leave empty to auto-select when exactly one cable is present |
+| **Quartus hardware** / **FTDI adapter** | Optional Quartus hardware name for USB-Blaster (e.g. `DE25-Nano [USB-1]`), or FTDI channel description or serial (e.g. `Embedded FlashPro5 A`, or `usb:...` for a libusb channel); leave empty to auto-select: a USB-Blaster when exactly one is present, an FTDI channel A when exactly one recognised adapter (FlashPro, Digilent, KV260) is; name generic FTDI adapters |
 | **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
 | **[Scan]** | hw_server: lists XSDB JTAG targets. OpenOCD: lists tap names via `jtag names`. Click to fill the **TAP** field instead of typing it |
 | **Bitfile** | Optional path to a `.bit` file, used when **Program on connect** is checked: hw_server runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected"; FTDI configures an AMD/Xilinx 7-series FPGA over JTAG (a `.bit` or `.bin`) |
