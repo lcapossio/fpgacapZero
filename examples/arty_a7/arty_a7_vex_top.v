@@ -130,15 +130,18 @@ module arty_a7_vex_top (
         .RST(btn[0])
     );
 
+    // VCO 100 MHz / 2 * 13 = 650 MHz, / 5 = 130 MHz.  An integer multiplier
+    // (rather than 6.5 with DIVCLK_DIVIDE 1) so the open-source openXC7 flow,
+    // which has no fractional feedback, builds the same clock.
     MMCME2_BASE #(
         .BANDWIDTH("OPTIMIZED"),
-        .CLKFBOUT_MULT_F(6.5),
+        .CLKFBOUT_MULT_F(13.0),
         .CLKFBOUT_PHASE(0.0),
         .CLKIN1_PERIOD(10.000),
         .CLKOUT0_DIVIDE_F(5.0),
         .CLKOUT0_DUTY_CYCLE(0.5),
         .CLKOUT0_PHASE(0.0),
-        .DIVCLK_DIVIDE(1),
+        .DIVCLK_DIVIDE(2),
         .REF_JITTER1(0.010),
         .STARTUP_WAIT("FALSE")
     ) u_mmcm_130 (
