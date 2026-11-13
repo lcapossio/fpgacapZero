@@ -828,8 +828,8 @@ Debug a bus fault with the AXI monitor — anomalies first, then their context:
 fcapz_connect(backend="hw_server")
 fcapz_list_cores()                       # find the AXI monitor's chain
 fcapz_connect(backend="hw_server", chain=<monitor chain>)
-fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 512,
-                      "posttrigger": 3584}, timeout=10.0)
+fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 32,
+                      "posttrigger": 223}, timeout=10.0)
                                          # summary carries the AXI headline counts
 fcapz_axi_transactions(only_anomalies=True)
                                          # then widen around what it found

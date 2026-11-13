@@ -106,8 +106,8 @@ A typical agent session, chasing a bus fault:
 fcapz_connect(backend="hw_server")
 fcapz_list_cores()                              # find the AXI monitor's chain
 fcapz_connect(backend="hw_server", chain=<monitor chain>)
-fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 512,
-                      "posttrigger": 3584}, timeout=10.0)
+fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 32,
+                      "posttrigger": 223}, timeout=10.0)
 fcapz_axi_transactions(only_anomalies=True)     # error responses and unaligned addresses
 fcapz_get_capture_samples(around_trigger=32)    # the raw signals around the trigger
 ```
@@ -143,8 +143,9 @@ full per-vendor matrix and JTAG-chain rules are in the manual's
 
 ## Quick start
 
-You need Python 3.10+, a JTAG-capable FPGA board, and one of OpenOCD, Vivado
-hw_server, or Quartus `quartus_stp` (Intel/Altera USB-Blaster). Full setup is in
+You need Python 3.10+, an FPGA board, and a supported transport: Vivado
+hw_server, OpenOCD, Quartus `quartus_stp` (Intel/Altera USB-Blaster), a
+direct FTDI cable, or the serial TAP bridge. Full setup is in
 [Installation](https://github.com/lcapossio/fpgacapZero/blob/main/docs/02_install.md).
 
 ```bash
