@@ -14,8 +14,7 @@ JTAG**: no extra board pins, no soft CPU, no vendor lock-in.
 
 Think of it as an open, vendor-neutral alternative to ChipScope / SignalTap /
 Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin,
-and Microchip** parts (with **Efinix** support synthesized in Efinity, hardware validation pending), plus a Python / CLI / web
-host stack on top.
+Microchip and Efinix** parts, plus a Python / CLI / web host stack on top.
 
 It is also **built to be driven by AI coding agents**. The bundled
 **Model Context Protocol (MCP) server** gives Claude Code, or any other MCP
