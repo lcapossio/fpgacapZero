@@ -9,7 +9,7 @@ yosys synth_xilinx -> nextpnr-xilinx -> fasm2frames -> xc7frames2bit
 ```
 
 The resulting bitstream passes the same hardware suite as the Vivado build:
-70 passed and 7 skipped on an Arty A7-100T. Every core works through it: the
+77 passed and 7 skipped on an Arty A7-100T. Every core works through it: the
 managed hub with two ELAs and two EIOs on USER1, the AXI monitor on USER2,
 EJTAG-AXI on USER4, and the VexRiscv CPU.
 

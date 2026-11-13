@@ -26,7 +26,7 @@
 
   <!-- Title -->
   <text x="20" y="34" font-size="20" font-weight="700" fill="#0f172a">Arty A7 VexRiscv reference design, built with openXC7</text>
-  <text x="20" y="56" class="s">Hardware suite on an Arty A7-100T: 70 passed, 7 skipped (UART loopback, off by default), 13 subtests passed</text>
+  <text x="20" y="56" class="s">Hardware suite on an Arty A7-100T: 77 passed, 7 skipped (UART loopback, off by default), 13 subtests passed</text>
 
   <!-- Build flow -->
   <rect x="20" y="76" width="1240" height="78" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
