@@ -43,7 +43,7 @@ strictly request/response, in order.
 
 **Response on failure**:
 ```json
-{"ok":false,"schema_version":"1.1","error":"...","type":"RuntimeError","trace":"..."}
+{"ok":false,"schema_version":"1.1","error":"...","type":"RuntimeError"}
 ```
 
 Every response carries `"schema_version"` so a stale client can
@@ -909,14 +909,15 @@ On any exception, the response shape is:
   "ok": false,
   "schema_version": "1.1",
   "error": "burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH",
-  "type": "ValueError",
-  "trace": "Traceback (most recent call last):\n  File ..."
+  "type": "ValueError"
 }
 ```
 
-`type` is the Python exception class name; `trace` is the last
-frame of the traceback.  Both are useful for surfacing meaningful
-errors back to the calling language.
+`type` is the Python exception class name, useful for surfacing
+meaningful errors back to the calling language.  The reply carries no
+traceback, so no source path reaches a client; the server logs it at
+DEBUG on the `fcapz.rpc` logger (the web interface logs it with its
+warning on `fcapz.web`).
 
 Common error types you should expect:
 

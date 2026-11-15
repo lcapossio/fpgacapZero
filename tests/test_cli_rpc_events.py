@@ -1207,5 +1207,35 @@ class MakeTransportTests(unittest.TestCase):
                     self.assertEqual(_make_transport(args).burst, burst)
 
 
+
+class RpcMainErrorEnvelopeTests(unittest.TestCase):
+    def test_error_reply_carries_no_traceback(self):
+        # BUG-298: the stdin server's error reply has no source path; the
+        # traceback is logged at DEBUG on fcapz.rpc instead.
+        from unittest import mock
+
+        from fcapz import rpc
+
+        lines = iter(["{not json", '{"cmd": "bogus"}'])
+
+        def fake_input():
+            try:
+                return next(lines)
+            except StopIteration:
+                raise EOFError from None
+
+        out = io.StringIO()
+        with mock.patch("builtins.input", fake_input), contextlib.redirect_stdout(out):
+            with self.assertLogs("fcapz.rpc", level="DEBUG") as logs:
+                self.assertEqual(rpc.main(), 0)
+        replies = [json.loads(x) for x in out.getvalue().splitlines()]
+        self.assertEqual(len(replies), 2)
+        for reply in replies:
+            self.assertIs(reply["ok"], False)
+            self.assertNotIn("trace", reply)
+        self.assertEqual(replies[0]["type"], "JSONDecodeError")
+        self.assertTrue(any("Traceback" in line for line in logs.output))
+
+
 if __name__ == "__main__":
     unittest.main()

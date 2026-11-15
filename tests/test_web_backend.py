@@ -336,6 +336,7 @@ def test_unknown_cmd_in_band(monkeypatch):
     body = _rpc(c, "bogus").json()
     assert body["ok"] is False
     assert body["type"] == "ValueError"
+    assert "trace" not in body  # BUG-298: no source path in a reply
 
 
 def test_eio_shared_chain_over_rpc(monkeypatch):

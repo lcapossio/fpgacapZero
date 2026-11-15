@@ -89,7 +89,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   channel opened with `open_pins()` (`fcapz openocd-bridge`) now refuses
   other transports in the process with a clear error.
 
+- **RPC and web: error replies no longer carry a traceback.** The `trace`
+  field held one frame with a local source path, sent to every client
+  (including remote ones with `fcapz-web --host 0.0.0.0`). Replies keep
+  `error` and `type`; the traceback is logged instead (DEBUG on
+  `fcapz.rpc`, with the warning on `fcapz.web`).
+
 ### Fixed
+
+- **FTDI: a cancel could be lost across a reconnect.** `cancel()` bumped
+  the cancel counter without a lock, so racing the detach of a reconnect
+  it could store a stale count and erase a later cancel. Each bump is now
+  one locked step.
 
 - **FTDI: scans longer than the USB timeout.** One batch of scans that took
   longer to clock than `timeout_ms` (2 s) failed partway with "FTDI write

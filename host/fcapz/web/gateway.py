@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import traceback
 from typing import Any, Dict, Optional
 
 from ..rpc import _SCHEMA_VERSION, RpcServer
@@ -104,13 +103,14 @@ class RpcGateway:
         try:
             resp = self._server.handle(req)
         except Exception as exc:  # noqa: BLE001 - mirror the line-protocol envelope
-            _log.warning("%s failed: %s", cmd, exc)
+            # The traceback goes to the log only (the Log tab shows just the
+            # message): a reply carries no source path to a remote client.
+            _log.warning("%s failed: %s", cmd, exc, exc_info=True)
             return {
                 "ok": False,
                 "schema_version": _SCHEMA_VERSION,
                 "error": str(exc),
                 "type": exc.__class__.__name__,
-                "trace": traceback.format_exc(limit=1).strip(),
             }
         # Surface command activity (with timing) in the Log tab. The elapsed ms
         # on capture/capture_wait is exactly the readback time the user is

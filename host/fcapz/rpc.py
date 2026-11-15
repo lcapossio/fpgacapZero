@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import threading
-import traceback
 from typing import Any, Dict, Optional
 
 from .analyzer import (
@@ -44,6 +44,8 @@ from .transport import (
 )
 
 _SCHEMA_VERSION = "1.1"
+
+_log = logging.getLogger("fcapz.rpc")
 
 
 class RpcError(RuntimeError):
@@ -1740,12 +1742,13 @@ def main() -> int:
             req = json.loads(line)
             resp = server.handle(req)
         except Exception as exc:
+            # The traceback is logged, not sent: a reply carries no source path.
+            _log.debug("request failed", exc_info=True)
             resp = {
                 "ok": False,
                 "schema_version": _SCHEMA_VERSION,
                 "error": str(exc),
                 "type": exc.__class__.__name__,
-                "trace": traceback.format_exc(limit=1).strip(),
             }
         print(json.dumps(resp), flush=True)
     return 0
