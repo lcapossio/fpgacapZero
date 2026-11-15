@@ -1599,6 +1599,16 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         self._sock: socket.socket | None = None
         # Re-entrant: a burst holds it across all of its Tcl scripts.
         self._sock_lock = threading.RLock()
+        # Short lifecycle lock over _sock, _session_gen and _dropped, never
+        # held across I/O: cancel() takes only this one, so it never waits
+        # on the call it aborts.
+        self._life_lock = threading.Lock()
+        # Bumped by cancel(): a connect() that began before a cancel does
+        # not publish its socket.
+        self._session_gen = 0
+        # Why the last session ended, when it did not end by close(): the
+        # next command reports it instead of "not connected".
+        self._dropped: str | None = None
         self.burst = bool(burst)
         self.single_chain_burst = bool(single_chain_burst)
         self.burst_data_chain = int(burst_data_chain)
@@ -1607,16 +1617,29 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         if self._sock is not None:
             self.close()
         self._forget_hub_state()
-        self._sock = socket.create_connection(
+        with self._life_lock:
+            gen = self._session_gen
+        sock = socket.create_connection(
             (self.host, self.port),
             timeout=self._connect_timeout_sec,
         )
-        self._sock.settimeout(0.2)
         try:
-            self._sock.recv(4096)
-        except OSError:
-            pass
-        self._sock.settimeout(5)
+            sock.settimeout(0.2)
+            try:
+                sock.recv(4096)
+            except OSError:
+                pass
+            sock.settimeout(5)
+        except BaseException:
+            sock.close()
+            raise
+        with self._life_lock:
+            cancelled = self._session_gen != gen
+            if not cancelled:
+                self._sock, self._dropped = sock, None
+        if cancelled:
+            sock.close()
+            raise ConnectionError("OpenOCD connect cancelled")
         if self.tap.strip().lower() in ("", "auto"):
             self.tap = self._resolve_auto_tap()
 
@@ -1641,33 +1664,89 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     def close(self) -> None:
         if self._sock:
             self._release_ownership_on_close()
-        self._close_socket()
+        with self._life_lock:
+            sock, self._sock, self._dropped = self._sock, None, None
+        self._shut(sock)
 
-    def _close_socket(self) -> None:
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+    @staticmethod
+    def _shut(sock: socket.socket | None) -> None:
+        """Close *sock*, shutting it down first: on Linux only a shutdown
+        wakes a ``recv()`` blocked on it in another thread."""
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _retire(self, sock: socket.socket, why: str) -> None:
+        """End the session *sock* belongs to, unless it has ended already.
+
+        A reply cut short leaves its tail on the way, and reading on would
+        take that tail for the next command's reply.  Never replayed: the
+        caller reconnects.
+        """
+        with self._life_lock:
+            if self._sock is not sock:
+                return
+            self._sock, self._dropped = None, why
+        self._shut(sock)
 
     def cancel(self) -> None:
-        # No MGR_OWNER release: that is scans from the cancelling thread,
-        # racing the operation being aborted.  The owner's close() does it.
-        self._close_socket()
+        """Abort the call in flight from another thread.
+
+        Takes no lock the call holds: it detaches the session and shuts its
+        socket down, so a blocked ``recv()`` ends at once and the call fails
+        with ``ConnectionError``.  No ``MGR_OWNER`` release either, as that
+        is scans from the cancelling thread racing the call being aborted;
+        the token stays set, as after a cancel on the other backends.  A
+        :meth:`connect` in progress does not publish its socket.
+        """
+        with self._life_lock:
+            sock, self._sock = self._sock, None
+            self._session_gen += 1
+            self._dropped = "cancelled"
+        self._shut(sock)
 
     def _cmd(self, tcl: str) -> str:
-        if not self._sock:
-            raise RuntimeError("not connected — call connect() first")
         with self._sock_lock:
-            self._sock.sendall((tcl + "\x1a").encode())
-            buf = b""
-            while not buf.endswith(b"\x1a"):
-                chunk = self._sock.recv(4096)
-                if not chunk:
-                    raise ConnectionError("OpenOCD closed the connection")
-                buf += chunk
-            return buf[:-1].decode().strip()
+            with self._life_lock:
+                sock, dropped = self._sock, self._dropped
+            if sock is None:
+                if dropped:
+                    raise ConnectionError(f"OpenOCD session {dropped}; reconnect")
+                raise RuntimeError("not connected — call connect() first")
+            try:
+                sock.sendall((tcl + "\x1a").encode())
+                buf = bytearray()
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        raise ConnectionError("OpenOCD closed the connection")
+                    buf += chunk
+                    end = buf.find(b"\x1a")
+                    if end < 0:
+                        continue
+                    if end != len(buf) - 1:
+                        # One command, one reply: bytes past its terminator
+                        # are a reply this session lost track of.
+                        raise ConnectionError(
+                            "OpenOCD sent data past the end of its reply"
+                        )
+                    return buf[:end].decode().strip()
+            except OSError as exc:  # ConnectionError and socket timeouts too
+                self._retire(sock, f"dropped ({exc or type(exc).__name__})")
+                with self._life_lock:
+                    cancelled = self._dropped == "cancelled"
+                if cancelled:
+                    raise ConnectionError(
+                        "OpenOCD transport cancelled; reconnect"
+                    ) from exc
+                raise
 
     def select_chain(self, chain: int) -> None:
         """Select BSCANE2 USER chain for subsequent register accesses."""

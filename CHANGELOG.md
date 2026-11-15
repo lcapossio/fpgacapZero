@@ -108,6 +108,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the port gone fails with `ConnectionError` instead of an
   `AttributeError` on `None`.
 
+- **OpenOCD: cancel and timeouts.** A socket timeout partway through a reply
+  left its tail to be read as the next command's reply; a reply cut short,
+  or followed by stray bytes, now ends the session, and the next command
+  says to reconnect. `cancel()` shuts the socket down, so a call blocked
+  waiting for a reply ends at once on Linux too, with `ConnectionError`
+  rather than an `AttributeError`, and a `connect()` it interrupts does not
+  publish its socket.
+
 - **FTDI: scans longer than the USB timeout.** One batch of scans that took
   longer to clock than `timeout_ms` (2 s) failed partway with "FTDI write
   short" (D2XX) or "write timed out" (libusb), for example a 2.4 Mbit
