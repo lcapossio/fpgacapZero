@@ -102,6 +102,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   it could store a stale count and erase a later cancel. Each bump is now
   one locked step.
 
+- **Serial TAP bridge: `cancel()` no longer scans.** It was `close()`, whose
+  `MGR_OWNER` release could run between two transactions of the call being
+  cancelled. It now only closes the port, and a call in flight that finds
+  the port gone fails with `ConnectionError` instead of an
+  `AttributeError` on `None`.
+
 - **FTDI: scans longer than the USB timeout.** One batch of scans that took
   longer to clock than `timeout_ms` (2 s) failed partway with "FTDI write
   short" (D2XX) or "write timed out" (libusb), for example a 2.4 Mbit

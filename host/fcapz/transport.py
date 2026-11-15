@@ -2113,6 +2113,25 @@ class TapBridgeTransport(Transport):
                 pass
             self._open_channel = False
 
+    def cancel(self) -> None:
+        """Abort the call in flight from another thread: close the byte
+        channel and nothing more.
+
+        Unlike :meth:`close` it scans nothing: the ``MGR_OWNER`` release
+        would run whenever the transaction lock is free, which is between
+        two transactions of the very call being aborted.  That call fails
+        at its next read or write with ``ConnectionError``.  The session's
+        ``MGR_OWNER`` token stays set, as after a cancel on the other
+        backends; :meth:`connect` starts a new session.
+        """
+        if not self._open_channel:
+            return
+        self._open_channel = False
+        try:
+            self._close()
+        except Exception:  # pragma: no cover - best effort
+            pass
+
     def _require_open(self) -> None:
         if not self._open_channel:
             raise RuntimeError(
@@ -2667,15 +2686,23 @@ class SerialTapTransport(TapBridgeTransport):
             pass
 
     def _close(self) -> None:
-        if self._ser is not None:
-            try:
-                self._ser.close()
-            finally:
-                self._ser = None
+        ser, self._ser = self._ser, None
+        if ser is not None:
+            ser.close()
+
+    def _port(self):
+        """The open port, read once per use: :meth:`cancel` may close it
+        from another thread at any moment, and a closed port reads as an
+        ``OSError`` (a lost link), never as ``None``."""
+        ser = self._ser
+        if ser is None:
+            raise OSError(f"serial port {self.port!r} is closed")
+        return ser
 
     def _write_bytes(self, data: bytes) -> None:
-        self._ser.write(data)
-        self._ser.flush()
+        ser = self._port()
+        ser.write(data)
+        ser.flush()
 
     def _read_bytes(self, count: int) -> bytes:
         """Read *count* bytes, for as long as they keep arriving.
@@ -2689,18 +2716,20 @@ class SerialTapTransport(TapBridgeTransport):
         returns what arrived within it, reading continues while anything did,
         and a read that brings nothing ends the reply.
         """
+        ser = self._port()
         data = bytearray()
         while len(data) < count:
-            chunk = self._ser.read(count - len(data))
+            chunk = ser.read(count - len(data))
             if not chunk:
                 break
             data += chunk
         return bytes(data)
 
     def _discard_input(self) -> int:
-        pending = self._ser.in_waiting
+        ser = self._port()
+        pending = ser.in_waiting
         if pending:
-            self._ser.read(pending)
+            ser.read(pending)
         return pending
 
     def _wire_time_s(self, nbytes: int) -> float:
