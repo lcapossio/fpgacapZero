@@ -27,9 +27,13 @@ controllers directly — there is no benefit to going through RPC.
 ## Protocol
 
 **Transport**: line-delimited JSON over the server process's
-stdin and stdout.  One JSON object per line on each side.  No
-framing, no length prefix, no message ID — the protocol is
-strictly request/response, in order.
+stdin and stdout.  One JSON object per line on each side, with no
+framing or length prefix.  Requests run one at a time, in order,
+and each gets one reply.  The exception is [`cancel`](#cancel): it
+is answered at once, while the request it interrupts is still
+running, so its reply can come first.  A request may carry a
+`request_id` (any JSON value); its reply echoes it, which is how a
+client matches replies when a cancel is in play.
 
 **Request**:
 ```json
@@ -38,17 +42,19 @@ strictly request/response, in order.
 
 **Response on success**:
 ```json
-{"ok":true,"schema_version":"1.1"}
+{"ok":true,"schema_version":"1.2"}
 ```
 
 **Response on failure**:
 ```json
-{"ok":false,"schema_version":"1.1","error":"...","type":"RuntimeError"}
+{"ok":false,"schema_version":"1.2","error":"...","type":"RuntimeError","trace":"RuntimeError: ..."}
 ```
 
 Every response carries `"schema_version"` so a stale client can
 detect when it's talking to a newer server and update its
-parser.  The current schema version is `"1.1"`.
+parser.  The current schema version is `"1.2"`.  Every response
+also carries `"session_epoch"`, a number that goes up with each
+`connect` and `close`; see [`cancel`](#cancel).
 
 ## Spawning the server
 
@@ -182,7 +188,7 @@ or on the analyzer's chain — shares that transport and works.
 The chain carrying the burst reader's data DR is also excluded from every core
 sweep: it is a streaming interface, not a register one.
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1, "instance": null}`
+Response: `{"ok": true, "schema_version": "1.2", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1, "instance": null}`
 
 `transport_kind` is `"jtag"` for a link that reaches the fabric through a real
 TAP, or `"bytestream"` for one that addresses chains directly by index. IR-table
@@ -278,7 +284,7 @@ Response (empty `boards` means nothing compatible was reachable):
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "backend": "openocd",
   "boards": [
     {
@@ -320,7 +326,7 @@ empty chain) is refused and the session stays where it was:
 {"cmd": "rebind", "instance": 1}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "instance": null, "probe": { ... }}`
+Response: `{"ok": true, "schema_version": "1.2", "chain": 2, "instance": null, "probe": { ... }}`
 — `instance` is the slot the session bound (`null` for a core reached
 directly, even if the request named a slot), and `probe` is the newly-bound
 core's identity (same shape as [`probe`](#probe)).
@@ -332,6 +338,39 @@ Releases the transport.
 ```json
 {"cmd": "close"}
 ```
+
+In the web interface, a `close` sent while another command holds the
+session (a hung connect, a long capture) interrupts that command as
+[`cancel`](#cancel) does, then closes.
+
+#### `cancel`
+
+Interrupts the command in flight, without waiting for it.  Sent while
+another request is running, it is answered at once (on stdin, on a
+WebSocket and over HTTP alike).
+
+```json
+{"cmd": "cancel", "target": "c1"}
+```
+
+- `target` (optional): the `request_id` of the request to interrupt.
+  Running, it is interrupted; not started yet (queued behind another),
+  it is refused with `RequestCancelled` when its turn comes; finished,
+  nothing happens.
+- `session_epoch` (optional): only act if this is still the session's
+  epoch, so a late cancel cannot end a newer session.
+- With neither, it interrupts whatever session command is running, and
+  does nothing when the server is idle.
+
+Response: `{"ok": true, "schema_version": "1.2", "cancelled": true}`,
+or `"cancelled": false` with a `reason` (`"idle"`, `"request not
+running"`, `"session ended"`).
+
+Interrupting closes the session's transports, which is what makes a
+blocked read return: the interrupted request fails (often with
+`ConnectionError`), and the client reconnects.  The cancel itself scans
+nothing on the JTAG chain, so a core-manager `MGR_OWNER` claim the
+session held stays set.
 
 #### `scan_targets`
 
@@ -420,7 +459,7 @@ Response:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "probe": {
     "version_major": 0,
     "version_minor": 5,
@@ -595,7 +634,7 @@ Response (format = "json"):
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "format": "json",
   "overflow": false,
   "sample_count": 25,
@@ -632,7 +671,7 @@ unbounded timeouts could starve all clients.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3}`
+Response: `{"ok": true, "schema_version": "1.2", "in_w": 8, "out_w": 8, "chain": 3}`
 
 With `"instance"` (an EIO in a core-manager slot) the EIO shares the ELA
 session's transport, so the two keep one lock and one cache of the hub's
@@ -675,7 +714,7 @@ Response: as `eio_connect`, plus `"discovered": true` and the `base_addr` found.
 {"cmd": "eio_read"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "value": 167, "value_hex": "0xa7"}`.
+Response: `{"ok": true, "schema_version": "1.2", "value": 167, "value_hex": "0xa7"}`.
 `value_hex` carries the full width losslessly for EIO wider than a JS-safe
 integer (53 bits); `value` is the same value as a JSON number.
 
@@ -707,7 +746,7 @@ Present → the bridge identity plus the `chain` it was found on; absent →
 `{"present": false}`:
 ```json
 {
-  "ok": true, "schema_version": "1.1",
+  "ok": true, "schema_version": "1.2",
   "present": true, "chain": 4,
   "bridge_id": 19032, "core_id": 19032,
   "legacy_id": false, "legacy_raw_id": null,
@@ -735,7 +774,7 @@ Response includes the cached `fifo_depth`:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "bridge_id": 19032,
   "core_id": 19032,
   "legacy_id": false,
@@ -763,7 +802,7 @@ Response includes the cached `fifo_depth`:
 
 `addr` accepts a hex string (`"0x..."`) or a decimal int.
 
-Response: `{"ok": true, "schema_version": "1.1", "value": "0xDEADBEEF"}`
+Response: `{"ok": true, "schema_version": "1.2", "value": "0xDEADBEEF"}`
 
 #### `axi_write`
 
@@ -776,7 +815,7 @@ Response: `{"ok": true, "schema_version": "1.1", "value": "0xDEADBEEF"}`
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "resp": 0}`
+Response: `{"ok": true, "schema_version": "1.2", "resp": 0}`
 
 `resp` is the AXI response code: 0 = OKAY, 2 = SLVERR, 3 = DECERR.
 A non-OKAY response raises `AXIError` server-side, which becomes
@@ -797,7 +836,7 @@ Response:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "words": ["0x12345678", "0x00000001", "0x00000002", ...]
 }
 ```
@@ -813,7 +852,7 @@ Response:
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "count": 4}`
+Response: `{"ok": true, "schema_version": "1.2", "count": 4}`
 
 ### EJTAG-UART
 
@@ -850,7 +889,7 @@ print(base64.b64encode(b"Hello\n").decode())
 {"cmd": "uart_send", "data": "SGVsbG8K"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "bytes_sent": 6}`
+Response: `{"ok": true, "schema_version": "1.2", "bytes_sent": 6}`
 
 #### `uart_recv`
 
@@ -862,7 +901,7 @@ Response (`data` is base64-encoded):
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "data": "SGVsbG8gd29ybGQK",
   "bytes_received": 12
 }
@@ -878,7 +917,7 @@ Response: returns the same dict as `EjtagUartController.status()`:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "rx_ready": true,
   "tx_full": false,
   "rx_overflow": false,
@@ -890,7 +929,8 @@ Response: returns the same dict as `EjtagUartController.status()`:
 ## Schema versioning
 
 Every response carries `"schema_version"`.  The current version is
-`"1.1"`.  When the schema changes in a backwards-incompatible way
+`"1.2"` (1.2 added `cancel`, `request_id` and `session_epoch`).  When
+the schema changes in a backwards-incompatible way
 (adding required fields, removing keys, changing semantics) the
 major number bumps; backwards-compatible additions bump the minor.
 
@@ -907,17 +947,20 @@ On any exception, the response shape is:
 ```json
 {
   "ok": false,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "error": "burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH",
-  "type": "ValueError"
+  "type": "ValueError",
+  "trace": "ValueError: burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH"
 }
 ```
 
 `type` is the Python exception class name, useful for surfacing
-meaningful errors back to the calling language.  The reply carries no
-traceback, so no source path reaches a client; the server logs it at
-DEBUG on the `fcapz.rpc` logger (the web interface logs it with its
-warning on `fcapz.web`).
+meaningful errors back to the calling language.  `trace` is just
+`Type: message`; the reply carries no traceback, so no source path
+reaches a client.  The server logs the traceback at DEBUG on the
+`fcapz.rpc` logger (the web interface logs it with its warning on
+`fcapz.web`).  A request that carried a `request_id` gets it back in
+its error reply too.
 
 Common error types you should expect:
 
@@ -990,9 +1033,10 @@ close $rpc
 - **No streaming**.  `uart_recv` returns a complete buffer; for
   continuous monitoring use `uart_recv` in a loop.  A future
   schema version may add streaming subscriptions.
-- **No cancellation mid-call**.  If you send `capture` and the
-  trigger never fires, the only way to recover is to wait for the
-  timeout or kill the child process.
+- **Cancelling ends the session**.  [`cancel`](#cancel) interrupts a
+  call that never returns (a `capture` whose trigger never fires, a
+  connect to a hung probe), but it closes the transports to do it, so
+  the client reconnects afterwards.
 - **stderr is not parsed**.  Anything the server writes to stderr
   (Python warnings, traceback context) is informational only —
   the client should not depend on it.

@@ -912,7 +912,7 @@ class RpcTests(unittest.TestCase):
 
         connect_resp = server.handle({"cmd": "connect"})
         self.assertTrue(connect_resp["ok"])
-        self.assertEqual(connect_resp["schema_version"], "1.1")
+        self.assertEqual(connect_resp["schema_version"], "1.2")
 
         csv_resp = server.handle(
             {
@@ -1210,8 +1210,9 @@ class MakeTransportTests(unittest.TestCase):
 
 class RpcMainErrorEnvelopeTests(unittest.TestCase):
     def test_error_reply_carries_no_traceback(self):
-        # BUG-298: the stdin server's error reply has no source path; the
-        # traceback is logged at DEBUG on fcapz.rpc instead.
+        # BUG-298: the stdin server's error reply has no source path (trace
+        # is just "Type: message"); the traceback is logged at DEBUG on
+        # fcapz.rpc instead.
         from unittest import mock
 
         from fcapz import rpc
@@ -1232,7 +1233,8 @@ class RpcMainErrorEnvelopeTests(unittest.TestCase):
         self.assertEqual(len(replies), 2)
         for reply in replies:
             self.assertIs(reply["ok"], False)
-            self.assertNotIn("trace", reply)
+            self.assertEqual(reply["trace"], f"{reply['type']}: {reply['error']}")
+            self.assertNotIn("File", reply["trace"])
         self.assertEqual(replies[0]["type"], "JSONDecodeError")
         self.assertTrue(any("Traceback" in line for line in logs.output))
 

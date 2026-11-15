@@ -17,6 +17,7 @@ capture waits for its trigger.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import secrets
@@ -306,20 +307,43 @@ def create_app(
             await websocket.close(code=1008)
             return
         await websocket.accept()
+        # Requests run one at a time, in order, on a worker task, so this loop
+        # keeps reading: a ``cancel`` is answered at once and interrupts the
+        # request in flight.  Replies can then arrive out of order; clients
+        # match them by ``request_id``.
+        send_lock = asyncio.Lock()
+        pending: asyncio.Queue = asyncio.Queue()
+        serial_ok = _serial_allowed(client_host, token)
+
+        async def send(resp: dict) -> None:
+            async with send_lock:
+                await websocket.send_json(resp)
+
+        async def run(req: dict) -> None:
+            resp = await run_in_threadpool(gateway.call, req, serial_allowed=serial_ok)
+            await send(resp)
+
+        async def worker() -> None:
+            while True:
+                req = await pending.get()
+                await run(req)
+
+        worker_task = asyncio.create_task(worker())
+        side_tasks: set = set()
         try:
             while True:
                 msg = await websocket.receive_text()
                 try:
                     req = json.loads(msg)
                 except json.JSONDecodeError as exc:
-                    await websocket.send_json(
+                    await send(
                         {"ok": False, "error": f"invalid JSON: {exc}", "type": "JSONDecodeError"}
                     )
                     continue
                 if not isinstance(req, dict):
                     # Valid JSON but not a request object (e.g. 42, "probe",
                     # [1]) — answer in-band instead of crashing the connection.
-                    await websocket.send_json(
+                    await send(
                         {
                             "ok": False,
                             "error": "request must be a JSON object {\"cmd\": ...}",
@@ -329,16 +353,22 @@ def create_app(
                     continue
                 blocked = _openocd_guard(req, client_host)
                 if blocked is not None:
-                    await websocket.send_json(blocked)
+                    await send(blocked)
                     continue
-                resp = await run_in_threadpool(
-                    gateway.call,
-                    req,
-                    serial_allowed=_serial_allowed(client_host, token),
-                )
-                await websocket.send_json(resp)
+                if req.get("cmd") == "cancel":
+                    task = asyncio.create_task(run(req))
+                    side_tasks.add(task)
+                    task.add_done_callback(side_tasks.discard)
+                else:
+                    pending.put_nowait(req)
         except WebSocketDisconnect:
             return
+        finally:
+            # A request already handed to the thread pool runs to its end, as
+            # before; nothing queued behind it runs for a client that left.
+            worker_task.cancel()
+            for task in side_tasks:
+                task.cancel()
 
     # Vendored Surfer waveform viewer (WASM) at /surfer — mounted before "/" so
     # it isn't shadowed by the SPA catch-all.

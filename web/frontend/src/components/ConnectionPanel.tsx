@@ -39,6 +39,9 @@ const AUTO_DISCOVER_TIMEOUT = 40000;
 // retry is much faster.
 const HW_CONNECT_TIMEOUT = 15000;
 const HW_SCAN_TIMEOUT = 12; // xsdb subprocess budget (seconds); < the 15s client cap
+// Cancel during connect/probe interrupts the command on the server too, so a
+// hung connect does not keep holding the server's command lock.
+const SERVER_CANCEL = { serverCancel: true };
 
 const VENDOR_NAMES: Record<string, string> = {
   gowin: "Gowin",
@@ -254,7 +257,7 @@ export function ConnectionPanel({
     }
     // hw_server (XSDB) can take tens of seconds to attach; OpenOCD is instant.
     const t = backend === "hw_server" ? HW_CONNECT_TIMEOUT : CONNECT_TIMEOUT;
-    const c = await rpc("connect", reqParams, t, sig());
+    const c = await rpc("connect", reqParams, t, sig(), SERVER_CANCEL);
     const params: ConnectionParams = {
       backend,
       host,
@@ -263,7 +266,7 @@ export function ConnectionPanel({
       ir_table: typeof c.ir_table === "string" ? c.ir_table : "",
       chain: typeof c.chain === "number" ? c.chain : 1,
     };
-    const r = await rpc("probe", {}, t, sig());
+    const r = await rpc("probe", {}, t, sig(), SERVER_CANCEL);
     setConnTarget({
       backend,
       host,
@@ -292,12 +295,12 @@ export function ConnectionPanel({
       tap: b.tap,
       ir_table: b.ir_table,
     };
-    const c = await rpc("connect", reqParams, CONNECT_TIMEOUT, sig());
+    const c = await rpc("connect", reqParams, CONNECT_TIMEOUT, sig(), SERVER_CANCEL);
     const params: ConnectionParams = {
       ...reqParams,
       chain: typeof c.chain === "number" ? c.chain : 1,
     };
-    const r = await rpc("probe", {}, CONNECT_TIMEOUT, sig());
+    const r = await rpc("probe", {}, CONNECT_TIMEOUT, sig(), SERVER_CANCEL);
     setConnTarget({
       backend: b.backend,
       host: b.host,

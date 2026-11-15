@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **RPC and web: a `cancel` command.** `{"cmd": "cancel", "target":
+  <request_id>}` interrupts a command in flight without waiting for it:
+  the stdin server and each WebSocket now keep reading while a request
+  runs, and the web gateway answers `cancel` without its command lock. A
+  request cancelled before it starts is refused when its turn comes, and a
+  cancel for an ended session (`session_epoch`) or an idle server does
+  nothing. Interrupting ends the session; the client reconnects. In the web
+  interface, Cancel during a connect now interrupts it on the server, and
+  Disconnect while a command runs interrupts that command first. Replies
+  echo the request's `request_id` and carry `session_epoch`; the RPC
+  schema is now 1.2.
+
 - **Arty A7: an open-source build with openXC7.**
   `examples/arty_a7/openxc7/build_openxc7.py` builds the VexRiscv reference
   design with yosys, nextpnr-xilinx and prjxray instead of Vivado. Its
@@ -91,8 +103,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **RPC and web: error replies no longer carry a traceback.** The `trace`
   field held one frame with a local source path, sent to every client
-  (including remote ones with `fcapz-web --host 0.0.0.0`). Replies keep
-  `error` and `type`; the traceback is logged instead (DEBUG on
+  (including remote ones with `fcapz-web --host 0.0.0.0`). It now holds
+  only `Type: message`; the traceback is logged instead (DEBUG on
   `fcapz.rpc`, with the warning on `fcapz.web`).
 
 ### Fixed

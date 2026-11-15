@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from ..rpc import _SCHEMA_VERSION, RpcServer
+from ..rpc import _SCHEMA_VERSION, RpcServer, error_envelope
 
 _log = logging.getLogger("fcapz.web")
 
@@ -79,23 +79,44 @@ class RpcGateway:
         shape ``fcapz.rpc.main`` emits — not raised, so every transport sees the
         same protocol.
 
+        ``cancel`` runs without the lock, and a ``close`` that finds it held
+        interrupts the command holding it first (see :meth:`RpcServer.cancel`).
+
         ``serial_allowed=False`` refuses anything that reaches a serial port:
         a request that names one, and -- checked under the lock, against the
         session it would act on -- every session command while the open
         session is a byte-stream link.  A ``capture`` or ``close`` carries no
         backend field, so the request alone cannot say.
         """
-        if req.get("cmd") in self._LOCK_FREE_CMDS:
+        cmd = req.get("cmd")
+        if cmd == "cancel":
+            # Never behind the lock: the call it interrupts holds it.  Checked
+            # like a session command, since it ends the open session.
+            if not serial_allowed and self._server.session_transport_kind() == "bytestream":
+                return _serial_denied()
+            return self._dispatch(req)
+        if cmd in self._LOCK_FREE_CMDS:
             if not serial_allowed and _names_serial(req):
                 return _serial_denied()
             return self._dispatch(req)
-        with self._lock:
+        if cmd != "close":
+            self._lock.acquire()
+        elif not self._lock.acquire(blocking=False):
+            # Disconnect while a command holds the session (a hung connect, a
+            # long capture): interrupt it, then close once it has let go,
+            # instead of waiting out its timeout.
+            if serial_allowed or self._server.session_transport_kind() != "bytestream":
+                self._server.cancel({"cmd": "cancel"})
+            self._lock.acquire()
+        try:
             if not serial_allowed and (
                 _names_serial(req)
                 or self._server.session_transport_kind() == "bytestream"
             ):
                 return _serial_denied()
             return self._dispatch(req)
+        finally:
+            self._lock.release()
 
     def _dispatch(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
@@ -106,12 +127,7 @@ class RpcGateway:
             # The traceback goes to the log only (the Log tab shows just the
             # message): a reply carries no source path to a remote client.
             _log.warning("%s failed: %s", cmd, exc, exc_info=True)
-            return {
-                "ok": False,
-                "schema_version": _SCHEMA_VERSION,
-                "error": str(exc),
-                "type": exc.__class__.__name__,
-            }
+            return error_envelope(exc, req, log=False)
         # Surface command activity (with timing) in the Log tab. The elapsed ms
         # on capture/capture_wait is exactly the readback time the user is
         # chasing — fast burst vs slow fallback shows up here directly.
