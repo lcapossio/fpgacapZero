@@ -880,6 +880,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         #: cancelled.
         self._cancel_count = 0
         self._session_count = 0
+        #: Makes each ``_cancel_count`` bump one read-modify-write: two
+        #: unlocked bumps could store a stale count, erasing a cancel.
+        #: Held only for the bump, never across USB I/O.
+        self._cancel_count_lock = threading.Lock()
         #: The session count a thread's top-level call started under (see
         #: :func:`_in_one_session`).
         self._call_local = threading.local()
@@ -1103,7 +1107,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         taken by the next transport on the channel.
         """
         if retire:
-            self._cancel_count += 1
+            self._bump_cancel_count()
         ch = self._channel
         if ch is None:
             self._handle = None
@@ -1127,7 +1131,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         about a quarter second of TCK and closes the channel.  This
         transport then refuses I/O until :meth:`close` or :meth:`connect`.
         """
-        self._cancel_count += 1
+        self._bump_cancel_count()
+
+    def _bump_cancel_count(self) -> None:
+        with self._cancel_count_lock:
+            self._cancel_count += 1
 
     @contextlib.contextmanager
     def _new_session(self):

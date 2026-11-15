@@ -979,6 +979,25 @@ class ProgramTests(_FtdiTestCase):
         # connect() that read the count after the cancel still works.
         self.assertEqual(t._cancel_count, snapshot[0])
 
+    def test_cancel_count_bumps_are_not_lost(self):
+        # BUG-295: a bump read-modify-writes under its lock, so one racing
+        # another (cancel() against the detach of a reconnect) waits for it
+        # instead of storing a stale count that erases a cancel.
+        t = self._transport()
+        before = t._cancel_count
+        t._cancel_count_lock.acquire()
+        try:
+            worker = threading.Thread(target=t.cancel)
+            worker.start()
+            worker.join(0.2)
+            self.assertTrue(worker.is_alive())  # waits for the bump in progress
+            t._cancel_count += 1  # the bump holding the lock
+        finally:
+            t._cancel_count_lock.release()
+        worker.join(2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(t._cancel_count, before + 2)
+
     def test_cancel_stops_programming_without_waiting(self):
         t = self._transport()
         real = t._idle
