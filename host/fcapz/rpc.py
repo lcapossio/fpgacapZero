@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import collections
 import json
 import logging
 import queue
@@ -168,11 +169,14 @@ class RpcServer:
         # something; a call started at another count registers no new
         # transport.  _in_flight maps each running request_id to how many
         # calls carry it, _busy counts running session commands, and
-        # _cancelled_ids remembers requests cancelled before they started.
+        # _cancelled_ids remembers requests cancelled before they started,
+        # _finished_ids the last ones to finish (a late cancel for one of
+        # those is not remembered).
         self._cancel_gen = 0
         self._in_flight: Dict[Any, int] = {}
         self._busy = 0
         self._cancelled_ids: list[Any] = []
+        self._finished_ids: collections.deque = collections.deque(maxlen=_CANCELLED_IDS_KEPT)
         # Bumped by every connect and close: a cancel naming an older epoch
         # is for a session that is gone, and does nothing.
         self._session_epoch = 0
@@ -311,7 +315,11 @@ class RpcServer:
         every ``cancel`` is documented idempotent. One failure must not stop
         the others, so each is guarded.
         """
-        for transport in self._live_transports():
+        self._cancel_each(self._live_transports())
+
+    @staticmethod
+    def _cancel_each(transports: list[Transport]) -> None:
+        for transport in transports:
             try:
                 transport.cancel()
             except Exception:
@@ -1139,6 +1147,15 @@ class RpcServer:
             return None
         return getattr(self._analyzer.transport, "transport_kind", "jtag")
 
+    def session_touches_bytestream(self) -> bool:
+        """True while the open session, or a transport a running command is
+        still opening, is a byte-stream link: a cancel would end it."""
+        if self.session_transport_kind() == "bytestream":
+            return True
+        return any(
+            getattr(t, "transport_kind", None) == "bytestream" for t in self._opening
+        )
+
     @property
     def session_epoch(self) -> int:
         """Bumped by every ``connect`` and ``close``."""
@@ -1155,28 +1172,39 @@ class RpcServer:
         session command is running, and does nothing when the server is
         idle.  An interrupted session is gone: the caller reconnects.
         """
-        request_id = req.get("target")
+        request_id = _check_request_id(req.get("target"), "target")
         epoch = req.get("session_epoch")
+        targets: list[Transport] = []
         with self._opening_lock:
             if epoch is not None and epoch != self._session_epoch:
                 reason = "session ended"
             elif request_id is not None and request_id not in self._in_flight:
-                self._cancelled_ids.append(request_id)
-                del self._cancelled_ids[:-_CANCELLED_IDS_KEPT]
-                reason = "request not running"
+                if request_id in self._finished_ids:
+                    reason = "request finished"
+                else:
+                    if request_id not in self._cancelled_ids:
+                        self._cancelled_ids.append(request_id)
+                        del self._cancelled_ids[:-_CANCELLED_IDS_KEPT]
+                    reason = "request not running"
             elif request_id is None and self._busy == 0:
                 reason = "idle"
             else:
                 reason = None
                 self._cancel_gen += 1
+                # Snapshot in the same locked step as the checks: no new
+                # command can start (it needs this lock) before the snapshot,
+                # so a cancel never reaches a session opened after it.
+                targets = self._live_transports()
         if reason is not None:
             return self._ok(cancelled=False, reason=reason)
-        self.cancel_active()
+        self._cancel_each(targets)
         return self._ok(cancelled=True)
 
     def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
-        request_id = req.get("request_id")
+        if cmd is not None and not isinstance(cmd, str):
+            raise ValueError(f"unknown cmd: {cmd!r}")
+        request_id = _check_request_id(req.get("request_id"), "request_id")
         if cmd == "cancel":
             # Before any bookkeeping or the per-command cache invalidation:
             # a cancel must not touch the transports it interrupts.
@@ -1207,7 +1235,19 @@ class RpcServer:
         self._invocation.opened = opened
         self._invocation.cancel_gen = gen
         try:
-            return self._handle(req)
+            resp = self._handle(req)
+            if session:
+                with self._opening_lock:
+                    late = gen != self._cancel_gen
+                if late:
+                    # A cancel came while this ran, but may have found a
+                    # transport not yet connected (cancelling one before its
+                    # connect does not stop that connect).  Now that the
+                    # command is done, every transport it opened is
+                    # reachable: end the session as the cancel promised.
+                    self.cancel_active()
+                    raise RequestCancelled("request cancelled; reconnect")
+            return resp
         finally:
             self._invocation.opened = outer
             self._invocation.cancel_gen = outer_gen
@@ -1218,6 +1258,7 @@ class RpcServer:
                         self._in_flight[request_id] = left
                     else:
                         self._in_flight.pop(request_id, None)
+                        self._finished_ids.append(request_id)
                 if session:
                     self._busy -= 1
             # This call's transports are installed in a session field or
@@ -1843,7 +1884,20 @@ class RpcServer:
         raise ValueError(f"unknown cmd: {cmd}")
 
 
-def error_envelope(exc: BaseException, req: Any = None, *, log: bool = True) -> Dict[str, Any]:
+def _check_request_id(value: Any, field: str) -> Any:
+    """A request id is a string or a number (``null`` means none)."""
+    if value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool)):
+        return value
+    raise ValueError(f"{field} must be a string or a number")
+
+
+def error_envelope(
+    exc: BaseException,
+    req: Any = None,
+    *,
+    log: bool = True,
+    session_epoch: Optional[int] = None,
+) -> Dict[str, Any]:
     """The reply for a request that raised *exc*.
 
     The traceback is logged (DEBUG on ``fcapz.rpc``, unless *log* is false
@@ -1863,6 +1917,8 @@ def error_envelope(exc: BaseException, req: Any = None, *, log: bool = True) -> 
     }
     if isinstance(req, dict) and req.get("request_id") is not None:
         resp["request_id"] = req["request_id"]
+    if session_epoch is not None:
+        resp["session_epoch"] = session_epoch
     return resp
 
 
@@ -1877,19 +1933,20 @@ def main() -> int:
     server = RpcServer()
     out_lock = threading.Lock()
     work: "queue.Queue[Any]" = queue.Queue()
+    stop = object()  # not None: a "null" line is a request, answered in-band
 
     def reply(req: Any, run) -> None:
         try:
             resp = run()
         except Exception as exc:
-            resp = error_envelope(exc, req)
+            resp = error_envelope(exc, req, session_epoch=server.session_epoch)
         with out_lock:
             print(json.dumps(resp), flush=True)
 
     def worker() -> None:
         while True:
             req = work.get()
-            if req is None:
+            if req is stop:
                 return
             reply(req, lambda: server.handle(req))
 
@@ -1913,7 +1970,7 @@ def main() -> int:
             else:
                 work.put(req)
     finally:
-        work.put(None)
+        work.put(stop)
         thread.join()
     return 0
 

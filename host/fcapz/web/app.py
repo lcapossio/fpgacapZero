@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import secrets
 from pathlib import Path
 from typing import Iterable, Optional
@@ -40,9 +41,11 @@ from starlette.concurrency import run_in_threadpool
 
 from .._version import __version__
 from ..openocd_launcher import OpenOcdLauncher
-from ..rpc import _SCHEMA_VERSION, RpcServer
+from ..rpc import _SCHEMA_VERSION, RpcServer, error_envelope
 from .gateway import RpcGateway
 from .logbuffer import install_log_capture
+
+_log = logging.getLogger("fcapz.web")
 
 
 def _default_surfer_dir() -> str:
@@ -284,9 +287,16 @@ def create_app(
         blocked = _openocd_guard(req, client_host)
         if blocked is not None:
             return blocked
-        return await run_in_threadpool(
-            gateway.call, req, serial_allowed=_serial_allowed(client_host, token)
-        )
+        serial_ok = _serial_allowed(client_host, token)
+        cmd = req.get("cmd")
+        if cmd == "cancel":
+            # On the event loop, not the thread pool: a cancel does no I/O and
+            # never waits, and the pool may be full of calls queued behind
+            # the very command it interrupts.
+            return gateway.call(req, serial_allowed=serial_ok)
+        if cmd == "close":
+            gateway.interrupt_if_busy(serial_allowed=serial_ok)
+        return await run_in_threadpool(gateway.call, req, serial_allowed=serial_ok)
 
     @app.websocket("/api/ws")
     async def ws(websocket: WebSocket):
@@ -309,8 +319,9 @@ def create_app(
         await websocket.accept()
         # Requests run one at a time, in order, on a worker task, so this loop
         # keeps reading: a ``cancel`` is answered at once and interrupts the
-        # request in flight.  Replies can then arrive out of order; clients
-        # match them by ``request_id``.
+        # request in flight, and a ``close`` interrupts it before queueing.
+        # Replies can then arrive out of order; clients match them by
+        # ``request_id``.
         send_lock = asyncio.Lock()
         pending: asyncio.Queue = asyncio.Queue()
         serial_ok = _serial_allowed(client_host, token)
@@ -319,17 +330,19 @@ def create_app(
             async with send_lock:
                 await websocket.send_json(resp)
 
-        async def run(req: dict) -> None:
-            resp = await run_in_threadpool(gateway.call, req, serial_allowed=serial_ok)
-            await send(resp)
-
         async def worker() -> None:
             while True:
                 req = await pending.get()
-                await run(req)
+                try:
+                    resp = await run_in_threadpool(
+                        gateway.call, req, serial_allowed=serial_ok
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep serving this client
+                    _log.warning("websocket request failed", exc_info=True)
+                    resp = error_envelope(exc, req, log=False)
+                await send(resp)
 
         worker_task = asyncio.create_task(worker())
-        side_tasks: set = set()
         try:
             while True:
                 msg = await websocket.receive_text()
@@ -355,20 +368,20 @@ def create_app(
                 if blocked is not None:
                     await send(blocked)
                     continue
-                if req.get("cmd") == "cancel":
-                    task = asyncio.create_task(run(req))
-                    side_tasks.add(task)
-                    task.add_done_callback(side_tasks.discard)
-                else:
-                    pending.put_nowait(req)
+                cmd = req.get("cmd")
+                if cmd == "cancel":
+                    # On the loop itself: no I/O, never waits (see /api/rpc).
+                    await send(gateway.call(req, serial_allowed=serial_ok))
+                    continue
+                if cmd == "close":
+                    gateway.interrupt_if_busy(serial_allowed=serial_ok)
+                pending.put_nowait(req)
         except WebSocketDisconnect:
             return
         finally:
             # A request already handed to the thread pool runs to its end, as
             # before; nothing queued behind it runs for a client that left.
             worker_task.cancel()
-            for task in side_tasks:
-                task.cancel()
 
     # Vendored Surfer waveform viewer (WASM) at /surfer — mounted before "/" so
     # it isn't shadowed by the SPA catch-all.

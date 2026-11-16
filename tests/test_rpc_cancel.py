@@ -112,9 +112,72 @@ class RpcServerCancelTests(unittest.TestCase):
         server.handle({**_CONNECT, "request_id": "c1"})
         resp = server.handle({"cmd": "cancel", "target": "c1"})
         self.assertIs(resp["cancelled"], False)
-        self.assertEqual(resp["reason"], "request not running")
-        # The session it would have ended is untouched.
+        self.assertEqual(resp["reason"], "request finished")
+        # The session it would have ended is untouched, and the id is not
+        # remembered: reusing it runs.
         self.assertIs(server.handle({"cmd": "probe"})["ok"], True)
+        self.assertIs(server.handle({**_CONNECT, "request_id": "c1"})["ok"], True)
+
+    def test_two_cancels_for_a_queued_request_are_remembered_once(self):
+        server = self._server(BlockingTransport(block=False))
+        server.handle({"cmd": "cancel", "target": "q"})
+        server.handle({"cmd": "cancel", "target": "q"})
+        with self.assertRaises(RequestCancelled):
+            server.handle({**_CONNECT, "request_id": "q"})
+        self.assertIs(server.handle({**_CONNECT, "request_id": "q"})["ok"], True)
+
+    def test_cancel_snapshots_the_transports_under_the_lock(self):
+        """No command can start between the checks and the snapshot, so a
+        cancel never reaches a session opened after it."""
+        transport = BlockingTransport()
+        server = self._server(transport)
+        held = []
+        live = server._live_transports
+
+        def spy():
+            held.append(server._opening_lock.locked())
+            return live()
+
+        server._live_transports = spy  # type: ignore[method-assign]
+        thread, _ = _in_thread(server.handle, _CONNECT)
+        self.assertTrue(transport.entered.wait(5))
+        held.clear()
+        server.handle({"cmd": "cancel"})
+        thread.join(5)
+        self.assertTrue(held)
+        self.assertIs(held[0], True)
+
+    def test_a_cancel_the_transport_ignored_still_ends_the_session(self):
+        """A cancel that reaches a transport before its connect does not stop
+        that connect; the command then fails and the session is cancelled."""
+        go_on = threading.Event()
+
+        class Unstoppable(BlockingTransport):
+            calls = 0
+
+            def connect(self) -> None:
+                self.entered.set()
+                go_on.wait(5)
+
+            def cancel(self) -> None:
+                Unstoppable.calls += 1
+
+        transport = Unstoppable()
+        server = self._server(transport)
+        thread, box = _in_thread(server.handle, _CONNECT)
+        self.assertTrue(transport.entered.wait(5))
+        self.assertIs(server.handle({"cmd": "cancel"})["cancelled"], True)
+        go_on.set()
+        thread.join(5)
+        self.assertIsInstance(box.get("error"), RequestCancelled)
+        self.assertGreaterEqual(Unstoppable.calls, 2)
+
+    def test_malformed_cmd_and_request_id_are_refused(self):
+        server = self._server(BlockingTransport(block=False))
+        for req in ({"cmd": []}, {"cmd": "probe", "request_id": [1]},
+                    {"cmd": "cancel", "target": {"id": 1}}):
+            with self.assertRaises(ValueError):
+                server.handle(req)
 
     def test_a_request_cancelled_before_it_starts_is_refused(self):
         server = self._server(BlockingTransport(block=False))
@@ -189,6 +252,24 @@ class LineProtocolCancelTests(unittest.TestCase):
         self.assertIs(replies["x1"]["cancelled"], True)
         self.assertIs(replies["c1"]["ok"], False)
         self.assertEqual(replies["c1"]["type"], "ConnectionError")
+        self.assertIn("session_epoch", replies["c1"])
+
+    def test_a_null_line_is_answered_and_does_not_stop_the_worker(self):
+        feed = iter(["null", json.dumps({"cmd": "cancel", "request_id": "x"}),
+                     json.dumps({"cmd": "close", "request_id": "after"})])
+
+        def fake_input():
+            try:
+                return next(feed)
+            except StopIteration:
+                raise EOFError from None
+
+        out = io.StringIO()
+        with mock.patch("builtins.input", fake_input), contextlib.redirect_stdout(out):
+            self.assertEqual(rpc.main(), 0)
+        replies = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(len(replies), 3)
+        self.assertTrue(any(r.get("request_id") == "after" for r in replies))
 
 
 @unittest.skipIf(RpcGateway is None, "needs the [web] extra (fastapi)")
@@ -221,6 +302,21 @@ class GatewayCancelTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertIs(resp["ok"], True)
         self.assertIs(box["value"]["ok"], False)
+
+    def test_remote_cancel_cannot_end_a_serial_connect_still_opening(self):
+        transport = BlockingTransport()
+        transport.transport_kind = "bytestream"
+        gateway = self._gateway(transport)
+        thread, box = _in_thread(gateway.call, {**_CONNECT, "request_id": "c1"})
+        self.assertTrue(transport.entered.wait(5))
+        resp = gateway.call({"cmd": "cancel", "request_id": "r"}, serial_allowed=False)
+        self.assertEqual(resp["type"], "PermissionError")
+        self.assertEqual(resp["request_id"], "r")
+        self.assertIn("session_epoch", resp)
+        self.assertFalse(transport.cancelled.is_set())
+        gateway.call({"cmd": "cancel"})  # the local client may
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

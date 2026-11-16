@@ -31,8 +31,8 @@ def _names_serial(req: Dict[str, Any]) -> bool:
     return req.get("cmd") == "list_serial_ports" or req.get("backend") == "serial"
 
 
-def _serial_denied() -> Dict[str, Any]:
-    return {
+def _serial_denied(req: Dict[str, Any], session_epoch: int) -> Dict[str, Any]:
+    resp: Dict[str, Any] = {
         "ok": False,
         "schema_version": _SCHEMA_VERSION,
         "error": (
@@ -40,7 +40,11 @@ def _serial_denied() -> Dict[str, Any]:
             "(start the server with --token)."
         ),
         "type": "PermissionError",
+        "session_epoch": session_epoch,
     }
+    if req.get("request_id") is not None:
+        resp["request_id"] = req["request_id"]
+    return resp
 
 
 class RpcGateway:
@@ -89,15 +93,18 @@ class RpcGateway:
         backend field, so the request alone cannot say.
         """
         cmd = req.get("cmd")
+        if cmd is not None and not isinstance(cmd, str):
+            return self._dispatch(req)  # refused in-band before touching anything
         if cmd == "cancel":
             # Never behind the lock: the call it interrupts holds it.  Checked
-            # like a session command, since it ends the open session.
-            if not serial_allowed and self._server.session_transport_kind() == "bytestream":
-                return _serial_denied()
+            # like a session command, since it ends the open session -- or
+            # the one a running connect is still opening.
+            if not serial_allowed and self._server.session_touches_bytestream():
+                return self._denied(req)
             return self._dispatch(req)
         if cmd in self._LOCK_FREE_CMDS:
             if not serial_allowed and _names_serial(req):
-                return _serial_denied()
+                return self._denied(req)
             return self._dispatch(req)
         if cmd != "close":
             self._lock.acquire()
@@ -105,18 +112,37 @@ class RpcGateway:
             # Disconnect while a command holds the session (a hung connect, a
             # long capture): interrupt it, then close once it has let go,
             # instead of waiting out its timeout.
-            if serial_allowed or self._server.session_transport_kind() != "bytestream":
-                self._server.cancel({"cmd": "cancel"})
+            self._interrupt(serial_allowed)
             self._lock.acquire()
         try:
             if not serial_allowed and (
                 _names_serial(req)
                 or self._server.session_transport_kind() == "bytestream"
             ):
-                return _serial_denied()
+                return self._denied(req)
             return self._dispatch(req)
         finally:
             self._lock.release()
+
+    def interrupt_if_busy(self, *, serial_allowed: bool = True) -> None:
+        """Interrupt the session command holding the lock, if there is one.
+
+        What a ``close`` does first when it finds the lock held.  The web app
+        calls it on its event loop before handing the ``close`` to the thread
+        pool, so a full pool or a queue of requests ahead of the ``close``
+        cannot keep it from interrupting.  Does no I/O and never waits.
+        """
+        if self._lock.acquire(blocking=False):
+            self._lock.release()
+            return
+        self._interrupt(serial_allowed)
+
+    def _interrupt(self, serial_allowed: bool) -> None:
+        if serial_allowed or not self._server.session_touches_bytestream():
+            self._server.cancel({"cmd": "cancel"})
+
+    def _denied(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        return _serial_denied(req, self._server.session_epoch)
 
     def _dispatch(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
@@ -127,7 +153,9 @@ class RpcGateway:
             # The traceback goes to the log only (the Log tab shows just the
             # message): a reply carries no source path to a remote client.
             _log.warning("%s failed: %s", cmd, exc, exc_info=True)
-            return error_envelope(exc, req, log=False)
+            return error_envelope(
+                exc, req, log=False, session_epoch=self._server.session_epoch
+            )
         # Surface command activity (with timing) in the Log tab. The elapsed ms
         # on capture/capture_wait is exactly the readback time the user is
         # chasing — fast burst vs slow fallback shows up here directly.

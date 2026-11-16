@@ -32,8 +32,9 @@ framing or length prefix.  Requests run one at a time, in order,
 and each gets one reply.  The exception is [`cancel`](#cancel): it
 is answered at once, while the request it interrupts is still
 running, so its reply can come first.  A request may carry a
-`request_id` (any JSON value); its reply echoes it, which is how a
-client matches replies when a cancel is in play.
+`request_id` (a string or a number, unique per request); its reply
+echoes it, which is how a client matches replies when a cancel is in
+play.
 
 **Request**:
 ```json
@@ -356,7 +357,8 @@ WebSocket and over HTTP alike).
 - `target` (optional): the `request_id` of the request to interrupt.
   Running, it is interrupted; not started yet (queued behind another),
   it is refused with `RequestCancelled` when its turn comes; finished,
-  nothing happens.
+  nothing happens.  A request that finishes after the cancel arrived
+  still fails with `RequestCancelled`: the session ends either way.
 - `session_epoch` (optional): only act if this is still the session's
   epoch, so a late cancel cannot end a newer session.
 - With neither, it interrupts whatever session command is running, and
@@ -364,7 +366,7 @@ WebSocket and over HTTP alike).
 
 Response: `{"ok": true, "schema_version": "1.2", "cancelled": true}`,
 or `"cancelled": false` with a `reason` (`"idle"`, `"request not
-running"`, `"session ended"`).
+running"`, `"request finished"`, `"session ended"`).
 
 Interrupting closes the session's transports, which is what makes a
 blocked read return: the interrupted request fails (often with
@@ -960,7 +962,8 @@ meaningful errors back to the calling language.  `trace` is just
 reaches a client.  The server logs the traceback at DEBUG on the
 `fcapz.rpc` logger (the web interface logs it with its warning on
 `fcapz.web`).  A request that carried a `request_id` gets it back in
-its error reply too.
+its error reply too, and error replies carry `session_epoch` like
+successful ones.
 
 Common error types you should expect:
 
