@@ -1764,12 +1764,39 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         self._cmd(f"irscan {self.tap} {ir}")
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
-        """Perform a raw DR scan via irscan + drscan on the OpenOCD socket."""
+        """Perform a raw DR scan via irscan + drscan on the OpenOCD socket.
+
+        OpenOCD answers only once the whole scan has shifted, so the read
+        timeout grows with *width*: a streaming read's scan of half a
+        million bits outlasts the base timeout on a slow adapter.
+        """
         self._select_ir(chain)
         hex_width = (width + 3) // 4
         hex_in = f"0x{bits:0{hex_width}x}"
-        result = self._cmd(f"drscan {self.tap} {width} {hex_in}")
+        with self._read_timeout(
+            self._BATCH_TIMEOUT_SEC + self._SCAN_TIMEOUT_PER_BIT_SEC * width
+        ):
+            result = self._cmd(f"drscan {self.tap} {width} {hex_in}")
         return self._parse_drscan_result(result, command="drscan", width=width)
+
+    @contextmanager
+    def _read_timeout(self, seconds: float):
+        """Allow *seconds* for each socket read of the commands run inside,
+        then restore the base timeout."""
+        with self._sock_lock:
+            sock = self._sock
+            if sock is not None:
+                sock.settimeout(seconds)
+            try:
+                yield
+            finally:
+                if sock is not None:
+                    try:
+                        sock.settimeout(self._BATCH_TIMEOUT_SEC)
+                    except OSError:
+                        # cancel() closed the socket: keep the error that
+                        # ended the command, not this one.
+                        pass
 
     def _parse_drscan_result(self, result: str, *, command: str, width: int) -> int:
         token = result.split()[0] if result.split() else ""
@@ -1895,6 +1922,9 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     #: line has run, so a deep burst gets a base plus a margin per scan.
     _BATCH_TIMEOUT_SEC = 5.0
     _BATCH_TIMEOUT_PER_SCAN_SEC = 0.05
+    #: Extra read timeout per bit of a raw DR scan: room for an adapter
+    #: shifting as slowly as 20 kbit/s (remote_bitbang through a bridge).
+    _SCAN_TIMEOUT_PER_BIT_SEC = 50e-6
 
     def _slot_select_ops(self, addr: int) -> list[ScanOp]:
         return [("tcl", cmd) for cmd in self._slot_select_cmds([addr])]
@@ -1947,22 +1977,10 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
                 raise ValueError(f"unknown scan op {op!r}")
             i += 1
         cmds.append("set __fcapz_r")
-        with self._sock_lock:
-            sock = self._sock
-            if sock is not None:
-                sock.settimeout(
-                    self._BATCH_TIMEOUT_SEC + self._BATCH_TIMEOUT_PER_SCAN_SEC * expected
-                )
-            try:
-                result = self._run_line(cmds)
-            finally:
-                if sock is not None:
-                    try:
-                        sock.settimeout(self._BATCH_TIMEOUT_SEC)
-                    except OSError:
-                        # cancel() closed the socket: keep the error that
-                        # ended the batch, not this one.
-                        pass
+        with self._read_timeout(
+            self._BATCH_TIMEOUT_SEC + self._BATCH_TIMEOUT_PER_SCAN_SEC * expected
+        ):
+            result = self._run_line(cmds)
         try:
             values = [int(t, 16) for t in result.split()]
         except ValueError as exc:
