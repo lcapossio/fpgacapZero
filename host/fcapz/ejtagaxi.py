@@ -425,6 +425,7 @@ class EjtagAxiController:
             getattr(self._transport, "ready_probe_timeout", 2.0)
         )
         decoded = []
+        reread = False
         while True:
             decoded = self._scan_batch(
                 [
@@ -436,11 +437,23 @@ class EjtagAxiController:
             )
             _, _, identity_or_version, _ = decoded[1]
             core_id = identity_or_version & 0xFFFF
-            if (
-                core_id == _BRIDGE_CORE_ID
-                or identity_or_version == _LEGACY_BRIDGE_ID
-                or time.monotonic() >= deadline
-            ):
+            if core_id == _BRIDGE_CORE_ID or identity_or_version == _LEGACY_BRIDGE_ID:
+                break
+            if not reread:
+                # A session that dropped mid-command (a timeout, a cancel)
+                # could not send the RESET its close() would have: the
+                # bridge may still be in a streaming read, answering with
+                # stream slots.  The first CONFIG scan above carries TDI
+                # ones, which abort the stream like CMD_RESET, so asking
+                # again is enough -- even past the deadline, which the
+                # first read can use up waiting behind the dropped
+                # session's last scan.  No explicit RESET: if the chain
+                # holds another core (an EJTAG-UART answers CMD_RESET by
+                # flushing its FIFOs), the probe must stay harmless.
+                reread = True
+                time.sleep(0.02)
+                continue
+            if time.monotonic() >= deadline:
                 break
             time.sleep(0.02)
         _, _, identity_or_version, _ = decoded[1]

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import fcapz.board_autodiscover as bad
 from fcapz.board_autodiscover import (
     auto_discover_boards,
@@ -165,3 +167,37 @@ def test_auto_discover_none_usb_probes_all(tmp_path, monkeypatch):
     found = auto_discover_boards(lch, present_usb=None)  # skip filtering
     assert [name for name, _ in lch.started] == ["a", "b"]
     assert [b["config"] for b in found] == ["b"]
+
+
+class _Cancelled(RuntimeError):
+    cancels_request = True
+
+
+def test_auto_discover_stops_at_a_cancel(tmp_path, monkeypatch):
+    cfgs = {
+        "a": _cfg(tmp_path, "a.cfg", "ftdi vid_pid 0x0403 0x6010\n"),
+        "b": _cfg(tmp_path, "b.cfg", "ftdi vid_pid 0x0403 0x6010\n"),
+    }
+    lch = FakeLauncher(cfgs, {})
+
+    def cancelled(**_):
+        raise _Cancelled("request cancelled")
+
+    monkeypatch.setattr(bad, "discover_boards", cancelled)
+    with pytest.raises(_Cancelled):
+        auto_discover_boards(lch, present_usb={(0x0403, 0x6010)})
+    assert len(lch.started) == 1  # no OpenOCD for the next config
+    assert lch.stopped == [6666]  # the one it started is stopped
+
+
+def test_auto_discover_leaves_an_instance_it_did_not_start(tmp_path, monkeypatch):
+    cfgs = {"a": _cfg(tmp_path, "a.cfg", "ftdi vid_pid 0x0403 0x6010\n")}
+    lch = FakeLauncher(cfgs, {})
+    lch.start = lambda **kw: {"started": False, "port": kw["port"]}  # already up
+
+    def failing(**_):
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(bad, "discover_boards", failing)
+    assert auto_discover_boards(lch, present_usb={(0x0403, 0x6010)}) == []
+    assert lch.stopped == []

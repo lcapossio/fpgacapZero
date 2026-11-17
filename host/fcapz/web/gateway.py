@@ -15,10 +15,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import traceback
 from typing import Any, Dict, Optional
 
-from ..rpc import _SCHEMA_VERSION, RpcServer
+from ..rpc import _SCHEMA_VERSION, RpcServer, error_envelope
 
 _log = logging.getLogger("fcapz.web")
 
@@ -32,8 +31,8 @@ def _names_serial(req: Dict[str, Any]) -> bool:
     return req.get("cmd") == "list_serial_ports" or req.get("backend") == "serial"
 
 
-def _serial_denied() -> Dict[str, Any]:
-    return {
+def _serial_denied(req: Dict[str, Any], session_epoch: int) -> Dict[str, Any]:
+    resp: Dict[str, Any] = {
         "ok": False,
         "schema_version": _SCHEMA_VERSION,
         "error": (
@@ -41,7 +40,11 @@ def _serial_denied() -> Dict[str, Any]:
             "(start the server with --token)."
         ),
         "type": "PermissionError",
+        "session_epoch": session_epoch,
     }
+    if req.get("request_id") is not None:
+        resp["request_id"] = req["request_id"]
+    return resp
 
 
 class RpcGateway:
@@ -80,23 +83,75 @@ class RpcGateway:
         shape ``fcapz.rpc.main`` emits — not raised, so every transport sees the
         same protocol.
 
+        ``cancel`` runs without the lock, and a ``close`` that finds it held
+        interrupts the command holding it first (see :meth:`RpcServer.cancel`).
+
         ``serial_allowed=False`` refuses anything that reaches a serial port:
         a request that names one, and -- checked under the lock, against the
         session it would act on -- every session command while the open
         session is a byte-stream link.  A ``capture`` or ``close`` carries no
         backend field, so the request alone cannot say.
         """
-        if req.get("cmd") in self._LOCK_FREE_CMDS:
-            if not serial_allowed and _names_serial(req):
-                return _serial_denied()
+        cmd = req.get("cmd")
+        if cmd is not None and not isinstance(cmd, str):
+            return self._dispatch(req)  # refused in-band before touching anything
+        if cmd == "cancel":
+            # Never behind the lock: the call it interrupts holds it.  Checked
+            # like a session command, since it ends the open session -- or
+            # the one a running connect is still opening.
+            if not serial_allowed and self._server.session_touches_bytestream():
+                return self._denied(req)
             return self._dispatch(req)
-        with self._lock:
+        if cmd in self._LOCK_FREE_CMDS:
+            if not serial_allowed and _names_serial(req):
+                return self._denied(req)
+            return self._dispatch(req)
+        if cmd != "close":
+            self._lock.acquire()
+        elif not self._lock.acquire(blocking=False):
+            # Disconnect while a command holds the session (a hung connect, a
+            # long capture): interrupt it, then close once it has let go,
+            # instead of waiting out its timeout.
+            self._interrupt(req, serial_allowed)
+            self._lock.acquire()
+        try:
             if not serial_allowed and (
                 _names_serial(req)
                 or self._server.session_transport_kind() == "bytestream"
             ):
-                return _serial_denied()
+                return self._denied(req)
             return self._dispatch(req)
+        finally:
+            self._lock.release()
+
+    @property
+    def session_epoch(self) -> int:
+        return self._server.session_epoch
+
+    def interrupt_if_busy(self, req: Dict[str, Any], *, serial_allowed: bool = True) -> None:
+        """Interrupt the session command holding the lock, if there is one.
+
+        What a ``close`` does first when it finds the lock held.  The web app
+        calls it on its event loop before handing the ``close`` to the thread
+        pool, so a full pool or a queue of requests ahead of the ``close``
+        cannot keep it from interrupting.  Does no I/O and never waits.
+        """
+        if self._lock.acquire(blocking=False):
+            self._lock.release()
+            return
+        self._interrupt(req, serial_allowed)
+
+    def _interrupt(self, req: Dict[str, Any], serial_allowed: bool) -> None:
+        # Only for a close that will run (not malformed, not cancelled
+        # itself), and only the session commands: a concurrent target scan
+        # is not the session being closed.
+        if not self._server.would_run(req):
+            return
+        if serial_allowed or not self._server.session_touches_bytestream():
+            self._server.cancel({"cmd": "cancel"}, session_only=True)
+
+    def _denied(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        return _serial_denied(req, self._server.session_epoch)
 
     def _dispatch(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
@@ -104,14 +159,12 @@ class RpcGateway:
         try:
             resp = self._server.handle(req)
         except Exception as exc:  # noqa: BLE001 - mirror the line-protocol envelope
-            _log.warning("%s failed: %s", cmd, exc)
-            return {
-                "ok": False,
-                "schema_version": _SCHEMA_VERSION,
-                "error": str(exc),
-                "type": exc.__class__.__name__,
-                "trace": traceback.format_exc(limit=1).strip(),
-            }
+            # The traceback goes to the log only (the Log tab shows just the
+            # message): a reply carries no source path to a remote client.
+            _log.warning("%s failed: %s", cmd, exc, exc_info=True)
+            return error_envelope(
+                exc, req, log=False, session_epoch=self._server.session_epoch
+            )
         # Surface command activity (with timing) in the Log tab. The elapsed ms
         # on capture/capture_wait is exactly the readback time the user is
         # chasing — fast burst vs slow fallback shows up here directly.

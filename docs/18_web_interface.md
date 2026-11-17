@@ -113,7 +113,11 @@ rebuilds the default arrangement without reloading — the session stays
 connected. The panels:
 
 - **Connection** — Connect/Disconnect sit at the top of the panel, with a
-  **Cancel** button while a connect or scan is in flight. Pick the backend
+  **Cancel** button while a connect or scan is in flight. Cancel during a
+  connect or a target/board scan also interrupts it on the server (the RPC
+  `cancel` command), so a connect stuck on a hung probe no longer holds the
+  server until it times out; Disconnect while a command runs interrupts it
+  the same way. Pick the backend
   (OpenOCD, AMD/Xilinx hw_server, Intel/Altera **USB-Blaster**, or a direct
   **FTDI** cable), host and port. For `usb_blaster` the host/port fields are
   replaced by a single optional **Quartus cable** field (e.g.

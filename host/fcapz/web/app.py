@@ -17,8 +17,10 @@ capture waits for its trigger.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
+import logging
 import secrets
 from pathlib import Path
 from typing import Iterable, Optional
@@ -39,9 +41,11 @@ from starlette.concurrency import run_in_threadpool
 
 from .._version import __version__
 from ..openocd_launcher import OpenOcdLauncher
-from ..rpc import _SCHEMA_VERSION, RpcServer
+from ..rpc import _SCHEMA_VERSION, RequestCancelled, RpcServer, error_envelope
 from .gateway import RpcGateway
 from .logbuffer import install_log_capture
+
+_log = logging.getLogger("fcapz.web")
 
 
 def _default_surfer_dir() -> str:
@@ -270,22 +274,39 @@ def create_app(
             raise HTTPException(status_code=403, detail="Host not allowed")
         return log_ring.snapshot(since)
 
+    def _with_ids(resp: dict, req: dict) -> dict:
+        """Add the correlation fields a reply from the gateway carries."""
+        resp = dict(resp, session_epoch=gateway.session_epoch)
+        if isinstance(req, dict) and req.get("request_id") is not None:
+            resp["request_id"] = req["request_id"]
+        return resp
+
     @app.post("/api/rpc")
     async def rpc(req: dict, request: Request, _: None = Depends(auth)):
         if not _host_header_ok(request.headers.get("host"), bind_host):
-            return {
-                "ok": False,
-                "schema_version": _SCHEMA_VERSION,
-                "error": "Host not allowed (possible DNS rebinding).",
-                "type": "PermissionError",
-            }
+            return _with_ids(
+                {
+                    "ok": False,
+                    "schema_version": _SCHEMA_VERSION,
+                    "error": "Host not allowed (possible DNS rebinding).",
+                    "type": "PermissionError",
+                },
+                req,
+            )
         client_host = request.client.host if request.client else None
         blocked = _openocd_guard(req, client_host)
         if blocked is not None:
-            return blocked
-        return await run_in_threadpool(
-            gateway.call, req, serial_allowed=_serial_allowed(client_host, token)
-        )
+            return _with_ids(blocked, req)
+        serial_ok = _serial_allowed(client_host, token)
+        cmd = req.get("cmd")
+        if cmd == "cancel":
+            # On the event loop, not the thread pool: a cancel does no I/O and
+            # never waits, and the pool may be full of calls queued behind
+            # the very command it interrupts.
+            return gateway.call(req, serial_allowed=serial_ok)
+        if cmd == "close":
+            gateway.interrupt_if_busy(req, serial_allowed=serial_ok)
+        return await run_in_threadpool(gateway.call, req, serial_allowed=serial_ok)
 
     @app.websocket("/api/ws")
     async def ws(websocket: WebSocket):
@@ -306,20 +327,48 @@ def create_app(
             await websocket.close(code=1008)
             return
         await websocket.accept()
+        # Requests run one at a time, in order, on a worker task, so this loop
+        # keeps reading: a ``cancel`` is answered at once and interrupts the
+        # request in flight, and a ``close`` interrupts it before queueing.
+        # Replies can then arrive out of order; clients match them by
+        # ``request_id``.
+        send_lock = asyncio.Lock()
+        pending: asyncio.Queue = asyncio.Queue()
+        serial_ok = _serial_allowed(client_host, token)
+
+        async def send(resp: dict) -> None:
+            async with send_lock:
+                await websocket.send_json(resp)
+
+        async def worker() -> None:
+            while True:
+                req = await pending.get()
+                try:
+                    resp = await run_in_threadpool(
+                        gateway.call, req, serial_allowed=serial_ok
+                    )
+                except Exception as exc:  # noqa: BLE001 - keep serving this client
+                    _log.warning("websocket request failed", exc_info=True)
+                    resp = error_envelope(
+                        exc, req, log=False, session_epoch=gateway.session_epoch
+                    )
+                await send(resp)
+
+        worker_task = asyncio.create_task(worker())
         try:
             while True:
                 msg = await websocket.receive_text()
                 try:
                     req = json.loads(msg)
                 except json.JSONDecodeError as exc:
-                    await websocket.send_json(
+                    await send(
                         {"ok": False, "error": f"invalid JSON: {exc}", "type": "JSONDecodeError"}
                     )
                     continue
                 if not isinstance(req, dict):
                     # Valid JSON but not a request object (e.g. 42, "probe",
                     # [1]) — answer in-band instead of crashing the connection.
-                    await websocket.send_json(
+                    await send(
                         {
                             "ok": False,
                             "error": "request must be a JSON object {\"cmd\": ...}",
@@ -329,16 +378,34 @@ def create_app(
                     continue
                 blocked = _openocd_guard(req, client_host)
                 if blocked is not None:
-                    await websocket.send_json(blocked)
+                    await send(_with_ids(blocked, req))
                     continue
-                resp = await run_in_threadpool(
-                    gateway.call,
-                    req,
-                    serial_allowed=_serial_allowed(client_host, token),
-                )
-                await websocket.send_json(resp)
+                cmd = req.get("cmd")
+                if cmd == "cancel":
+                    # On the loop itself: no I/O, never waits (see /api/rpc).
+                    await send(gateway.call(req, serial_allowed=serial_ok))
+                    continue
+                if cmd == "close":
+                    # Disconnect: what this client queued before it will not
+                    # run, and the command in flight is interrupted.
+                    while not pending.empty():
+                        dropped = pending.get_nowait()
+                        await send(
+                            error_envelope(
+                                RequestCancelled("cancelled by close"),
+                                dropped,
+                                log=False,
+                                session_epoch=gateway.session_epoch,
+                            )
+                        )
+                    gateway.interrupt_if_busy(req, serial_allowed=serial_ok)
+                pending.put_nowait(req)
         except WebSocketDisconnect:
             return
+        finally:
+            # A request already handed to the thread pool runs to its end, as
+            # before; nothing queued behind it runs for a client that left.
+            worker_task.cancel()
 
     # Vendored Surfer waveform viewer (WASM) at /surfer — mounted before "/" so
     # it isn't shadowed by the SPA catch-all.

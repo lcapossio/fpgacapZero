@@ -1114,3 +1114,69 @@ def test_close_releases_manager_ownership(fake_serial, monkeypatch):
     t.close()
     t.close()
     assert released == [1]
+
+
+def test_cancel_closes_the_port_without_scanning(fake_serial, monkeypatch):
+    # BUG-294: cancel() runs on another thread while a call is in flight.
+    # close()'s MGR_OWNER release would scan between that call's
+    # transactions, so cancel() only closes the channel.
+    t, port = _connect(fake_serial)
+    released = []
+    monkeypatch.setattr(t, "_release_ownership_on_close", lambda: released.append(1))
+    t.cancel()
+    assert port.closed
+    assert released == []
+    t.close()  # the owner's close after a cancel: nothing left to release
+    assert released == []
+    with pytest.raises(RuntimeError, match="not connected"):
+        t.read_reg(0)
+
+
+def test_call_in_flight_sees_a_cancel_as_a_lost_link(fake_serial, monkeypatch):
+    # The port may vanish between two uses inside one transaction: that is
+    # a ConnectionError, not an AttributeError on None.
+    t, _ = _connect(fake_serial)
+    real_read = t._read_bytes
+
+    def cancel_then_read(count):
+        t.cancel()
+        return real_read(count)
+
+    monkeypatch.setattr(t, "_read_bytes", cancel_then_read)
+    with pytest.raises(ConnectionError, match="failed mid-transaction"):
+        t.read_reg(0)
+
+
+def test_a_cancel_while_the_port_opens_fails_the_connect(fake_serial, monkeypatch):
+    # cancel() found nothing open to close; connect() honours it once the
+    # port is open instead of going on to the handshake.
+    t = SerialTapTransport("COM_TEST")
+    real_open = t._open
+
+    def open_then_cancel():
+        real_open()
+        t.cancel()
+
+    monkeypatch.setattr(t, "_open", open_then_cancel)
+    with pytest.raises(ConnectionError, match="cancelled while opening"):
+        t.connect()
+    assert fake_serial.pop("obj").closed
+    monkeypatch.setattr(t, "_open", real_open)
+    t.connect()  # a later connect starts a new session
+    assert t.proto_version == 2
+
+
+def test_a_payload_read_cut_short_by_cancel_is_a_lost_link(fake_serial, monkeypatch):
+    t, _ = _connect(fake_serial)
+    real_read = t._read_bytes
+    reads = []
+
+    def cancel_on_payload(count):
+        reads.append(count)
+        if len(reads) == 2:  # the header is in; the payload is not
+            t.cancel()
+        return real_read(count)
+
+    monkeypatch.setattr(t, "_read_bytes", cancel_on_payload)
+    with pytest.raises(ConnectionError):
+        t.read_reg(0)

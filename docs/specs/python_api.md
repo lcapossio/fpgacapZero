@@ -1059,6 +1059,8 @@ USER1_IR = 2
 READ_IDLE_CYCLES = 20
 _BATCH_TIMEOUT_SEC = 5.0
 _BATCH_TIMEOUT_PER_SCAN_SEC = 0.05
+_SCAN_TIMEOUT_PER_BIT_SEC = 5e-05
+_CONNECT_SYNC_TIMEOUT_SEC = 40.0
 ```
 
 #### `OpenOcdTransport.connect`
@@ -1100,7 +1102,14 @@ Close the transport.  Must be idempotent — safe to call multiple times.
 cancel() -> None
 ```
 
-Best-effort abort for an in-flight backend operation.
+Abort the call in flight from another thread.
+
+Takes no lock the call holds: it detaches the session and shuts its
+socket down, so a blocked `recv()` ends at once and the call fails
+with `ConnectionError`.  No `MGR_OWNER` release either, as that
+is scans from the cancelling thread racing the call being aborted;
+the token stays set, as after a cancel on the other backends.  A
+`connect` in progress does not publish its socket.
 
 #### `OpenOcdTransport.select_chain`
 
@@ -1127,6 +1136,10 @@ raw_dr_scan(bits: int, width: int, *, chain: int | None = None) -> int
 ```
 
 Perform a raw DR scan via irscan + drscan on the OpenOCD socket.
+
+OpenOCD answers only once the whole scan has shifted, so the read
+timeout grows with *width*: a streaming read's scan of half a
+million bits outlasts the base timeout on a slow adapter.
 
 #### `OpenOcdTransport.write_reg`
 

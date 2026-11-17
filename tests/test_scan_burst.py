@@ -394,6 +394,35 @@ class OpenOcdBurstTests(unittest.TestCase):
             [5.0 + 0.05 * n_scans, 5.0],
         )
 
+    def test_a_long_raw_scan_waits_longer_for_its_reply(self):
+        """A streaming read's DR scan is half a million bits: on a slow
+        adapter it outlasts the base timeout (BUG-313)."""
+        class _Sock:
+            def __init__(self):
+                self.timeouts: list[float] = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        sent: list[tuple[str, list[float]]] = []
+        t = OpenOcdTransport(tap="xc7.tap")
+        t._sock = _Sock()  # type: ignore[assignment]
+
+        def fake_cmd(tcl):
+            sent.append((tcl.split()[0], list(t._sock.timeouts)))
+            return "0" if tcl.startswith("drscan") else ""
+
+        t._cmd = fake_cmd  # type: ignore[method-assign]
+        width = 16384 * 33
+        t.raw_dr_capture(width)
+        self.assertEqual(sent[0], ("irscan", []))
+        self.assertEqual(sent[1][0], "drscan")
+        self.assertEqual(
+            sent[1][1], [5.0 + OpenOcdTransport._SCAN_TIMEOUT_PER_BIT_SEC * width]
+        )
+        self.assertGreater(sent[1][1][0], 25.0)
+        self.assertEqual(t._sock.timeouts[-1], 5.0)
+
     def test_a_cancelled_batch_keeps_its_own_error(self):
         """cancel() closes the socket mid-batch; restoring its timeout then
         fails, and must not replace the error that ended the batch."""
