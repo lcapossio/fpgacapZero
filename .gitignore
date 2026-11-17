@@ -19,8 +19,9 @@ packages/
 build/
 *.bit
 *.bin
-# written by examples/arty_a7_insert/build.tcl
-examples/arty_a7_insert/insert_demo.prob
+# written by examples/*_insert/build.tcl
+examples/*_insert/insert_demo*.prob
+examples/*_insert/insert_demo.insert.json
 !host/fcapz/gui/assets/default_window_state_v6.bin
 !host/fcapz/gui/assets/default_window_state_v7.bin
 
