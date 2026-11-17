@@ -39,6 +39,7 @@
           }
         ]
       }
-    ]
+    ],
+    "raw_init_check": true
   }
 }

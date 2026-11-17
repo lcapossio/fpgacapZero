@@ -993,6 +993,10 @@ class InterimContractTests(unittest.TestCase):
 
         class _Sock:
             closed = False
+            shut = False
+
+            def shutdown(self, how):
+                self.shut = True
 
             def close(self):
                 self.closed = True
@@ -1000,7 +1004,10 @@ class InterimContractTests(unittest.TestCase):
         sock = _Sock()
         t._sock = sock  # type: ignore[assignment]
         t.cancel()
+        self.assertTrue(sock.shut)  # wakes a recv() blocked in another thread
         self.assertTrue(sock.closed)
+        self.assertEqual(released, [])
+        t.close()  # the owner's close: the cancelled session releases nothing
         self.assertEqual(released, [])
 
 

@@ -23,7 +23,7 @@ back to individual chapters as you need them.
 |---|---------|--------------|
 | 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the four cores, the vendor matrix, and how the pieces fit together. |
 | 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD, Vivado hw_server, or Quartus USB-Blaster). |
-| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the GUI, then repeat/export from the CLI. |
+| 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the web interface, then repeat/export from the CLI. |
 | 04 | [RTL integration](04_rtl_integration.md) | How to instantiate fcapz cores in your own design. The vendor wrappers, every parameter explained, and the role of `fcapz_version.vh`. |
 | 05 | [ELA core](05_ela_core.md) | The Embedded Logic Analyzer in depth: trigger sequencer, comparator modes, storage qualification, decimation, external trigger, timestamps, segmented memory, runtime probe mux, and the new `trigger_delay`. |
 | 06 | [EIO core](06_eio_core.md) | The Embedded I/O core: read fabric signals, drive fabric signals, clock domains, host API. |
@@ -32,9 +32,9 @@ back to individual chapters as you need them.
 | 09 | [Python API](09_python_api.md) | Complete reference for the `fcapz` Python package: `Analyzer`, `EioController`, `EjtagAxiController`, `EjtagUartController`, transports, events module, with worked examples. |
 | 10 | [CLI reference](10_cli_reference.md) | Every `fcapz` subcommand, every flag, with copy-pasteable examples. |
 | 11 | [JSON-RPC server](11_rpc_server.md) | Driving fpgacapZero from another language or process: the line-delimited JSON-RPC protocol, full schema, and all commands. |
-| 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
+| 12 | [Desktop GUI (`fcapz-gui`)](12_gui.md) | Not actively maintained; prefer the web interface (chapter 18). The PySide6 GUI: panels, settings, the embedded `pyqtgraph` preview, viewer integration with GTKWave / Surfer / WaveTrace, the auto-generated `.gtkw` layout, and the headless install path. |
 | 13 | [Register map](13_register_map.md) | The full register map for all four cores. Stub chapter that links straight to the canonical reference at [`specs/register_map.md`](specs/register_map.md). |
-| 14 | [Transports](14_transports.md) | OpenOCD, AMD/Xilinx hw_server, Quartus USB-Blaster, the named AMD/Xilinx `IR_TABLE_*` presets, the readiness wait, and how to add a new transport backend. |
+| 14 | [Transports](14_transports.md) | OpenOCD, AMD/Xilinx hw_server, Quartus USB-Blaster, direct FTDI (D2XX or libusb, multi-device chains), the serial TAP bridge, the named AMD/Xilinx `IR_TABLE_*` presets, the readiness wait, and how to add a new transport backend. |
 | 15 | [Export formats](15_export_formats.md) | JSON, CSV, VCD; what each format contains; the auto-generated `.gtkw` waveform-viewer layout file; integration with GTKWave / Surfer / WaveTrace. |
 | 16 | [Versioning and release](16_versioning_and_release.md) | How the project version flows from the `VERSION` file through `tools/sync_version.py` into the RTL `fcapz_version.vh`, the per-core `core_id` magic registers, and the procedure for cutting a new release. |
 | 17 | [Troubleshooting](17_troubleshooting.md) | Common errors, what they mean, and how to fix them. |
@@ -80,12 +80,14 @@ and should be corrected.
 
 - Hardware bring-up for vendor wrappers beyond the validated boards:
   AMD/Xilinx 7-series (Arty A7), Zynq UltraScale+ MPSoC (Kria KV260),
-  Intel / Altera (DE25-Nano), Gowin (BRS-100), PolarFire (Discovery
-  Kit) and the serial TAP bridge on an Efinix Trion (Forgix). The shared
-  core RTL is covered by simulation, and the remaining
-  vendor wrappers are lint-elaborated, but ECP5 and standalone Kintex /
-  Virtex UltraScale(+) board-level smoke tests are still future work. See
-  chapter 04 for the support matrix and validation levels.
+  Kintex UltraScale (KU035, on a proprietary board), Intel / Altera
+  (DE25-Nano), Gowin (BRS-100), PolarFire (Discovery Kit) and the
+  serial TAP bridge on an Efinix Trion (Forgix). The shared core RTL is
+  covered by simulation, and the remaining vendor wrappers are
+  lint-elaborated, but ECP5 and standalone UltraScale+ board-level smoke
+  tests are still future work. See the
+  [vendor support matrix](01_overview.md#vendor-support-matrix) for
+  validation levels.
 - Internal design discussions for features that have shipped. Those
   live in git history and the merged PRs; this manual describes the
   *current* behavior, not the design rationale.

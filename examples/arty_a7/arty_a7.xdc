@@ -28,7 +28,8 @@ set_property -dict {PACKAGE_PIN T10 IOSTANDARD LVCMOS33} [get_ports {led[3]}]
 # Every BSCANE2 (fcapz USER1/2/4 cores + the MicroBlaze MDM on USER3, inside
 # the block design) shares the one physical JTAG TCK.  Declare a single clock
 # on all of their TCK pins so the CDC false-path to the fabric is unambiguous.
-create_clock -name tck_bscan -period 100.0 \
+# 30 MHz: the fastest TCK the board's FT2232H cable runs.
+create_clock -name tck_bscan -period 33.333 \
     [get_pins -of_objects [get_cells -hierarchical -filter {REF_NAME == BSCANE2}] \
               -filter {REF_PIN_NAME == TCK}]
 

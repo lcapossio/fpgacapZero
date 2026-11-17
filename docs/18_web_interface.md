@@ -1,7 +1,8 @@
 # 18 · Web interface (`fcapz-web`)
 
-`fcapz-web` is a **browser-based front-end** for fpgacapZero — an alternative to
-the desktop GUI ([chapter 12](12_gui.md)) that you can reach from the local
+`fcapz-web` is the **browser-based front-end** for fpgacapZero, and the
+recommended one: the desktop GUI ([chapter 12](12_gui.md)) is no longer actively
+maintained.  You can reach it from the local
 machine **or another machine on the network**. It is a small **FastAPI** server
 that wraps the fcapz host stack and serves a prebuilt browser UI (Vite + React)
 as static files, so running it needs **no Node.js** — just the Python package.
@@ -28,13 +29,20 @@ on the command line — one server can drive whatever board you point it at.
 ### Reaching it from another machine
 
 ```bash
-fcapz-web --host 0.0.0.0 --port 7373 --token "$(openssl rand -hex 16)"
+export FCAPZ_WEB_TOKEN="$(openssl rand -hex 16)"
+fcapz-web --host 0.0.0.0 --port 7373    # --token defaults to $FCAPZ_WEB_TOKEN
 ```
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or the
 `FCAPZ_WEB_TOKEN` environment variable) whenever you do: it is then required as
 `Authorization: Bearer <token>` on every `/api` route and as `?token=` on the
-WebSocket, and the UI hides the token field until a server asks for it. There is
+WebSocket. On a non-localhost bind the server prints the token at startup
+(to stderr), so you can copy it into the browser. It does so only when stderr
+is a terminal, so the token does not end up in a service log.
+The UI hides the token field until a server asks for it: once a request is
+refused as unauthorized (typically your first **Connect**), the Connection panel
+shows an **API token** field; paste the same value there and press **Connect**
+again. The browser remembers it for that server's address. There is
 **no TLS** — put it behind a reverse proxy or an SSH tunnel if it leaves a
 trusted network. `fcapz-web` prints a warning if you bind a non-localhost host
 without a token.
@@ -86,9 +94,15 @@ can still point `--openocd-cfg-dir` at a folder of your own configs, or
 launched, and only from a **localhost** browser — a remote client cannot spawn
 processes, even with a valid token.
 
-None of this is required just to *use* the web frontend: without these flags you
-simply connect to an already-running OpenOCD or hw_server via the backend/host/
-port fields, and the "Start OpenOCD" button is hidden.
+None of this is required just to *use* the web frontend: you can always connect
+to an already-running OpenOCD or hw_server via the backend/host/port fields. The
+server-side OpenOCD start stays off only when discovery comes up without a
+usable binary or config, for example on a plain `pip install` run outside a
+source checkout, where there are no bundled `examples/` configs. `fcapz-web`
+prints a startup warning when it finds a binary but no config, or a config but
+no binary. When the feature is on, the "Start OpenOCD" button is only a picker:
+it appears when Connect finds no board and the server offers more than one
+config; with a single config, Connect starts OpenOCD by itself.
 
 ## The workspace
 
@@ -99,7 +113,11 @@ rebuilds the default arrangement without reloading — the session stays
 connected. The panels:
 
 - **Connection** — Connect/Disconnect sit at the top of the panel, with a
-  **Cancel** button while a connect or scan is in flight. Pick the backend
+  **Cancel** button while a connect or scan is in flight. Cancel during a
+  connect or a target/board scan also interrupts it on the server (the RPC
+  `cancel` command), so a connect stuck on a hung probe no longer holds the
+  server until it times out; Disconnect while a command runs interrupts it
+  the same way. Pick the backend
   (OpenOCD, AMD/Xilinx hw_server, Intel/Altera **USB-Blaster**, or a direct
   **FTDI** cable), host and port. For `usb_blaster` the host/port fields are
   replaced by a single optional **Quartus cable** field (e.g.
@@ -107,8 +125,16 @@ connected. The panels:
   `quartus_stp` path lives on the server (auto-detected, or its
   `--quartus-stp` flag), never in the browser, and Connect goes straight to
   the local cable with no TCP scan. `ftdi` works the same way with an
-  optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`); the IR table
-  comes from the device IDCODE. For OpenOCD, Connect
+  optional **FTDI adapter** field (e.g. `Embedded FlashPro5 A`, or
+  `Digilent USB Device A` for the Arty A7's onboard cable, or `usb:...`
+  for a channel on libusb); the IR table
+  comes from the device IDCODE. Blank picks channel A of the one recognised
+  adapter (FlashPro, Digilent or KV260); a generic FTDI adapter must be
+  named, and with several recognised ones Connect fails and lists them. The UI has no
+  clock field, so `ftdi` runs at the server's default TCK of 6 MHz. The
+  server holds the channel until Disconnect, so close `hw_server`, OpenOCD
+  and vendor programmers first (see
+  [`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport)). For OpenOCD, Connect
   **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects
@@ -136,8 +162,9 @@ connected. The panels:
   an optional post-trigger clock limit), and
   **probe definitions** (load a `.prob` file or type
   `name:width:lsb` lines to get named signals in the waveform and the
-  Trigger tab).
-- **Trigger** — its own tab, laid out like Vivado ILA's **Trigger Setup**.
+  Trigger drawer).
+- **Trigger** — a drawer on the viewer's right edge (hover the ⚡ Trigger rail,
+  or pin it open), laid out like Vivado ILA's **Trigger Setup**.
   **+ Add probe…** appends a row to the trigger table — named probes when
   defined, otherwise the raw probe bits (`bit0`…`bitN`), so triggering needs
   zero setup. Each row is **Name | Operator | Radix | Value**: operators
@@ -245,6 +272,6 @@ is served at `/surfer`, decoupled from the Vite output.
 
 - [Chapter 11 · JSON-RPC server](11_rpc_server.md) — the full command schema the
   web UI speaks.
-- [Chapter 12 · Desktop GUI](12_gui.md) — the PySide6 alternative.
+- [Chapter 12 · Desktop GUI](12_gui.md) — the PySide6 alternative (not actively maintained).
 - [Chapter 15 · Export formats](15_export_formats.md) — what the downloaded
   VCD / CSV / JSON contain.

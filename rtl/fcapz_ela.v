@@ -1141,8 +1141,11 @@ module fcapz_ela #(
 
     // ---- CDC: completed-capture metadata snapshot -------------------------
     wire rb_meta_sample_busy = rb_meta_toggle_sample ^ rb_meta_ack_sync2;
+    // seg_count wraps to 0 on the last segment, so an arm or soft reset after
+    // a finished segmented capture doesn't change it; done falling does.
     wire rb_meta_event_sample = (done && !rb_done_d) ||
-                                (HAS_SEGMENTS && (seg_count != rb_seg_count_d));
+                                (HAS_SEGMENTS && (seg_count != rb_seg_count_d)) ||
+                                (HAS_SEGMENTS && !done && rb_done_d);
 
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin

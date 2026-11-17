@@ -9,7 +9,10 @@ Digilent Arty A7-100T (`xc7a100tcsg324-1`). It instantiates the Xilinx
 - an AXI monitor on USER2, tapping the shared AXI bus
 - an open-source VexRiscv soft CPU on the shared bus (USER3 free — the legacy
   MicroBlaze variant instead puts its debug module there)
-- one EJTAG-AXI bridge on USER4
+- one EJTAG-AXI bridge on USER4, with the streaming read (`STREAM_EN=1`):
+  about 1.9 MB/s over `hw_server` and 2.8 MB/s over `--backend ftdi` at TCK
+  30 MHz, the fastest the onboard cable runs and the rate the TCK
+  constraint in `arty_a7.xdc` is timed for
 
 The design is intentionally self-stimulating, so you can build it, program the
 board, and exercise the debug cores without adding any external user logic.
@@ -72,9 +75,10 @@ stay here.
 | `build_arty_vex.py` / `build_arty_vex.tcl` | VexRiscv build (verify core + build firmware + Vivado) |
 | `build_arty.tcl` | Vivado script for the legacy MicroBlaze top |
 | `build_vhdl.py` / `build_arty_vhdl.tcl` | Mixed-language VHDL (VexRiscv) build |
+| `openxc7/` | Open-source build of the VexRiscv top (yosys + nextpnr-xilinx, no Vivado) |
 | `arty_a7.cfg` | OpenOCD config for the onboard USB-JTAG adapter |
 | `arty_a7_hs3.cfg` | OpenOCD config for an external Digilent HS3 cable |
-| `test_hw_integration.py` | Hardware integration regression tests (default `vex`; `FPGACAP_BITSTREAM_VARIANT=verilog`/`vhdl` for the other tops) |
+| `test_hw_integration.py` | Hardware integration regression tests (default `vex`; `FPGACAP_BITSTREAM_VARIANT=verilog`/`vhdl`/`openxc7` for the other builds) |
 | `arty_a7_vex_top.bit` | Generated/reference bitstream (default variant) |
 
 ## Board I/O
@@ -122,6 +126,12 @@ python examples/arty_a7/build.py --variant vhdl         # mixed-language VHDL to
 The `microblaze` variant needs a MicroBlaze licence and `mb-gcc` and writes
 `arty_a7_top.bit`. The `vhdl` variant is the VHDL top with the same VexRiscv
 subsystem (needs the RISC-V toolchain) and writes `arty_a7_top_vhdl.bit`.
+Its ELA, EIO, AXI monitor and EJTAG-AXI bridge are the VHDL cores. The VHDL
+bridge has no streaming read, so `stream_read` is not available on this image.
+
+The VexRiscv top also builds without Vivado, with the open-source openXC7
+flow; see [`openxc7/README.md`](openxc7/README.md). That bitstream passes the
+same hardware suite.
 
 ## Connect With hw_server
 
@@ -143,7 +153,7 @@ Run a simple ELA capture:
 ```sh
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
   --program examples/arty_a7/arty_a7_vex_top.bit \
-  capture --pretrigger 64 --posttrigger 192 \
+  capture --pretrigger 64 --posttrigger 191 \
   --trigger-value 66 --trigger-mask 0xff \
   --out capture.json --format json
 ```
@@ -177,6 +187,28 @@ For a Digilent HS3 cable, use `arty_a7_hs3.cfg` instead.
 OpenOCD does not program the FPGA through the fpgacapZero transport, so program
 `arty_a7_vex_top.bit` separately before running host commands.
 
+## Connect With FTDI
+
+The `ftdi` backend drives the onboard cable's JTAG channel directly through
+FTDI's D2XX driver, with no `hw_server`, OpenOCD or Vivado. Close
+`hw_server`, Vivado's Hardware Manager and OpenOCD first, since one program
+owns the channel at a time. `--program` loads the bitstream over the same
+cable (about 1.2 s at 30 MHz):
+
+```sh
+fcapz --backend ftdi --hardware "Digilent USB Device A" --tck-mhz 30   --program examples/arty_a7/arty_a7_vex_top.bit probe
+```
+
+Leave out `--program` to attach to the bitstream already loaded.
+`--hardware` can be left out when the Arty is the only FTDI JTAG adapter
+attached. TCK is 30 MHz divided by an integer (default 6 MHz).
+
+The web interface (`fcapz-web`, see
+[`docs/18_web_interface.md`](../../docs/18_web_interface.md)) connects the
+same way: pick the `ftdi` backend and, if needed, enter
+`Digilent USB Device A` as the FTDI adapter. It runs at 6 MHz and has no
+bitstream field, so program the board with the CLI command above first.
+
 ## Hardware Tests
 
 With an Arty A7 connected, the bitstream built, and `hw_server` running:
@@ -193,13 +225,28 @@ openocd -f examples/arty_a7/arty_a7.cfg
 FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
+To run them on the onboard cable directly through FTDI's D2XX driver, with no
+Vivado at all, close `hw_server`, Vivado's Hardware Manager and OpenOCD. The
+suite programs the bitstream over FTDI at the start of the run (and the
+startup-arm test programs it again), then runs in about 25 s:
+
+```sh
+FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
+```
+
+TCK defaults to 30 MHz; `FPGACAP_FTDI_TCK_MHZ` sets it (30 MHz divided by an
+integer), and `FPGACAP_FTDI_DEVICE` names the adapter channel (default
+`Digilent USB Device A`). `FPGACAP_FTDI_PROGRAM=0` skips the programming at
+the start and uses the bitstream already loaded.
+
 The suite defaults to the **VexRiscv** bitstream (`arty_a7_vex_top.bit`). To run
-it against the legacy **MicroBlaze** top or the **VHDL** top instead, set the
+it against the legacy **MicroBlaze** top, the **VHDL** top or the **openXC7** build instead, set the
 variant (it selects the matching default bitfile and freshness sources):
 
 ```sh
 FPGACAP_BITSTREAM_VARIANT=verilog python -m pytest examples/arty_a7/test_hw_integration.py -v
 FPGACAP_BITSTREAM_VARIANT=vhdl python -m pytest examples/arty_a7/test_hw_integration.py -v
+FPGACAP_BITSTREAM_VARIANT=openxc7 python -m pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
 To skip hardware tests in an environment without the board:

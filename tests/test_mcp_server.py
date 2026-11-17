@@ -950,13 +950,13 @@ class FcapzMcpSessionTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             session.connect(program="design.bit")
 
-    def test_program_is_hw_server_only(self):
+    def test_program_is_hw_server_or_ftdi_only(self):
         session = FcapzMcpSession(
             rpc=FakeRpc(),
             capabilities=McpCapabilities(allow_program=True),
         )
 
-        with self.assertRaisesRegex(ValueError, "only supported for backend 'hw_server'"):
+        with self.assertRaisesRegex(ValueError, "backends 'hw_server' and 'ftdi'"):
             session.connect(backend="openocd", program="design.bit")
 
     def test_program_permission_is_checked_before_backend_specificity(self):
@@ -986,6 +986,11 @@ class FcapzMcpSessionTests(unittest.TestCase):
             )
             session.connect(program=str(bitfile))
             self.assertEqual(rpc.requests[-1]["program"], str(bitfile.resolve()))
+            session.connect(backend="ftdi", program=str(bitfile))
+            self.assertEqual(
+                (rpc.requests[-1]["backend"], rpc.requests[-1]["program"]),
+                ("ftdi", str(bitfile.resolve())),
+            )
             with self.assertRaisesRegex(ValueError, "outside allowed root"):
                 session.connect(program=str(other))
 

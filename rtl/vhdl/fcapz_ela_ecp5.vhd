@@ -37,9 +37,9 @@ architecture rtl of fcapz_ela_ecp5 is
     constant AUX_W      : natural := fcapz_ela_aux_w(TIMESTAMP_W, RLE_W);
     constant AUX_W_SAFE : positive := fcapz_nonzero_width(AUX_W);
 
-    signal tap1_tck, tap1_tdi, tap1_tdo : std_logic;
+    signal tap1_tck, tap1_tdi, tap1_tdo_next : std_logic;
     signal tap1_capture, tap1_shift, tap1_update, tap1_sel : std_logic;
-    signal tap2_tck, tap2_tdi, tap2_tdo : std_logic;
+    signal tap2_tck, tap2_tdi, tap2_tdo_next : std_logic;
     signal tap2_capture, tap2_shift, tap2_update, tap2_sel : std_logic;
     signal jtag_clk, jtag_rst, jtag_wr_en, jtag_rd_en : std_logic;
     signal jtag_addr : std_logic_vector(15 downto 0);
@@ -56,7 +56,7 @@ begin
     u_tap_ctrl : entity work.jtag_tap_ecp5
         generic map (CHAIN => CTRL_CHAIN)
         port map (
-            tck => tap1_tck, tdi => tap1_tdi, tdo => tap1_tdo,
+            tck => tap1_tck, tdi => tap1_tdi, tdo_next => tap1_tdo_next,
             capture => tap1_capture, shift => tap1_shift,
             update => tap1_update, sel => tap1_sel
         );
@@ -64,7 +64,7 @@ begin
     u_tap_data : entity work.jtag_tap_ecp5
         generic map (CHAIN => DATA_CHAIN)
         port map (
-            tck => tap2_tck, tdi => tap2_tdi, tdo => tap2_tdo,
+            tck => tap2_tck, tdi => tap2_tdi, tdo_next => tap2_tdo_next,
             capture => tap2_capture, shift => tap2_shift,
             update => tap2_update, sel => tap2_sel
         );
@@ -78,7 +78,7 @@ begin
     u_reg : entity work.jtag_reg_iface
         port map (
             arst => jtag_rst_ctrl,
-            tck => tap1_tck, tdi => tap1_tdi, tdo => tap1_tdo,
+            tck => tap1_tck, tdi => tap1_tdi, tdo => open, tdo_next => tap1_tdo_next,
             capture => tap1_capture, shift_en => tap1_shift,
             update => tap1_update, sel => tap1_sel,
             reg_clk => jtag_clk, reg_rst => jtag_rst,
@@ -117,7 +117,7 @@ begin
         )
         port map (
             arst => jtag_rst_data,
-            tck => tap2_tck, tdi => tap2_tdi, tdo => tap2_tdo,
+            tck => tap2_tck, tdi => tap2_tdi, tdo => open, tdo_next => tap2_tdo_next,
             capture => tap2_capture, shift_en => tap2_shift,
             update => tap2_update, sel => tap2_sel,
             mem_addr => burst_rd_addr,

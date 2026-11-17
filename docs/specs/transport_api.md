@@ -188,9 +188,10 @@ selected ELA control chain instead of switching to USER2.
   A burst on the control chain ends with a `VERSION` read and 258 idle TCKs.
 
 ### `FtdiMpsseTransport`
-- Drives an FTDI MPSSE cable directly through FTDI's D2XX library; no
-  OpenOCD or vendor server.  Single-device chains; the IR table comes from the
-  IDCODE.
+- Drives an FTDI MPSSE cable directly through FTDI's D2XX library or
+  libusb (`usb:` selectors); no OpenOCD or vendor server.  On a chain of
+  several devices it scans one (`tap=`) with the others in BYPASS; the IR
+  table comes from the IDCODE.
 - Burst readout uses the same raw-scan burst engine as `OpenOcdTransport`.
 - The channel is exclusive to one program, so the slot is selected once on
   entering a `slot_scope` (no `atomic_slot_select`).

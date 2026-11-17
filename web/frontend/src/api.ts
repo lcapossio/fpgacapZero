@@ -126,19 +126,49 @@ export class RpcCancelled extends Error {
   }
 }
 
+let requestSeq = 0;
+const requestPrefix = Math.random().toString(36).slice(2, 10);
+
+/** A request id unique to this page, so a server-side cancel names exactly
+ *  one request. */
+function nextRequestId(): string {
+  requestSeq += 1;
+  return `${requestPrefix}-${requestSeq}`;
+}
+
+export interface RpcOptions {
+  /** When `signal` aborts, also ask the server to interrupt the request
+   *  (`cancel`), not just stop waiting for it.  That ends the session (the
+   *  caller reconnects), so use it where a hung command would otherwise hold
+   *  the server: the connect flow.  A timeout never sends it. */
+  serverCancel?: boolean;
+}
+
 export async function rpc(
   cmd: string,
   params: Record<string, unknown> = {},
   timeoutMs = 8000,
   signal?: AbortSignal,
+  options: RpcOptions = {},
 ): Promise<RpcResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
+  const requestId = nextRequestId();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const onCancel = () => controller.abort();
+  const onCancel = () => {
+    controller.abort();
+    if (options.serverCancel) {
+      // A fresh request: the aborted signal must not abort the cancel too.
+      fetch("/api/rpc", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ cmd: "cancel", target: requestId }),
+      }).catch(() => {});
+    }
+  };
   if (signal?.aborted) onCancel();
   signal?.addEventListener("abort", onCancel);
   let res: Response;
@@ -146,7 +176,7 @@ export async function rpc(
     res = await fetch("/api/rpc", {
       method: "POST",
       headers,
-      body: JSON.stringify({ cmd, ...params }),
+      body: JSON.stringify({ cmd, ...params, request_id: requestId }),
       signal: controller.signal,
     });
   } catch (e) {

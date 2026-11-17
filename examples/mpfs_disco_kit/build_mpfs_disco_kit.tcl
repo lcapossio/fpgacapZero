@@ -3,23 +3,32 @@
 #
 # Libero SoC batch flow for the PolarFire SoC Discovery Kit example.
 # Run through build.py, or directly:
-#   libero SCRIPT:build_mpfs_disco_kit.tcl "SCRIPT_ARGS:<repo path> [program]"
+#   libero SCRIPT:build_mpfs_disco_kit.tcl "SCRIPT_ARGS:<repo path> [manager] [program]"
 #
 # Builds a fresh project under examples/mpfs_disco_kit/libero/ (synthesis,
-# place-and-route, timing, programming data).  With "program", it then
-# programs the board through the first FlashPro found.
+# place-and-route, timing, programming data).  "manager" builds the
+# core-manager variant (mpfs_disco_kit_manager_top.v) instead of the default
+# ELA + EIO design.  With "program", it then programs the board through the
+# first FlashPro found.
 
 if {$argc < 1} {
-    error "Expecting SCRIPT_ARGS:<repo path> \[program\]"
+    error "Expecting SCRIPT_ARGS:<repo path> \[manager\] \[program\]"
 }
 set repo_path [file normalize [lindex $argv 0]]
-set do_program [expr {$argc > 1 && [lindex $argv 1] eq "program"}]
+set opts [lrange $argv 1 end]
+set do_program [expr {[lsearch -exact $opts program] >= 0}]
+set manager [expr {[lsearch -exact $opts manager] >= 0}]
 
 set example_dir "${repo_path}/examples/mpfs_disco_kit"
 set build_dir   "${example_dir}/libero"
-set proj_name   "mpfs_disco_kit_fcapz"
+if {$manager} {
+    set proj_name "mpfs_disco_kit_manager_fcapz"
+    set top       "mpfs_disco_kit_manager_top"
+} else {
+    set proj_name "mpfs_disco_kit_fcapz"
+    set top       "mpfs_disco_kit_top"
+}
 set proj_dir    "${build_dir}/${proj_name}"
-set top         "mpfs_disco_kit_top"
 
 if {[file isdirectory $proj_dir]} {
     file delete -force $proj_dir
@@ -29,7 +38,7 @@ file mkdir $build_dir
 new_project \
     -location $proj_dir \
     -name $proj_name \
-    -project_description {fpgacapZero ELA + EIO on the PolarFire SoC Discovery Kit} \
+    -project_description {fpgacapZero on the PolarFire SoC Discovery Kit} \
     -hdl {VERILOG} \
     -family {PolarFireSoC} \
     -die {MPFS095T} \
@@ -47,14 +56,24 @@ set hdl_files [list \
     "${rtl}/trig_compare.v" \
     "${rtl}/fcapz_ela.v" \
     "${rtl}/fcapz_eio.v" \
-    "${rtl}/fcapz_regbus_mux.v" \
     "${rtl}/jtag_pipe_iface.v" \
-    "${rtl}/jtag_reg_iface.v" \
-    "${rtl}/jtag_burst_read.v" \
     "${rtl}/jtag_tap/jtag_tap_polarfire.v" \
-    "${rtl}/fcapz_ela_polarfire.v" \
-    "${example_dir}/${top}.v" \
 ]
+if {$manager} {
+    lappend hdl_files \
+        "${rtl}/fcapz_core_manager.v" \
+        "${rtl}/fcapz_debug_multi_core.v" \
+        "${rtl}/fcapz_hub_reset.v" \
+        "${rtl}/fcapz_debug_multi.v" \
+        "${rtl}/fcapz_debug_multi_polarfire.v"
+} else {
+    lappend hdl_files \
+        "${rtl}/fcapz_regbus_mux.v" \
+        "${rtl}/jtag_reg_iface.v" \
+        "${rtl}/jtag_burst_read.v" \
+        "${rtl}/fcapz_ela_polarfire.v"
+}
+lappend hdl_files "${example_dir}/${top}.v"
 foreach src $hdl_files {
     create_links -hdl_source $src
 }

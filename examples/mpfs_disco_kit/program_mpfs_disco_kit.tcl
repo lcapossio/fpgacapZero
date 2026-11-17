@@ -3,16 +3,20 @@
 #
 # Program the PolarFire SoC Discovery Kit from the project that
 # build_mpfs_disco_kit.tcl made, through the first FlashPro found.
-#   libero SCRIPT:program_mpfs_disco_kit.tcl "SCRIPT_ARGS:<repo path>"
+#   libero SCRIPT:program_mpfs_disco_kit.tcl "SCRIPT_ARGS:<repo path> [manager]"
 #
 # Nothing else may hold the FlashPro's JTAG channel (OpenOCD, a bit-bang
 # bridge) while this runs.
 
 if {$argc < 1} {
-    error "Expecting SCRIPT_ARGS:<repo path>"
+    error "Expecting SCRIPT_ARGS:<repo path> \[manager\]"
 }
 set repo_path [file normalize [lindex $argv 0]]
-set proj_name "mpfs_disco_kit_fcapz"
+if {[lsearch -exact [lrange $argv 1 end] manager] >= 0} {
+    set proj_name "mpfs_disco_kit_manager_fcapz"
+} else {
+    set proj_name "mpfs_disco_kit_fcapz"
+}
 set proj_file "${repo_path}/examples/mpfs_disco_kit/libero/${proj_name}/${proj_name}.prjx"
 
 open_project -file $proj_file

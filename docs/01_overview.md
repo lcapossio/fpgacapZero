@@ -109,9 +109,11 @@ Use cases that just work:
 - Two FPGAs talk over JTAG via two `fcapz-uart` instances on the
   host, no UART wires.
 
-Full chapter: [chapter 08](08_ejtag_uart_bridge.md).  Note: there is
-one known limitation with internal loopback at 115200 baud — see
-chapter 17 for details.
+Full chapter: [chapter 08](08_ejtag_uart_bridge.md).  The bytes once
+dropped on back-to-back internal-loopback traffic at 115200 baud
+(BUG-002) were a host-side bug, fixed without a bitstream change; the
+Arty A7 loopback stress test has not been re-run since the fix.  See
+chapter 08 for details.
 
 ## How the cores fit together
 
@@ -120,9 +122,10 @@ USER4 on AMD/Xilinx 7-series / UltraScale, equivalent on other vendors), so
 multiple cores can coexist in the same bitstream and the host stack can
 talk to all of them in one xsdb / OpenOCD session.  Designs can also put
 multiple ELA and EIO slots behind one core manager on a single chain when you
-want more debug endpoints than free USER chains: `fcapz_debug_multi_xilinx7`,
-`fcapz_debug_multi_xilinxus` and `fcapz_debug_multi_intel` share one
-vendor-free core and differ only in the TAP primitive.
+want more debug endpoints than free USER chains: the
+`fcapz_debug_multi_<vendor>` hubs (`xilinx7`, `xilinxus`, `intel`, `ecp5`,
+`polarfire`, `efinix`, `gowin`) share one vendor-free core and differ only in
+the TAP adapter.
 
 | Core | Default chain | Default IR (7-series and single-die UltraScale, 6-bit IR) |
 |------|---------------|-----------------------------------------------------------|
@@ -163,7 +166,8 @@ Everything talks to a Python package called `fcapz`.  After
   long-running test harnesses.  Documented in
   [chapter 11](11_rpc_server.md).
 - **`fcapz-gui` desktop app** (optional, install with
-  `pip install fpgacapzero[gui]`) — PySide6 control panel that wraps
+  `pip install fpgacapzero[gui]`; not actively maintained, so prefer the
+  web interface, `fcapz-web`) — PySide6 control panel that wraps
   every controller with a graphical front-end, including an embedded
   `pyqtgraph` waveform preview and one-click "open in GTKWave /
   Surfer / WaveTrace" for the captured `.vcd`.  Documented in
@@ -175,9 +179,10 @@ automatically, applies the readiness wait after programming the FPGA,
 and surfaces protocol errors with actionable messages.  Bypassing it
 loses all of that.
 
-## Three JTAG transports
+## JTAG transports
 
-The host stack supports three JTAG transports out of the box:
+The host stack supports four JTAG transports out of the box, plus a serial
+TAP bridge for boards with no JTAG to the fabric:
 
 - **AMD/Xilinx hw_server / XSDB** — the default for AMD/Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
@@ -202,9 +207,16 @@ The host stack supports three JTAG transports out of the box:
   [`specs/transport_api.md`](specs/transport_api.md) for the tested
   Quartus edition.
 - **Direct FTDI (`ftdi`)** — drives an FTDI MPSSE cable (the FlashPro5
-  on Microchip boards, Digilent cables) through FTDI's D2XX library, with
-  no OpenOCD or vendor server.  The IR table comes from the device
-  IDCODE.  Hardware-validated on the PolarFire SoC Discovery Kit.
+  on Microchip boards, Digilent cables, the Kria KV260 carrier, or any
+  FT2232H/FT4232H) through FTDI's D2XX library or libusb, with no OpenOCD
+  or vendor server.  The IR table comes from the device IDCODE.  On a
+  chain of several devices (the KV260's ARM DAP and FPGA) it picks the
+  one device whose family it recognises, provided every IR length can be
+  worked out, and keeps the others in BYPASS; anything ambiguous needs the Python API's `tap=` / `ir_lengths=`, which the CLI, RPC, MCP, GUI and web interface do not expose.  Programs AMD/Xilinx 7-series
+  FPGAs.  Hardware-validated over D2XX on the PolarFire SoC Discovery Kit,
+  the Arty A7 and the Kria KV260; libusb and multi-device chains are on
+  `main`, not yet released, and libusb is validated for raw JTAG scans
+  only.
 - **Serial TAP bridge (`serial`)** — for boards with no JTAG to the
   fabric.  The design instantiates `fcapz_ela_uart`, which rebuilds the
   TAP contract from a byte stream on two pins, and the host talks to it
@@ -228,7 +240,7 @@ changes needed.  See [chapter 14](14_transports.md) and
 | Intel / Altera | `sld_virtual_jtag` | [`fcapz_*_intel.v`](../rtl/) | ✅ DE25-Nano (Agilex 5) / USB-Blaster |
 | Gowin GW1N / GW2A | Gowin `GW_JTAG` primitive | [`fcapz_*_gowin.v`](../rtl/) | ✅ BRS-100-GW1NR9 |
 | Microchip PolarFire / PolarFire SoC | `UJTAG` | [`fcapz_*_polarfire.v`](../rtl/) | ✅ PolarFire SoC Discovery Kit (MPFS095T) |
-| Efinix Trion / Titanium | Efinity JTAG User TAP (×2, Interface Designer) | [`fcapz_ela_efinix.v`](../rtl/) | ⏳ Synthesized, placed and routed in Efinity (T20F256, Ti60F225) — hardware validation pending |
+| Efinix Trion / Titanium | Efinity JTAG User TAP (×2, Interface Designer) | [`fcapz_ela_efinix.v`](../rtl/), [`fcapz_debug_multi_efinix.v`](../rtl/), [`fcapz_axi_mon_efinix.v`](../rtl/) | ⏳ Synthesized, placed and routed in Efinity (T20F256, Ti60F225) — hardware validation pending |
 | Any FPGA without fabric JTAG | none: UART TAP bridge on two pins | [`fcapz_ela_uart.v`](../rtl/) | ✅ Forgix (Efinix Trion T8F49) |
 | AMD/Xilinx Versal (XCVM/VC/VP/VE/VH) | Different TAP primitive (CIPS / `BSCANE2_INST`) | **Not supported** | — |
 

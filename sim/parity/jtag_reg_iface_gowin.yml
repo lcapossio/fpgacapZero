@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "jtag_reg_iface_gowin_parity",
+  "description": "Formal Verilog/VHDL parity for the Gowin JTAG register bridge (separate shift-in/shift-out strobes)",
+  "golden": {
+    "language": "verilog",
+    "top": "jtag_reg_iface_gowin",
+    "sources": [
+      "../../rtl/jtag_reg_iface_gowin.v"
+    ]
+  },
+  "candidate": {
+    "language": "vhdl",
+    "std": "08",
+    "top": "jtag_reg_iface_gowin",
+    "sources": [
+      "../../rtl/vhdl/core/jtag_reg_iface_gowin.vhd"
+    ]
+  },
+  "formal": {
+    "induct_depth": 8,
+    "bounded_depth": 16,
+    "reset_inputs": [
+      "arst"
+    ],
+    "clock_inputs": [
+      "tck"
+    ],
+    "reset_cycles": 2,
+    "modules": [
+      {
+        "name": "jtag_reg_iface_gowin",
+        "param_sets": [
+          {}
+        ]
+      }
+    ]
+  }
+}

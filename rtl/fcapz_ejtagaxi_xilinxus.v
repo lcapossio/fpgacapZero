@@ -25,6 +25,7 @@ module fcapz_ejtagaxi_xilinxus #(
     parameter RESP_FIFO_DEPTH = FIFO_DEPTH * 2,
     parameter TIMEOUT    = 4096,
     parameter DEBUG_EN   = 0,
+    parameter STREAM_EN  = 0,       // streaming read (FEATURES[24]); Verilog only
     parameter CMD_FIFO_MEMORY_TYPE   = "auto",
     parameter RESP_FIFO_MEMORY_TYPE  = "auto",
     parameter BURST_FIFO_MEMORY_TYPE = "auto",
@@ -79,6 +80,7 @@ module fcapz_ejtagaxi_xilinxus #(
         .RESP_FIFO_DEPTH(RESP_FIFO_DEPTH),
         .TIMEOUT(TIMEOUT),
         .DEBUG_EN(DEBUG_EN),
+        .STREAM_EN(STREAM_EN),
         .CMD_FIFO_MEMORY_TYPE(CMD_FIFO_MEMORY_TYPE),
         .RESP_FIFO_MEMORY_TYPE(RESP_FIFO_MEMORY_TYPE),
         .BURST_FIFO_MEMORY_TYPE(BURST_FIFO_MEMORY_TYPE),

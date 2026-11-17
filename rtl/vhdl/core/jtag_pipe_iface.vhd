@@ -26,6 +26,8 @@ entity jtag_pipe_iface is
         tck      : in  std_logic;
         tdi      : in  std_logic;
         tdo      : out std_logic;
+        -- The value tdo takes at the next tck edge; see jtag_reg_iface.v.
+        tdo_next : out std_logic;
         capture  : in  std_logic;
         shift_en : in  std_logic;
         update   : in  std_logic;
@@ -108,6 +110,14 @@ begin
         severity failure;
 
     tdo       <= sr(0);
+    tdo_next  <= '0'          when arst = '1' else
+                 burst_header(0) when (sel and capture and (burst_start xor burst_start_seen)) = '1'
+                                      and HEADER_EN /= 0 else
+                 sr(0)        when (sel and capture and (burst_start xor burst_start_seen)) = '1' else
+                 staging(0)   when (sel and capture and burst_mode) = '1' else
+                 reg_rdata(0) when (sel and capture) = '1' else
+                 sr(1)        when (sel and shift_en) = '1' else
+                 sr(0);
     reg_clk   <= tck;
     reg_rst   <= arst;
     reg_wr_en <= reg_wr_en_r;

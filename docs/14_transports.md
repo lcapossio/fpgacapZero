@@ -2,14 +2,11 @@
 
 > [!NOTE]
 > **Goal**: understand the `Transport` abstract base class, the built-in
-> backends (AMD/Xilinx hw_server, OpenOCD, and Quartus USB-Blaster), the named
+> backends (AMD/Xilinx hw_server, OpenOCD, Quartus USB-Blaster, direct FTDI,
+> and the serial TAP bridge), the named
 > `IR_TABLE_*` presets that handle the AMD/Xilinx per-family IR opcode
 > differences, the readiness wait that catches "FPGA isn't programmed yet",
 > the TCL injection prevention, and how to add a new transport.
->
-> **Audience**: anyone whose default transport doesn't work for
-> their board, or anyone porting fcapz to a new JTAG cable / TCF /
-> raw USB stack.
 
 ## What a transport is
 
@@ -23,6 +20,7 @@ operations the controllers care about:
 | `select_chain(chain)` | Switch to a BSCANE2 USER chain (`1`..`4`) — internally this picks an IR opcode from the `ir_table` |
 | `read_reg(addr)` / `write_reg(addr, value)` | 49-bit DR scan against the chain's register interface |
 | `raw_dr_scan(bits, width)` / `raw_dr_scan_batch(...)` | Raw DR shift for the burst engines (32-, 72-, 256-bit) |
+| `raw_dr_capture(width, tdi=0)` | One long DR scan shifting a constant TDI, returning TDO (the EJTAG-AXI streaming read). The default builds the word and calls `raw_dr_scan()` |
 
 For EJTAG-AXI on Arty / `hw_server`, the batched form matters in
 practice: isolated USER4 raw scans were observed to return zeros on
@@ -89,7 +87,7 @@ spec you implement against if you're adding a new backend.
 
 Drives Vivado's `hw_server` daemon via `xsdb` (the AMD/Xilinx system
 debugger console).  This is the **default for AMD/Xilinx boards** and
-the only path that has been hardware-validated on Arty A7-100T.
+hardware-validated on Arty A7-100T (direct FTDI is too).
 
 ```python
 from fcapz import XilinxHwServerTransport
@@ -245,6 +243,23 @@ bugs (BUG-004).
 timestamps = transport.read_timestamp_block(0x1100, capture_len, 32)
 ```
 
+#### Long scans and the chain lock
+
+Two methods serve the EJTAG-AXI [streaming read](07_ejtag_axi_bridge.md#streaming-read):
+
+- `raw_dr_capture(width, tdi=0)` shifts one DR scan of a constant TDI
+  with `drshift -tdi`, so no per-bit Tcl string goes in, and reads TDO
+  back with `run -hex`.  A 270 kbit scan costs about its TCK time.
+- `jtag_lock(timeout_ms=5000)` / `jtag_unlock()` wrap xsdb's
+  `jtag lock` / `jtag unlock`.  One `jtag sequence` always runs
+  uninterrupted, but between two sequences other hw_server clients (a
+  soft-CPU debugger, the Vivado hardware manager, hw_server's own
+  polls) can scan the chain.  A protocol that keeps state across
+  sequences holds the lock for its whole length.  `jtag_lock()` raises
+  `RuntimeError` when the lock is not granted; `jtag_unlock()` is best
+  effort.  Only `XilinxHwServerTransport` has them; `stream_read()`
+  looks them up with `getattr` and runs unprotected without them.
+
 ### `OpenOcdTransport`
 
 Talks to OpenOCD's TCL listener (default port `6666`) via raw
@@ -376,6 +391,13 @@ Discovery Kit the full hardware suite runs this way, captures by burst
 (1024 samples in about 0.05 s).  The bridge drives each TCK edge as a pin
 write, so it is slower than OpenOCD's own `ftdi` driver for long scans; for
 fcapz alone, [`FtdiMpsseTransport`](#ftdimpssetransport) is faster still.
+
+Some FT2232-compatible adapters (the BRS-100's) implement only MPSSE's
+clocked commands: pin writes (`0x80`) do nothing and pin reads (`0x81`)
+return a constant.  The bridge checks for that when it opens the adapter
+and then sends each rising TCK edge as a one-bit clocked command, which
+also reads TDO where OpenOCD samples it; it says so when it starts.  TRST
+is not driven there.  The Gowin BRS-100 hardware suite runs this way.
 
 #### Efinix (Trion / Titanium) over OpenOCD
 
@@ -635,51 +657,128 @@ literal device names.
 ### `FtdiMpsseTransport`
 
 Drives an FTDI MPSSE JTAG adapter directly through FTDI's D2XX library
-(`ftd2xx.dll`, `libftd2xx.so`), with no OpenOCD or vendor server in between.
+(`ftd2xx.dll`, `libftd2xx.so`) or, with a `usb:` selector, through libusb
+(see **libusb** below), with no OpenOCD or vendor server in between.
 Each register access is one USB round trip.  A whole burst or register-window
 block takes a few USB transfers.
 
 ```python
 from fcapz import FtdiMpsseTransport
 
-t = FtdiMpsseTransport()               # the single FlashPro / Digilent channel A
+t = FtdiMpsseTransport()               # the single FlashPro / Digilent / KV260 channel A
 # t = FtdiMpsseTransport("Embedded FlashPro5 A", tck_hz=15e6)
 t.connect()
 print(hex(t.idcode), t.family)         # 0xf8181cf polarfire (MPFS095T)
 ```
 
-CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel and
-`--tck-mhz` sets the clock.
+CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
+`--tck-mhz` sets the clock and `--program` loads a bitstream first.
 
 - **Adapter.** `device` is a D2XX channel description (for example
   `"Embedded FlashPro5 A"`) or a serial.  Left empty, the transport uses
-  the channel A of the one known adapter (FlashPro or Digilent).  If there
-  are several, it asks you to name one.  `list_ftdi_devices()` lists the
+  the channel A of the one known adapter (FlashPro, Digilent or the KV260
+  carrier); other adapters are never picked, so name them.  If there are
+  several known ones, it asks you to name one.  `list_ftdi_devices()` lists the
   channels.  Known adapters get their pin layout (FlashPro5: nTRST on ADBUS4;
-  Digilent: buffer enable on ADBUS7).  For other adapters, pass
+  Digilent: buffer enable on ADBUS7; the Kria KV260 carrier card, `"ML
+  Carrier Card A"`: ADBUS5 driven low).  For other adapters, pass
   `layout=(value, direction)`.
-- **One device on the chain.** `connect()` reads the IDCODE chain and
-  measures the IR length.  Only single-device chains are supported.  The IR
-  table comes from the IDCODE: PolarFire (`0x20` / `0x21`), AMD/Xilinx
-  (IR length 6: 7-series and single-die UltraScale, which share the USER
-  codes) or Gowin.  For anything else, multi-die UltraScale(+) included,
-  pass `ir_table=` with the part's codes from its BSDL.
+- **Device and IR table.** `connect()` reads the IDCODE chain and
+  measures the IR length.  The IR table comes from the IDCODE: PolarFire
+  (`0x20` / `0x21`), AMD/Xilinx with IR length 6 (7-series, Zynq-7000 PL
+  and single-die UltraScale, which share the USER codes), Zynq
+  UltraScale+ MPSoC (IR length 12: `0x902` / `0x903` / `0x922` / `0x923`)
+  or Gowin.  For anything else, multi-die UltraScale(+) included, pass
+  `ir_table=` with the part's codes from its BSDL.
+- **Several devices on the chain.** The transport scans one device and
+  keeps the others in BYPASS: their IRs get all ones and each adds one
+  bit to every DR scan, which the transport pads and strips.  Devices are
+  numbered from the TDO end, in the order their IDCODEs are read; a device
+  in BYPASS after reset (a Zynq UltraScale+ ARM DAP) shows up without an
+  IDCODE.  `tap=` picks one; by default it is the one device whose family
+  is known, and a chain with none or several asks for `tap=`.  Each
+  device's IR length comes from its IDCODE where known (AMD/Xilinx
+  7-series and Zynq UltraScale+, ARM DAP: 4), and a single device left
+  over gets the rest of the measured total; otherwise pass
+  `ir_lengths=[...]` in the same order.  `tap=` and `ir_lengths=` are
+  Python API arguments only: the CLI, RPC, MCP, GUI and web interface rely
+  on the automatic choice.  `chain` and `chain_tap` report
+  what `connect()` found.  `program()` works through such a chain too.
+  Transports sharing a channel all scan the device it was opened for.
+  Validated on a Kria KV260 (ARM DAP in BYPASS on the TDO side, then the
+  `xck26`): its hardware suite passes over FTDI at 15 and 30 MHz.
 - **Burst.** `burst` defaults to the family's wrapper default: on for
   PolarFire and AMD/Xilinx (single chain), off for Gowin.  `burst=False`
   (CLI `--no-burst`) reads through the pipelined register window instead.
 - **Clock.** `tck_hz` (default 6 MHz) becomes 30 MHz divided by an integer,
   so 30 MHz at most.  `actual_tck_hz` reports the clock you got.
+- **TDO sample edge.** Up to 15 MHz TDO is sampled on the rising TCK edge,
+  above it on the falling edge (`sample_falling` says which), a full period
+  after the target drove it.  At 30 MHz the Arty A7's onboard cable takes
+  longer than half a period to return TDO: sampled on the rising edge, every
+  bit lands one late (IDCODE `0x27c72027`, IR length 7).
+  `tdo_sample_edge="rising"` or `"falling"` overrides the choice.
 - **Driver.** On Windows, FTDI-based cables (FlashPro5, Digilent) already run
   on FTDI's D2XX driver, which installs `ftd2xx.dll`, so you swap no
   drivers.  Each channel opens for one program at a time.  Close Libero's
   programmer, FlashPro Express, hw_server or OpenOCD before connecting, and
-  disconnect before programming.  On Linux, install FTDI's D2XX library and
+  disconnect before programming with them.  On Linux, install FTDI's D2XX library and
   detach `ftdi_sio` from the adapter.  `$FCAPZ_D2XX_LIBRARY` names the
   library explicitly.
+- **libusb.** An adapter bound to WinUSB or libusbK on Windows (as OpenOCD
+  or Zadig sets it up), or any adapter on Linux and macOS without FTDI's
+  library, works through libusb: `pip install fpgacapzero[usb]` (pyusb and
+  a bundled libusb; until the next release, `pip install -e ".[usb]"` from a
+  `main` checkout), then name the channel with a `usb:` selector.  `usb:`
+  alone picks the one known adapter, `usb:Digilent USB Device A` names it
+  by description and `usb:<serial>` by serial.  libusb channels are named as
+  D2XX names them (product string, channel letter on a multi-channel chip),
+  so the known pin layouts apply.  Without the D2XX library a plain
+  `device` picks from the libusb channels too.  `list_ftdi_targets()` lists
+  the selectors of both.  Nothing reads the chip in the background as D2XX
+  does, so a transfer whose reply could fill the chip's buffer reads on a
+  second thread while it writes.  On an FT2232H bound to WinUSB (through
+  libusb-1.0 and libusb-0.1 alike) 307,200 bytes shifted through BYPASS come
+  back bit-exact at 1 to 30 MHz, 3.3 MB/s at 30 MHz.  A full `connect()`
+  session (identification, register access, captures) over libusb has not
+  been run on hardware yet; it shares every scan path with D2XX, which has.
 - **Sharing in one process.** Transports on the same channel in one Python
   process share one handle: for example the ELA, EIO and bridge sessions of
-  the RPC server or the GUI.  The first transport's clock and layout apply,
-  and the channel closes with the last transport.
+  the RPC server or the GUI.  The first transport's clock, layout and sample
+  edge apply,
+  and the channel closes with the last transport.  A channel is matched by
+  USB VID/PID, serial and channel letter, so a D2XX name and a `usb:` name
+  for the same channel share it.  If a USB transfer fails partway, the
+  channel closes for every transport on it (the adapter may be left
+  mid-command); each refuses I/O until it connects again, which opens the
+  channel afresh.  A channel opened with `open_pins()` (`fcapz
+  openocd-bridge`) is never shared: other transports in the process are
+  refused it.
+- **Programming.** `program(bitfile)`, or `bitfile=` (CLI `--program`, RPC
+  and MCP `program`, the desktop GUI's *Program on connect*), configures an
+  AMD/Xilinx 7-series FPGA over JTAG with a Vivado `.bit` or a raw `.bin`,
+  following UG470: JPROGRAM, wait for INIT_COMPLETE, shift the bitstream
+  through CFG_IN, JSTART, then wait for DONE (the MCP server takes `.bit`
+  only).  A bitstream built for another part (its IDCODE check) is refused
+  before the FPGA is cleared, and DONE staying low (a corrupt bitstream
+  fails its CRC) is an error.  `bitfile=` programs only when the transport
+  opens the channel, and no other transport can join until programming
+  ends; one that joins a channel another transport holds never reprograms
+  the FPGA under it.  `program()` is refused while other transports share
+  the channel.  If a USB transfer fails partway through, the channel is
+  closed, since the adapter may be left mid-command; connect again.
+  Cancelling (the RPC and MCP watchdogs, the GUI's Cancel) takes no lock:
+  programming stops within about a quarter second of TCK and closes the
+  channel the same way, and any other call stops at its next USB transfer,
+  leaving other transports on the channel working.  A batch of scans
+  longer than about a quarter second of TCK (a very wide `raw_dr_scan` at
+  a slow clock) goes in pieces of that length, each waited for, so no USB
+  transfer outlasts `timeout_ms`; a cancel between pieces returns the TAP
+  to Run-Test/Idle first.  The
+  Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
+  Single-die UltraScale takes the same sequence but is not
+  hardware-validated; PolarFire and Gowin are not supported (use their
+  vendor tools).  The web interface has no bitstream field.
 - **Validated** on the PolarFire SoC Discovery Kit's embedded FlashPro5: all
   11 hardware tests of
   [`examples/mpfs_disco_kit`](../examples/mpfs_disco_kit/README.md) pass, in
@@ -694,9 +793,20 @@ Measured on the PolarFire Discovery Kit (embedded FlashPro5, 6 MHz TCK):
 | 1024-sample burst | 3 ms |
 | 1024 samples through the register window | 22 ms |
 
-All 11 board hardware tests pass on it.  On an Arty A7, the Digilent channel
-identifies the xc7a100t, but no fcapz core answered on the bitstream loaded
-at the time, so register and burst access on AMD/Xilinx remain unverified.
+All 11 board hardware tests pass on it.
+
+On the Arty A7 (`arty_a7_vex_top`, onboard Digilent channel A) the board's
+hardware suite (`FPGACAP_BACKEND=ftdi`, see
+[`examples/arty_a7`](../examples/arty_a7/README.md)) passes at 6 and 30 MHz
+with no Vivado at all: it programs the bitstream over FTDI, then runs ELA,
+EIO, EJTAG-AXI, the AXI monitor and the configuration-time startup-arm test,
+71 tests in about 25 s.  Only the tests that need a UART loopback bitstream
+are skipped.  At 30 MHz `read_block` reads about 190 KB/s and the streaming
+read about 2.8 MB/s (1.9 MB/s through `hw_server` on the same cable).
+The web interface works over it too, at its fixed 6 MHz: connect, the core
+list, an ELA capture, EIO writes and input polling, AXI read, write and dump
+(single and burst), and an AXI-monitor capture triggered by a write, with
+that transaction decoded.
 
 ## IR table presets
 
@@ -731,10 +841,19 @@ swap one for the other without changing the IR table.
 | AMD/Xilinx Kintex / Virtex UltraScale (standalone) | none on hw_server; `IR_TABLE_XILINX_ULTRASCALE` (alias `IR_TABLE_US`) for raw opcodes on single-die parts | `use_register_ir=True` on hw_server |
 | AMD/Xilinx Artix / Kintex / Virtex UltraScale+ (standalone) | none on hw_server; raw opcodes from the part's BSDL | `use_register_ir=True` on hw_server |
 | **Zynq UltraScale+ MPSoC** (Kria xck24/xck26, ZCU+ xczu*) | none | `use_register_ir=True` (see below) |
-| Lattice ECP5, Intel | n/a — those vendors use different TAP primitives, not BSCANE2; the transport's `ir_table` doesn't apply.  See "Adding a new transport" below. | n/a |
+| Lattice ECP5 | `OpenOcdTransport.IR_TABLE_ECP5` (ER1 / ER2 = `0x32` / `0x38`, as in `rtl/jtag_tap/jtag_tap_ecp5.v`) | Auto-selected by the CLI for `--tap ecp5...` / `lfe5...`; RPC/MCP `ir_table: "ecp5"`.  ECP5 is not hardware-validated. |
+| Intel / Altera | n/a — `sld_virtual_jtag` chains are addressed by instance index on the USB-Blaster transport; `ir_table` doesn't apply | n/a |
 | Gowin GW-family | `OpenOcdTransport.IR_TABLE_GOWIN` | Auto-selected by the CLI for `--tap GW...`; current RTL wrappers still require one shared `GW_JTAG` primitive per design |
 | Microchip PolarFire / PolarFire SoC | `OpenOcdTransport.IR_TABLE_POLARFIRE` | Auto-selected by the CLI for `--tap MPF...`; one `UJTAG` per device |
 | Efinix Trion / Titanium | `OpenOcdTransport.IR_TABLE_EFINIX` | Auto-selected by the CLI for `--tap trion.../titanium.../efinix...`; opcodes match Efinity's BSDL for Trion and Titanium |
+
+On ECP5 from Python, pass the preset when you build the transport (the
+tap name is whatever your OpenOCD config declares, `ecp5.tap` with
+OpenOCD's stock Lattice ECP5 target file):
+
+```python
+t = OpenOcdTransport(port=6666, tap="ecp5.tap", ir_table=OpenOcdTransport.IR_TABLE_ECP5)
+```
 
 On MPSoC the ARM DAP's 1-bit BYPASS register is in series with the PL
 TAP's DR, so every DR scan is one shift longer than the fcapz frame.
@@ -807,6 +926,8 @@ BYPASS padding internally — the host shifts standard 49-bit / 256-bit
 DRs with no extra bits.
 
 Verified on xck26 / KV260:
+
+<!-- docs-sync: skip (measured on a v0.3 bitstream) -->
 
 | `-register` name | DR width | Result |
 |---|---|---|

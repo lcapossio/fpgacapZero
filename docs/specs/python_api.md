@@ -995,6 +995,19 @@ Default implementation calls `raw_dr_scan` in a loop.
 Override for transports that support batched transfers (e.g. a
 single `jtag sequence` round-trip in XSDB).
 
+#### `Transport.raw_dr_capture`
+
+```python
+raw_dr_capture(width: int, *, chain: int | None = None, tdi: int = 0) -> int
+```
+
+One DR scan of *width* bits shifting a constant *tdi* (0 or 1).
+
+Returns the captured TDO value.  Used for long scans such as the
+EJTAG-AXI streaming read, where only TDO carries data.  The default
+builds the constant word and calls `raw_dr_scan`; transports
+with a cheaper way to shift a constant override it.
+
 ### `OpenOcdTransport`
 
 ```python
@@ -1039,12 +1052,15 @@ IR_TABLE_XILINX_ULTRASCALE = {1: 2, 2: 3, 3: 34, 4: 35}
 IR_TABLE_GOWIN = {1: 66, 2: 67}
 IR_TABLE_POLARFIRE = {1: 32, 2: 33}
 IR_TABLE_EFINIX = {1: 8, 2: 9}
+IR_TABLE_ECP5 = {1: 50, 2: 56}
 IR_TABLE_XILINX_ZYNQUS = {1: 2306, 2: 2307, 3: 2338, 4: 2339}
 IR_TABLE_US = {1: 2, 2: 3, 3: 34, 4: 35}
 USER1_IR = 2
 READ_IDLE_CYCLES = 20
 _BATCH_TIMEOUT_SEC = 5.0
 _BATCH_TIMEOUT_PER_SCAN_SEC = 0.05
+_SCAN_TIMEOUT_PER_BIT_SEC = 5e-05
+_CONNECT_SYNC_TIMEOUT_SEC = 40.0
 ```
 
 #### `OpenOcdTransport.connect`
@@ -1086,7 +1102,14 @@ Close the transport.  Must be idempotent — safe to call multiple times.
 cancel() -> None
 ```
 
-Best-effort abort for an in-flight backend operation.
+Abort the call in flight from another thread.
+
+Takes no lock the call holds: it detaches the session and shuts its
+socket down, so a blocked `recv()` ends at once and the call fails
+with `ConnectionError`.  No `MGR_OWNER` release either, as that
+is scans from the cancelling thread racing the call being aborted;
+the token stays set, as after a cancel on the other backends.  A
+`connect` in progress does not publish its socket.
 
 #### `OpenOcdTransport.select_chain`
 
@@ -1113,6 +1136,10 @@ raw_dr_scan(bits: int, width: int, *, chain: int | None = None) -> int
 ```
 
 Perform a raw DR scan via irscan + drscan on the OpenOCD socket.
+
+OpenOCD answers only once the whole scan has shifted, so the read
+timeout grows with *width*: a streaming read's scan of half a
+million bits outlasts the base timeout on a slow adapter.
 
 #### `OpenOcdTransport.write_reg`
 
@@ -1327,6 +1354,44 @@ raw_dr_scan_batch(
 ```
 
 Perform multiple raw DR scans in one XSDB jtag sequence.
+
+#### `XilinxHwServerTransport.jtag_lock`
+
+```python
+jtag_lock(timeout_ms: int = 5000) -> None
+```
+
+Lock the FPGA's scan chain against every other hw_server client.
+
+One `jtag sequence` always runs uninterrupted, but between two
+sequences other clients (the MicroBlaze debugger, Vivado, hw_server's
+own polls) may scan the chain.  A protocol that keeps state across
+sequences, such as the EJTAG-AXI streaming read, holds this lock for
+its whole length.  Raises RuntimeError if the lock is not granted.
+
+#### `XilinxHwServerTransport.jtag_unlock`
+
+```python
+jtag_unlock() -> None
+```
+
+Release `jtag_lock` (errors ignored: best effort).
+
+#### `XilinxHwServerTransport.raw_dr_capture`
+
+```python
+raw_dr_capture(width: int, *, chain: int | None = None, tdi: int = 0) -> int
+```
+
+One long DR scan of a constant *tdi*.
+
+The constant data is built inside xsdb (`string repeat`), so no
+per-bit TCL string crosses the pipe, and `run -hex` brings TDO back
+at 4 bits per character (little-endian bytes, two hex digits each).
+The scan then runs at what hw_server shifts through the cable: on
+the Arty A7 at TCK 30 MHz, about 18 Mbit/s.  Not
+`drshift -tdi 0`: through the Arty's Digilent cable (Vivado 2025.2)
+it shifts ones, which aborts an EJTAG-AXI stream.
 
 #### `XilinxHwServerTransport.read_reg`
 
@@ -1902,24 +1967,49 @@ FtdiMpsseTransport(
     burst_data_chain: int = 2,
     layout: tuple[int, int] | None = None,
     timeout_ms: int = 2000,
+    tdo_sample_edge: str | None = None,
+    bitfile: str | None = None,
+    tap: int | None = None,
+    ir_lengths: Sequence[int] | None = None,
 )
 ```
 
 Subclass of `_ScanBurstMixin`, `Transport`.
 
-fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
+fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver, or
+libusb with a `usb:` selector).
 
 `device` names the adapter channel by its D2XX description (for
-example `"Embedded FlashPro5 A"`) or serial; by default the single
-known JTAG adapter's channel A is used.  `ir_table` defaults to the
+example `"Embedded FlashPro5 A"`) or serial, or a libusb channel as
+`usb:DESCRIPTION` or `usb:SERIAL` (`usb:` alone: the one known
+adapter); by default the single known JTAG adapter's channel A
+(FlashPro, Digilent or KV260 carrier) is used.  `ir_table` defaults to the
 family read from the device IDCODE: PolarFire (`0x20` / `0x21`),
 AMD/Xilinx 7-series and single-die UltraScale (`0x02` / `0x03` /
-`0x22` / `0x23`) or Gowin.  `burst` defaults to that
+`0x22` / `0x23`), Zynq UltraScale+ MPSoC (`0x902` / `0x903` /
+`0x922` / `0x923`) or Gowin.  `burst` defaults to that
 family's wrapper default (on for PolarFire and AMD/Xilinx, off for
 Gowin).  `layout` overrides the adapter's `(ADBUS value, direction)`.
+A chain of several devices (a Zynq's ARM DAP beside its PL, say) is
+reached through one of them, *tap*, numbered from the TDO end as the
+IDCODEs are read (0 is nearest TDO); by default the one device whose
+family is known.  The others are kept in BYPASS.  Each device's IR
+length comes from its IDCODE where known (AMD/Xilinx 7-series, Zynq
+UltraScale+, ARM DAP), a single unknown one from the measured total;
+otherwise pass *ir_lengths*, in the same order.
+`tdo_sample_edge` is `"rising"` or `"falling"`; by default TDO is
+sampled on the rising edge up to 15 MHz and on the falling edge above,
+where a cable's TDO round trip can exceed half a TCK period (the Arty
+A7 reads a shifted IDCODE at 30 MHz on the rising edge).
+
+`bitfile` programs an AMD/Xilinx 7-series FPGA with that `.bit` or
+`.bin` at connect (see `program`), only when this transport opens
+the channel: one joining a channel another transport holds never
+reprograms the FPGA under it.
 
 Transports on the same channel in one process share its handle (the
-first one's clock and layout apply); the channel closes with the last.
+first one's clock, layout and sample edge apply); the channel closes
+with the last.
 
 Class constants:
 
@@ -1929,6 +2019,8 @@ WRITE_IDLE_CYCLES = 8
 RAW_DR_IDLE_CYCLES = 8
 USER1_PIPE_PRIME_READS = 3
 MAX_DEVICES = 8
+STARTUP_IDLE_CYCLES = 4000
+STATUS_POLL_IDLE_CYCLES = 1000
 _FLUSH_CMD_BYTES = 61440
 _FLUSH_READ_BYTES = 32768
 ```
@@ -1960,9 +2052,9 @@ Open the channel for code that drives the JTAG pins itself.
 
 Sets up MPSSE like `connect` but does not scan the chain, so any
 chain works, and the channel is not shared: no transport in this
-process can join it.  Drive it with `exchange`; `close`
+process can join or open it.  Drive it with `exchange`; `close`
 releases it.  Returns the `(ADBUS value, direction)` layout in
-force.  For `fcapz openocd-bridge`.
+force, and sets `gpio`.  For `fcapz openocd-bridge`.
 
 #### `FtdiMpsseTransport.exchange`
 
@@ -1983,6 +2075,20 @@ close() -> None
 
 Close the transport.  Must be idempotent — safe to call multiple times.
 
+#### `FtdiMpsseTransport.cancel`
+
+```python
+cancel() -> None
+```
+
+Abort the call in flight from another thread, without a lock.
+
+The call stops at its next USB write (a read already waiting ends
+within the D2XX timeout), with nothing half sent, so other
+transports on the channel carry on.  Programming stops within
+about a quarter second of TCK and closes the channel.  This
+transport then refuses I/O until `close` or `connect`.
+
 #### `FtdiMpsseTransport.opened_device`
 
 ```python
@@ -1991,6 +2097,27 @@ opened_device -> str | None
 ```
 
 The connected device, for session labels: IDCODE and family.
+
+#### `FtdiMpsseTransport.program`
+
+```python
+program(bitfile: str, *, timeout_s: float = 2.0) -> None
+```
+
+Configure an AMD/Xilinx 7-series FPGA with *bitfile* over JTAG.
+
+Takes a Vivado `.bit` or a raw `.bin`.  Follows UG470's JTAG
+sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
+the bitstream through CFG_IN, JSTART, then wait for DONE.  A
+bitstream built for another part is refused before the FPGA is
+cleared.  Every core on the FPGA is lost, so this is refused while
+other transports share the channel.  If a USB transfer fails
+partway, the adapter may be left mid-command, so the channel is
+closed: connect again.  `cancel` from another thread stops it
+within about a quarter second of TCK, closing the channel too.
+*timeout_s* bounds each of the two waits.
+Single-die UltraScale shares the IR table and this sequence (UG570)
+but is not hardware-validated.
 
 #### `FtdiMpsseTransport.select_chain`
 
@@ -2035,6 +2162,14 @@ Write *value* (32-bit) to the register at *addr*.
 
 Raises `RuntimeError` if not connected or if the underlying I/O
 fails.
+
+#### `FtdiMpsseTransport.read_regs_after_write`
+
+```python
+read_regs_after_write(write_addr: int, value: int, addrs: List[int]) -> List[int]
+```
+
+The write and the reads run as one scan batch.
 
 #### `FtdiMpsseTransport.read_block`
 
@@ -2709,7 +2844,44 @@ _BUSY = 2
 _ERROR = 4
 _FIFO_NOTEMPTY = 8
 _MAX_BUSY_RETRIES = 16
+_STREAM_SLOTS = 16384
+_STREAM_SLACK = 64
+_STREAM_MAX_EMPTY = 64
 ```
+
+#### `EjtagAxiController.has_stream`
+
+```python
+@property
+has_stream -> bool
+```
+
+True when the bridge reports the streaming read (FEATURES[24]).
+
+#### `EjtagAxiController.has_safe_writes`
+
+```python
+@property
+has_safe_writes -> bool
+```
+
+True when the bridge reports the bus-safe write model (FEATURES[25]).
+
+Such a bridge buffers a whole burst before AW, never drops a VALID
+before its READY, always takes the B, refuses illegal bursts with
+SLVERR before touching the bus, and has CFG_AXI_STATUS.
+
+#### `EjtagAxiController.axi_status`
+
+```python
+axi_status() -> dict
+```
+
+Read CFG_AXI_STATUS: what the bridge still owes the AXI slave.
+
+After a timeout (SLVERR) the bridge keeps any VALID it raised until the
+slave takes it and drains any read it started; this shows whether that
+is still going on.  Needs FEATURES[25].
 
 #### `EjtagAxiController.connect`
 
@@ -2792,7 +2964,7 @@ AXI4 burst write. N+2 scans.
 
 **Raises:**
 
-- `ValueError`: If `len(data)` is 0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+- `ValueError`: If `len(data)` is 0, exceeds 256 (AXI4 max burst), exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the burst crosses a 4 KiB boundary (see `burst_write_range`).
 
 #### `EjtagAxiController.burst_read`
 
@@ -2809,7 +2981,62 @@ fifo[0]. So we need a priming scan before the data scans.
 
 **Raises:**
 
-- `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), or exceeds the bridge's FIFO_DEPTH reported in FEATURES. The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
+- `ValueError`: If `count` is &lt;=0, exceeds 256 (AXI4 max burst), exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the burst crosses a 4 KiB boundary (see `burst_read_range`). The bridge cannot buffer more beats than its FIFO holds — rebuild the bitstream with a larger FIFO_DEPTH parameter if longer bursts are required.
+
+#### `EjtagAxiController.burst_read_range`
+
+```python
+burst_read_range(base_addr: int, count: int) -> list[int]
+```
+
+Read *count* consecutive words with as many `burst_read`
+calls as it takes: bursts of at most 256 beats and `FIFO_DEPTH`,
+none crossing a 4 KiB boundary.  *base_addr* must be word-aligned
+and the range must not wrap past 0xFFFFFFFF.
+
+#### `EjtagAxiController.burst_write_range`
+
+```python
+burst_write_range(base_addr: int, data: list[int], wstrb: int = 15) -> None
+```
+
+Write *data* to consecutive words with as many
+`burst_write` calls as it takes (split as
+`burst_read_range`).
+
+#### `EjtagAxiController.stream_read`
+
+```python
+stream_read(
+    base_addr: int,
+    count: int,
+    *,
+    slots_per_scan: int | None = None,
+    retries: int = 2,
+) -> list[int]
+```
+
+Read *count* consecutive words from *base_addr* with the streaming read.
+
+CMD_RESET (the burst FIFO must start empty), CMD_STREAM_RSTART, then
+long DR scans of 33-bit slots until every word is in; the AXI side
+keeps the burst FIFO filled with bursts that never cross 4 KiB.  Each
+scan's header must equal the words still owed, so a lost or repeated
+word cannot go unnoticed: on a mismatch, a stall or a transport error
+the stream is aborted (any TDI 1 in stream mode is a CMD_RESET) and
+the whole range is read again, up to *retries* times.  The whole
+range, because the AXI response of a stream (first non-OKAY resp) is
+only reported once the stream completes: an aborted stream's words
+were never checked.  Words are returned only after that response
+reads OKAY.  A slot cut short by the end of a scan is re-sent by the
+bridge.  Before an error is raised the stream is aborted, so the
+bridge is back in normal mode for the next command.
+
+**Raises:**
+
+- `ValueError`: unaligned address, `count <= 0` or a range past the 32-bit address space.
+- `RuntimeError`: the bridge has no streaming read (FEATURES[24]=0).
+- `AXIError`: an AXI read in the range returned a non-OKAY response, or the stream failed more than *retries* times.
 
 #### `EjtagAxiController.close`
 

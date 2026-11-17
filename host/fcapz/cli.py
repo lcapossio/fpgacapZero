@@ -220,6 +220,8 @@ def _ir_table_for_tap(tap: str) -> dict[int, int] | None:
         return OpenOcdTransport.IR_TABLE_POLARFIRE
     if tap_name.startswith(("trion", "titanium", "efinix")):
         return OpenOcdTransport.IR_TABLE_EFINIX
+    if tap_name.startswith(("ecp5", "lfe5")):
+        return OpenOcdTransport.IR_TABLE_ECP5
     return None
 
 
@@ -259,6 +261,7 @@ def _make_transport(args: argparse.Namespace):
             tck_hz=getattr(args, "tck_mhz", 6.0) * 1e6,
             burst=False if no_burst else (True if want_burst else None),
             single_chain_burst=not two_chain,
+            bitfile=getattr(args, "program", None),
         )
     if args.backend == "usb_blaster":
         device_name = None if args.tap in QUARTUS_AUTO_DEVICE_TAPS else args.tap
@@ -322,8 +325,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help=(
             "usb_blaster: Quartus hardware name (default: first USB-Blaster); "
-            "ftdi: adapter channel description or serial (default: the one "
-            "FlashPro/Digilent channel A found)"
+            "ftdi: adapter channel description or serial, or usb:DESCRIPTION / "
+            "usb:SERIAL for a libusb channel (default: the one "
+            "FlashPro/Digilent/KV260 channel A found)"
         ),
     )
     p.add_argument(
@@ -398,8 +402,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BITFILE",
         default=None,
         help=(
-            "hw_server only: run fpga -file on this .bit before the command (slow). "
-            "Omit to attach to the FPGA without reprogramming (already-loaded bitstream)."
+            "hw_server: run fpga -file on this .bit before the command (slow); "
+            "ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin "
+            "over JTAG. Omit to attach to the FPGA without reprogramming "
+            "(already-loaded bitstream)."
         ),
     )
 
@@ -780,7 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     axi_dump.add_argument(
         "--burst", action="store_true",
-        help="Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH)",
+        help="Use AXI4 burst transfers (split into FIFO_DEPTH-sized bursts)",
     )
 
     axi_fill = sub.add_parser("axi-fill", help="Fill AXI memory with a pattern")
@@ -1018,17 +1024,21 @@ def _run_openocd_bridge(args: argparse.Namespace) -> int:
     pins = FtdiMpsseTransport(device=getattr(args, "hardware", None))
     layout = pins.open_pins()
     try:
-        trst = trst_pin_for(pins.adapter.description)
+        # Without pin commands the bridge drives no TRST pin.
+        trst = trst_pin_for(pins.adapter.description) if pins.gpio else 0
 
         def ready(bound: int) -> None:
             print(f"serving {pins.adapter.description!r} to OpenOCD on 127.0.0.1:{bound}"
                   + ("" if trst else " (no TRST pin: SRST/TRST are not driven)"))
+            if not pins.gpio:
+                print("this adapter has no MPSSE pin I/O: each TCK edge is sent "
+                      "as a clocked command")
             print("OpenOCD adapter config:")
             print(openocd_config(bound, trst=bool(trst)), end="", flush=True)
 
         try:
             serve(pins, layout, trst=trst, port=port, once=args.once, ready=ready,
-                  log=lambda m: print(m, flush=True))
+                  log=lambda m: print(m, flush=True), gpio=bool(pins.gpio))
         except KeyboardInterrupt:
             print("stopped")
         except OSError as exc:
@@ -1109,7 +1119,7 @@ def main() -> int:
                 print(f"wrote 0x{args.data:08X} -> 0x{args.addr:08X} (resp={resp})")
             elif args.cmd == "axi-dump":
                 if args.burst:
-                    words = axi.burst_read(args.addr, args.count)
+                    words = axi.burst_read_range(args.addr, args.count)
                 else:
                     words = axi.read_block(args.addr, args.count)
                 for i, w in enumerate(words):
@@ -1117,7 +1127,7 @@ def main() -> int:
             elif args.cmd == "axi-fill":
                 data = [args.pattern] * args.count
                 if args.burst:
-                    axi.burst_write(args.addr, data)
+                    axi.burst_write_range(args.addr, data)
                 else:
                     axi.write_block(args.addr, data)
                 print(f"filled {args.count} words @ 0x{args.addr:08X}")
@@ -1128,7 +1138,7 @@ def main() -> int:
                 words = [int.from_bytes(raw[i:i+4], 'little')
                          for i in range(0, len(raw), 4)]
                 if args.burst:
-                    axi.burst_write(args.addr, words)
+                    axi.burst_write_range(args.addr, words)
                 else:
                     axi.write_block(args.addr, words)
                 print(f"loaded {len(words)} words @ 0x{args.addr:08X}")

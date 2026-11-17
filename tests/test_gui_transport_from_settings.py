@@ -78,6 +78,15 @@ class TestTransportFromSettings(unittest.TestCase):
         t = transport_from_connection(c)
         self.assertIs(t._burst_arg, False)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_POLARFIRE)
+        self.assertIsNone(t.bitfile)
+
+    def test_ftdi_program_on_connect(self) -> None:
+        c = ConnectionSettings(
+            backend="ftdi", ir_table="auto", program="top.bit", program_on_connect=True
+        )
+        self.assertEqual(transport_from_connection(c).bitfile, "top.bit")
+        c.program_on_connect = False
+        self.assertIsNone(transport_from_connection(c).bitfile)
 
     def test_hw_server_port_remap_and_fpga_name(self) -> None:
         c = ConnectionSettings(

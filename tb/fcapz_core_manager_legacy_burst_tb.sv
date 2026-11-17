@@ -158,7 +158,7 @@ module legacy_burst_case #(
                 .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0), .DEPTH(DEPTH),
                 .BURST_W(BURST_W), .SEG_DEPTH(DEPTH)
             ) pipe (
-                .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo),
+                .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo), .tdo_next(),
                 .capture(capture), .shift_en(shift_en), .update(update), .sel(sel),
                 .reg_clk(), .reg_rst(),
                 .reg_wr_en(pipe_wr_en), .reg_rd_en(pipe_rd_en),
@@ -177,7 +177,7 @@ module legacy_burst_case #(
                 .SAMPLE_W(SAMPLE_W), .TIMESTAMP_W(0), .DEPTH(DEPTH),
                 .BURST_W(BURST_W), .SEG_DEPTH(DEPTH)
             ) burst (
-                .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo),
+                .arst(arst), .tck(tck), .tdi(tdi), .tdo(tdo), .tdo_next(),
                 .capture(capture), .shift_en(shift_en), .update(update), .sel(sel),
                 .mem_addr(rd_addr), .mem_active(rd_active),
                 .sample_data(rd_data), .timestamp_data(1'b0),

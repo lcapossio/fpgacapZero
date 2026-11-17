@@ -89,3 +89,15 @@ HOST = ROOT / "host"
 host_str = str(HOST)
 if host_str not in sys.path:
     sys.path.insert(0, host_str)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_usb_enumeration(monkeypatch):
+    """Keep unit tests off the machine's USB devices: the FTDI transport
+    asks libusb about a channel it failed to find (an error hint).  Tests of
+    the libusb backend patch the listing themselves."""
+    try:
+        from fcapz import ftdi_libusb
+    except ImportError:
+        return
+    monkeypatch.setattr(ftdi_libusb, "list_usb_devices", lambda: [])

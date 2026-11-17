@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import base64
+import collections
 import json
+import logging
+import queue
 import threading
-import traceback
 from typing import Any, Dict, Optional
 
 from .analyzer import (
@@ -43,7 +45,9 @@ from .transport import (
     validate_baudrate,
 )
 
-_SCHEMA_VERSION = "1.1"
+_SCHEMA_VERSION = "1.2"
+
+_log = logging.getLogger("fcapz.rpc")
 
 
 class RpcError(RuntimeError):
@@ -62,6 +66,53 @@ class NotConnectedError(RpcError):
 
 class NotEnabledError(RpcError):
     """The feature exists but this server was not started with it turned on."""
+
+
+class RequestCancelled(RpcError):
+    """A ``cancel`` command stopped this request, or stopped it before it ran."""
+
+    #: Lets helpers that swallow per-item failures (board auto-discovery)
+    #: tell a cancel apart without importing this module.
+    cancels_request = True
+
+
+# Commands that touch no session (the web gateway runs them without its lock).
+# Cancelling one touches only what it opened, never the session.
+_STATELESS_CMDS = frozenset(
+    {"scan_targets", "openocd_start", "openocd_status", "list_serial_ports"}
+)
+
+# How many cancelled request ids are kept for requests that had not started
+# when their cancel arrived (queued behind the gateway lock).
+_CANCELLED_IDS_KEPT = 64
+
+# Commands that start or end a session (the analyzer's, or a side
+# controller's): each bumps session_epoch when it finishes.
+_EPOCH_CMDS = frozenset(
+    {
+        "connect",
+        "close",
+        "eio_connect",
+        "eio_discover",
+        "eio_close",
+        "axi_connect",
+        "axi_close",
+        "uart_connect",
+        "uart_close",
+    }
+)
+
+
+class _Call:
+    """One running :meth:`RpcServer.handle` call, as ``cancel`` sees it."""
+
+    __slots__ = ("session", "serial", "opened", "cancelled")
+
+    def __init__(self, session: bool, serial: bool) -> None:
+        self.session = session  # acts on the shared session
+        self.serial = serial  # names the serial backend
+        self.opened: list[Any] = []  # handles it registered
+        self.cancelled = False
 
 # Upper bound on how many TCL ports discover_boards will sweep in one request,
 # so an over-large port_span / ports list can't trigger a huge scan.
@@ -139,11 +190,26 @@ class RpcServer:
         # runs on another thread and must reach them too, without taking any
         # lock a command holds: writers replace this tuple whole under
         # _opening_lock, and readers just read the attribute.  Each handle()
-        # call removes only the transports it opened (_invocation.opened): the
+        # call removes only the transports it opened (its _Call.opened): the
         # web gateway runs some commands concurrently with a blocked one.
         self._opening: tuple[Any, ...] = ()
         self._opening_lock = threading.Lock()
         self._invocation = threading.local()
+        # Cancel bookkeeping, all under _opening_lock (held only briefly,
+        # never across I/O).  _calls holds every running call, _in_flight the
+        # ones carrying each request_id.  A cancel marks the calls it names;
+        # a marked call registers no new transport and fails when it returns.
+        # _cancelled_ids remembers requests cancelled before they started,
+        # _finished_ids the last ones to finish (a late cancel for one of
+        # those is not remembered).
+        self._calls: list[_Call] = []
+        self._in_flight: Dict[Any, list[_Call]] = {}
+        self._cancelled_ids: list[Any] = []
+        self._finished_ids: collections.deque = collections.deque(maxlen=_CANCELLED_IDS_KEPT)
+        # Bumped when a command that starts or ends a session finishes, and
+        # when a cancel ends one: a cancel naming an older epoch is for a
+        # session that is gone, and does nothing.
+        self._session_epoch = 0
         # Optional server-managed OpenOCD (None = the openocd_* commands are
         # disabled and report so). Configured only by the web server launch.
         self._openocd_launcher = openocd_launcher
@@ -187,6 +253,9 @@ class RpcServer:
         """
         if side:
             self._refuse_serial_side(req)
+            # Only the session's connect programs the FPGA: a side controller
+            # reprogramming it would wipe the cores the session is using.
+            req = {k: v for k, v in req.items() if k != "program"}
         transport = self._build_transport(req)
         self._register_opening(transport)
         return transport
@@ -207,11 +276,21 @@ class RpcServer:
         """Make *handle* (anything with ``cancel()``: a transport, or a
         discovery helper's child process) reachable by :meth:`cancel_active`
         until the command that opened it returns."""
+        call = getattr(self._invocation, "call", None)
         with self._opening_lock:
             self._opening = (*self._opening, handle)
-        opened = getattr(self._invocation, "opened", None)
-        if opened is not None:
-            opened.append(handle)
+            # Checked in the same locked step as the append: a cancel either
+            # came first (and this call sees it) or its snapshot of the
+            # call's handles includes *handle*.
+            if call is not None:
+                call.opened.append(handle)
+            cancelled = call is not None and call.cancelled
+        if cancelled:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+            raise RequestCancelled("request cancelled; reconnect")
 
     def _live_transports(self) -> list[Transport]:
         """Every transport this session currently holds, deduplicated.
@@ -220,18 +299,24 @@ class RpcServer:
         controllers can share one transport (an EIO session opened on the
         analyzer's), and cancelling the same one twice is pointless at best.
         """
-        found: list[Transport] = []
-        seen: set[int] = set()
         opening = self._opening  # an immutable snapshot; see __init__
-        for holder in (
+        return self._resolve((*self._session_holders(), *opening))
+
+    def _session_holders(self) -> tuple[Any, ...]:
+        return (
             self._analyzer,
             self._eio,
             self._axi,
             self._axi_transport,
             self._uart,
             self._uart_transport,
-            *opening,
-        ):
+        )
+
+    def _resolve(self, holders: Any) -> list[Transport]:
+        """The transports behind *holders*, deduplicated."""
+        found: list[Transport] = []
+        seen: set[int] = set()
+        for holder in holders:
             if holder is None:
                 continue
             transport = holder
@@ -265,7 +350,11 @@ class RpcServer:
         every ``cancel`` is documented idempotent. One failure must not stop
         the others, so each is guarded.
         """
-        for transport in self._live_transports():
+        self._cancel_each(self._live_transports())
+
+    @staticmethod
+    def _cancel_each(transports: list[Transport]) -> None:
+        for transport in transports:
             try:
                 transport.cancel()
             except Exception:
@@ -311,9 +400,10 @@ class RpcServer:
         (reusing an already-attached controller, else a read-only probe that
         restores chain 1). When the connected chain is a core manager, the
         manager and its other slots are listed too, each with its ``instance``.
-        Bridges are not scanned here; the ``discover`` command scans every
-        chain. Each entry: ``{type, name, core_id, chain, base_addr,
-        version_major, version_minor, info}``.
+        A core on another chain is listed once, with the slot a ``rebind`` to
+        that chain binds. Bridges are not scanned here; the ``discover``
+        command scans every chain. Each entry: ``{type, name, core_id, chain,
+        base_addr, instance, version_major, version_minor, info}``.
         """
         cores: list[Dict[str, Any]] = []
         try:
@@ -327,7 +417,7 @@ class RpcServer:
                 "core_id": ela["core_id"],
                 "chain": analyzer.bscan_chain,
                 "base_addr": 0,
-                "instance": analyzer.instance,
+                "instance": self._bound_slot(analyzer),
                 "version_major": ela["version_major"],
                 "version_minor": ela["version_minor"],
                 "info": ela,
@@ -412,6 +502,7 @@ class RpcServer:
                     "core_id": ident["core_id"],
                     "chain": chain,
                     "base_addr": 0,
+                    "instance": other.instance,
                     "version_major": ident["version_major"],
                     "version_minor": ident["version_minor"],
                     "info": ident,
@@ -445,6 +536,7 @@ class RpcServer:
             "core_id": AXI_MON_MAGIC,
             "chain": analyzer.bscan_chain,
             "base_addr": 0,
+            "instance": RpcServer._bound_slot(analyzer),
             "version_major": ela_ident["version_major"],
             "version_minor": ela_ident["version_minor"],
             "info": {
@@ -540,6 +632,8 @@ class RpcServer:
         "efinix": OpenOcdTransport.IR_TABLE_EFINIX,
         "trion": OpenOcdTransport.IR_TABLE_EFINIX,
         "titanium": OpenOcdTransport.IR_TABLE_EFINIX,
+        "ecp5": OpenOcdTransport.IR_TABLE_ECP5,
+        "lattice": OpenOcdTransport.IR_TABLE_ECP5,
         "intel": None,
         "altera": None,
         # FTDI: read the family from the IDCODE at connect.
@@ -553,6 +647,23 @@ class RpcServer:
             raise ValueError(f"unknown ir_table: {name!r}")
         table = cls._IR_TABLES[key]
         return dict(table) if table is not None else None
+
+    @staticmethod
+    def _bound_slot(analyzer: Analyzer) -> int | None:
+        """The core-manager slot *analyzer* reaches, or ``None`` for a core
+        reached directly.
+
+        An analyzer keeps a slot it was given even on a chain without a
+        manager, where the transport ignores it; report none there.  The
+        manager block is read only once ``0x0000`` has answered as an ELA or
+        EIO: on a bridge chain a ``0xF000`` read is a burst command.  A failed
+        read raises rather than report a slot nobody confirmed.
+        """
+        if analyzer.instance is None:
+            return None
+        if not analyzer.speaks_register_protocol():
+            return None
+        return analyzer.instance if analyzer._behind_manager() else None  # noqa: SLF001
 
     @staticmethod
     def _pin_manager_slot(analyzer: Analyzer) -> None:
@@ -761,6 +872,7 @@ class RpcServer:
                 tck_hz=float(req.get("tck_mhz", 6.0)) * 1e6,
                 burst=None if burst is None else bool(burst),
                 single_chain_burst=single_chain_burst,
+                bitfile=req.get("program"),
             )
         if backend == "hw_server":
             fpga_name = str(req.get("tap", "xc7a100t"))
@@ -899,6 +1011,13 @@ class RpcServer:
         return self._build_config(req, hw)
 
     @staticmethod
+    def _validated_probe_sel(sel: int) -> int:
+        # ADDR_PROBE_SEL is 8 bits wide in the core.
+        if not (0 <= sel <= 0xFF):
+            raise ValueError(f"probe_sel must be 0..255, got {sel}")
+        return sel
+
+    @staticmethod
     def _validated_post_clocks(clocks: int) -> int:
         if clocks < 0:
             raise ValueError(f"post_clocks must be >= 0, got {clocks}")
@@ -974,6 +1093,7 @@ class RpcServer:
             sample_clock_hz=int(req.get("sample_clock_hz", file_sample_clock_hz)),
             probes=probes,
             channel=int(req.get("channel", 0)),
+            probe_sel=cls._validated_probe_sel(int(req.get("probe_sel", 0))),
             decimation=int(req.get("decimation", 0)),
             ext_trigger_mode=int(req.get("ext_trigger_mode", 0)),
             sequence=cls._parse_sequence(
@@ -1062,22 +1182,164 @@ class RpcServer:
             return None
         return getattr(self._analyzer.transport, "transport_kind", "jtag")
 
-    def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        outer = getattr(self._invocation, "opened", None)
-        opened: list[Transport] = []
-        self._invocation.opened = opened
+    def session_touches_bytestream(self) -> bool:
+        """True while the open session, or a transport a running command is
+        still opening, is a byte-stream link: a cancel would end it."""
+        if self.session_transport_kind() == "bytestream":
+            return True
+        if any(call.serial for call in self._calls):
+            return True  # a serial connect, before its transport registers
+        return any(
+            getattr(t, "transport_kind", None) == "bytestream" for t in self._opening
+        )
+
+    def would_run(self, req: Dict[str, Any]) -> bool:
+        """False for a request :meth:`handle` would refuse before running:
+        a malformed ``request_id``, or one cancelled before it started."""
         try:
-            return self._handle(req)
+            request_id = _check_request_id(req.get("request_id"), "request_id")
+        except ValueError:
+            return False
+        with self._opening_lock:
+            return request_id is None or request_id not in self._cancelled_ids
+
+    @property
+    def session_epoch(self) -> int:
+        """Bumped by every ``connect`` and ``close``."""
+        return self._session_epoch
+
+    def cancel(self, req: Dict[str, Any], *, session_only: bool = False) -> Dict[str, Any]:
+        """The ``cancel`` command: interrupt the call in flight.
+
+        Safe from any thread while another command runs; it takes no lock a
+        command holds and does no I/O itself.  ``target`` (a request_id) limits it to
+        that request: running, it is interrupted; not started yet, it is
+        refused when it starts; finished, nothing happens.  ``session_epoch``
+        limits it to that session.  With neither, it interrupts every
+        command running, and does nothing when the server is idle
+        (*session_only*: only the session commands).
+
+        Interrupting a session command ends the session: the caller
+        reconnects.  Interrupting a stateless one (a target scan) touches
+        only what that command opened.
+        """
+        request_id = _check_request_id(req.get("target"), "target")
+        epoch = req.get("session_epoch")
+        targets: list[Transport] = []
+        with self._opening_lock:
+            calls: list[_Call] = []
+            if epoch is not None and epoch != self._session_epoch:
+                reason = "session ended"
+            elif request_id is not None:
+                calls = list(self._in_flight.get(request_id, ()))
+                if calls:
+                    reason = None
+                elif request_id in self._finished_ids:
+                    reason = "request finished"
+                else:
+                    if request_id not in self._cancelled_ids:
+                        self._cancelled_ids.append(request_id)
+                        del self._cancelled_ids[:-_CANCELLED_IDS_KEPT]
+                    reason = "request not running"
+            else:
+                calls = [c for c in self._calls if c.session or not session_only]
+                reason = None if calls else "idle"
+            if reason is None:
+                # Marked and snapshotted in the same locked step as the
+                # checks: no new command can start (it needs this lock) in
+                # between, so a cancel never reaches a session opened after
+                # it, and a marked call registers nothing new.
+                holders: list[Any] = []
+                for call in calls:
+                    call.cancelled = True
+                    holders.extend(call.opened)
+                if any(call.session for call in calls):
+                    holders.extend(self._session_holders())
+                targets = self._resolve(holders)
+        if reason is not None:
+            return self._ok(cancelled=False, reason=reason)
+        self._cancel_each(targets)
+        return self._ok(cancelled=True)
+
+    def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        cmd = req.get("cmd")
+        if cmd is not None and not isinstance(cmd, str):
+            raise ValueError(f"unknown cmd: {cmd!r}")
+        request_id = _check_request_id(req.get("request_id"), "request_id")
+        if cmd == "cancel":
+            # Before any bookkeeping or the per-command cache invalidation:
+            # a cancel must not touch the transports it interrupts.
+            resp = self.cancel(req)
+        else:
+            resp = self._handle_tracked(req, cmd, request_id)
+        if request_id is not None:
+            resp.setdefault("request_id", request_id)
+        resp.setdefault("session_epoch", self._session_epoch)
+        return resp
+
+    def _handle_tracked(self, req: Dict[str, Any], cmd: Any, request_id: Any) -> Dict[str, Any]:
+        call = _Call(session=cmd not in _STATELESS_CMDS, serial=req.get("backend") == "serial")
+        with self._opening_lock:
+            if request_id is not None and request_id in self._cancelled_ids:
+                self._cancelled_ids.remove(request_id)
+                raise RequestCancelled("request cancelled before it started")
+            self._calls.append(call)
+            if request_id is not None:
+                self._in_flight.setdefault(request_id, []).append(call)
+        outer = getattr(self._invocation, "call", None)
+        self._invocation.call = call
+        try:
+            try:
+                resp = self._handle(req)
+            except BaseException:
+                if call.cancelled and call.session:
+                    self._end_cancelled_session()
+                raise
+            if call.cancelled:
+                # The cancel came while this ran, but may have reached a
+                # transport before its connect (which that connect does not
+                # notice), or arrived as the command finished.  Either way
+                # the cancel said the request was interrupted: keep that
+                # promise rather than leave a session it meant to end.
+                if call.session:
+                    self._end_cancelled_session()
+                raise RequestCancelled("request cancelled; reconnect")
+            return resp
         finally:
-            self._invocation.opened = outer
-            # This call's transports are installed in a session field or
-            # closed by now; either way cancel no longer needs this list to
-            # find them.  Other calls' entries stay.
-            if opened:
-                with self._opening_lock:
+            self._invocation.call = outer
+            with self._opening_lock:
+                self._calls.remove(call)
+                if request_id is not None:
+                    left = self._in_flight.get(request_id, [])
+                    if call in left:
+                        left.remove(call)
+                    if not left:
+                        self._in_flight.pop(request_id, None)
+                        self._finished_ids.append(request_id)
+                if cmd in _EPOCH_CMDS:
+                    self._session_epoch += 1
+                # This call's transports are installed in a session field or
+                # closed by now; either way cancel no longer needs to find
+                # them here.  Other calls' entries stay.
+                if call.opened:
                     self._opening = tuple(
-                        t for t in self._opening if all(t is not o for o in opened)
+                        t for t in self._opening if all(t is not o for o in call.opened)
                     )
+
+    def _end_cancelled_session(self) -> None:
+        """Tear down the session a cancel interrupted.
+
+        Its transports are already cancelled; closing them now (on the
+        command's own thread, so nothing else is using them) releases what
+        cancel leaves held -- a reaped child process, a USB channel -- and
+        clears the session fields, so no dead session stays installed.
+        """
+        try:
+            self._close_all()
+        except Exception:  # pragma: no cover - best effort
+            _log.debug("teardown after cancel failed", exc_info=True)
+        with self._opening_lock:
+            self._session_epoch += 1
 
     def _handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
         cmd = req.get("cmd")
@@ -1122,6 +1384,7 @@ class RpcServer:
                         if alt.probe_optional() is not None:
                             analyzer = alt
                             break
+                bound = self._bound_slot(analyzer)
             except BaseException:
                 # Nothing owns this transport until it lands in self._analyzer,
                 # so a failure here (wrong port, board unplugged mid-probe,
@@ -1156,6 +1419,7 @@ class RpcServer:
                 transport_kind=getattr(analyzer.transport, "transport_kind", "jtag"),
                 link=link,
                 chain=analyzer.bscan_chain,
+                instance=bound,
                 device=getattr(analyzer.transport, "opened_device", None),
             )
 
@@ -1168,9 +1432,13 @@ class RpcServer:
             # untouched — a chain hop on the ELA control interface is unrelated.
             analyzer = self._ensure_analyzer()
             requested = req.get("chain")
-            if requested is None:
-                raise ValueError("rebind requires a chain")
-            new_chain = int(requested)
+            if requested is not None:
+                new_chain = int(requested)
+            elif "instance" in req:
+                # Only a slot: switch slots on the session's chain.
+                new_chain = analyzer.bscan_chain
+            else:
+                raise ValueError("rebind requires a chain or an instance")
             # ``instance`` names the core-manager slot on the new chain; left
             # out, a rebind to the same chain keeps the slot and one to
             # another chain binds that chain's first ELA slot, if it has a
@@ -1184,13 +1452,19 @@ class RpcServer:
                 new_instance = None
             if new_chain != analyzer.bscan_chain or new_instance != analyzer.instance:
                 # Keep the SAME transport; point a fresh Analyzer at the new tap.
-                self._analyzer = Analyzer(
+                # It replaces the session only once it probes as an ELA, so a
+                # rebind to an EIO slot or an empty chain keeps the old one.
+                candidate = Analyzer(
                     analyzer.transport, chain=new_chain, instance=new_instance
                 )
-                self._pin_manager_slot(self._analyzer)
-            return self._ok(
-                chain=self._analyzer.bscan_chain, probe=self._analyzer.probe()
-            )
+                self._pin_manager_slot(candidate)
+                ident = candidate.probe()
+                bound = self._bound_slot(candidate)
+                self._analyzer = analyzer = candidate
+            else:
+                ident = analyzer.probe()
+                bound = self._bound_slot(analyzer)
+            return self._ok(chain=analyzer.bscan_chain, instance=bound, probe=ident)
 
         if cmd == "close":
             self._close_all()
@@ -1221,9 +1495,9 @@ class RpcServer:
                 )
                 return self._ok(backend="hw_server", targets=targets)
             if backend == "ftdi":
-                from .ftdi_transport import list_ftdi_devices
+                from .ftdi_transport import list_ftdi_targets
 
-                targets = [d.description for d in list_ftdi_devices() if d.description]
+                targets = list_ftdi_targets()
                 return self._ok(backend="ftdi", targets=targets)
             raise ValueError(f"unknown backend: {backend}")
 
@@ -1599,7 +1873,7 @@ class RpcServer:
             data = [int(d, 16) if isinstance(d, str) else int(d) for d in data_raw]
             burst = bool(req.get("burst", False))
             if burst:
-                self._axi.burst_write(addr, data)
+                self._axi.burst_write_range(addr, data)
             else:
                 self._axi.write_block(addr, data)
             return self._ok(count=len(data))
@@ -1611,7 +1885,7 @@ class RpcServer:
             count = int(req["count"])
             burst = bool(req.get("burst", False))
             if burst:
-                words = self._axi.burst_read(addr, count)
+                words = self._axi.burst_read_range(addr, count)
             else:
                 words = self._axi.read_block(addr, count)
             return self._ok(words=[f"0x{w:08X}" for w in words])
@@ -1681,28 +1955,99 @@ class RpcServer:
         raise ValueError(f"unknown cmd: {cmd}")
 
 
+def _check_request_id(value: Any, field: str) -> Any:
+    """A request id is a string or a number (``null`` means none)."""
+    if value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool)):
+        return value
+    raise ValueError(f"{field} must be a string or a number")
+
+
+def error_envelope(
+    exc: BaseException,
+    req: Any = None,
+    *,
+    log: bool = True,
+    session_epoch: Optional[int] = None,
+) -> Dict[str, Any]:
+    """The reply for a request that raised *exc*.
+
+    The traceback is logged (DEBUG on ``fcapz.rpc``, unless *log* is false
+    because the caller logs it), not sent: a reply carries no source path.
+    ``trace`` stays in the reply for clients written against schema 1.1, as
+    the traceback's last line, ``Type: message``.
+    """
+    if log:
+        _log.debug("request failed", exc_info=(type(exc), exc, exc.__traceback__))
+    kind = exc.__class__.__name__
+    resp: Dict[str, Any] = {
+        "ok": False,
+        "schema_version": _SCHEMA_VERSION,
+        "error": str(exc),
+        "type": kind,
+        "trace": f"{kind}: {exc}" if str(exc) else kind,
+    }
+    if isinstance(req, dict) and req.get("request_id") is not None:
+        resp["request_id"] = req["request_id"]
+    if session_epoch is not None:
+        resp["session_epoch"] = session_epoch
+    return resp
+
+
 def main() -> int:
+    """The line protocol on stdin/stdout.
+
+    Requests run one at a time, in order, on a worker thread, so this thread
+    keeps reading: a ``cancel`` line is answered at once and interrupts the
+    request in flight.  Replies to a request and to its cancel can therefore
+    come in either order; match them by ``request_id``.
+    """
     server = RpcServer()
-    while True:
+    out_lock = threading.Lock()
+    work: "queue.Queue[Any]" = queue.Queue()
+    stop = object()  # not None: a "null" line is a request, answered in-band
+
+    def reply(req: Any, run) -> None:
         try:
-            line = input()
-        except EOFError:
-            break
-        if not line.strip():
-            continue
-        try:
-            req = json.loads(line)
-            resp = server.handle(req)
+            resp = run()
         except Exception as exc:
-            resp = {
-                "ok": False,
-                "schema_version": _SCHEMA_VERSION,
-                "error": str(exc),
-                "type": exc.__class__.__name__,
-                "trace": traceback.format_exc(limit=1).strip(),
-            }
-        print(json.dumps(resp), flush=True)
+            resp = error_envelope(exc, req, session_epoch=server.session_epoch)
+        with out_lock:
+            print(json.dumps(resp), flush=True)
+
+    def worker() -> None:
+        while True:
+            req = work.get()
+            if req is stop:
+                return
+            reply(req, lambda: server.handle(req))
+
+    thread = threading.Thread(target=worker, name="fcapz-rpc-worker", daemon=True)
+    thread.start()
+    try:
+        while True:
+            try:
+                line = input()
+            except EOFError:
+                break
+            if not line.strip():
+                continue
+            try:
+                req = json.loads(line)
+            except Exception as exc:
+                reply(None, lambda exc=exc: _raise(exc))
+                continue
+            if isinstance(req, dict) and req.get("cmd") == "cancel":
+                reply(req, lambda req=req: server.handle(req))
+            else:
+                work.put(req)
+    finally:
+        work.put(stop)
+        thread.join()
     return 0
+
+
+def _raise(exc: BaseException) -> Dict[str, Any]:
+    raise exc
 
 
 if __name__ == "__main__":

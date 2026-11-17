@@ -128,7 +128,8 @@ module fcapz_ela_polarfire #(
     // ---- TAP wrapper (single UJTAG, dual-chain view) ----
     jtag_tap_polarfire #(
         .IR_USER1(IR_USER1),
-        .IR_USER2(IR_USER2)
+        .IR_USER2(IR_USER2),
+        .CH2_EN((BURST_EN != 0 && SINGLE_CHAIN_BURST == 0) ? 1 : 0)
     ) u_tap (
         .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
         .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),
@@ -155,7 +156,7 @@ module fcapz_ela_polarfire #(
                 .BURST_PTR_ADDR(16'h002C)
             ) u_pipe (
                 .arst(jtag_rst_ctrl),
-                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo), .tdo_next(),
                 .capture(tap1_capture), .shift_en(tap1_shift),
                 .update(tap1_update), .sel(tap1_sel),
                 .reg_clk(jtag_clk), .reg_rst(jtag_rst),
@@ -172,7 +173,7 @@ module fcapz_ela_polarfire #(
         end else begin : g_reg_iface
             jtag_reg_iface u_reg (
                 .arst(jtag_rst_ctrl),
-                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo), .tdo_next(),
                 .capture(tap1_capture), .shift_en(tap1_shift),
                 .update(tap1_update), .sel(tap1_sel),
                 .reg_clk(jtag_clk), .reg_rst(jtag_rst),
@@ -279,7 +280,7 @@ module fcapz_ela_polarfire #(
                 .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
             ) u_burst (
                 .arst(jtag_rst_data),
-                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo), .tdo_next(),
                 .capture(tap2_capture), .shift_en(tap2_shift),
                 .update(tap2_update), .sel(tap2_sel),
                 .mem_addr(burst_rd_addr),

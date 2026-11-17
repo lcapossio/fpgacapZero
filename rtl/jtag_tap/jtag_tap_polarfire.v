@@ -26,10 +26,14 @@
 // USER opcodes default to 0x20/0x21.  0x10/0x11 are in the user range
 // on paper, but on PolarFire SoC the MSS RISC-V debug module answers
 // there (dtmcs/dmi), so they never reach the fabric.
+//
+// CH2_EN=0 is for wrappers that use USER1 only: IR_USER2 is then not
+// decoded or checked, and ch2_sel/capture/shift/update stay low.
 
 module jtag_tap_polarfire #(
     parameter [7:0] IR_USER1 = 8'h20,
-    parameter [7:0] IR_USER2 = 8'h21
+    parameter [7:0] IR_USER2 = 8'h21,
+    parameter       CH2_EN   = 1
 ) (
     // JTAG pads (connect straight to top-level ports)
     input  wire tck_pad_i,
@@ -55,12 +59,24 @@ module jtag_tap_polarfire #(
     output wire ch2_sel
 );
 
+    // An opcode outside the user range selects a built-in instruction
+    // (BYPASS for 0xFF) instead, and the chain is unreachable.
+    initial begin
+        if (IR_USER1 < 8'h10 || IR_USER1 > 8'h7F) begin
+            $error("jtag_tap_polarfire: IR_USER1 %h must be a user opcode 10..7f", IR_USER1);
+        end
+        if (CH2_EN != 0 && (IR_USER2 < 8'h10 || IR_USER2 > 8'h7F || IR_USER1 == IR_USER2)) begin
+            $error("jtag_tap_polarfire: IR_USER2 %h must be a user opcode 10..7f other than IR_USER1",
+                   IR_USER2);
+        end
+    end
+
     wire [7:0] uireg;
     wire       utdi, udrck, udrcap, udrsh, udrupd;
     wire       urstb_unused;
 
     wire is_user1 = (uireg == IR_USER1);
-    wire is_user2 = (uireg == IR_USER2);
+    wire is_user2 = (CH2_EN != 0) && (uireg == IR_USER2);
 
     // Mux per-chain TDO into UJTAG.UTDO.  If neither chain is
     // selected, drive zero so we never feed X back to the TAP.

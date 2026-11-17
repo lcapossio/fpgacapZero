@@ -146,8 +146,10 @@ def auto_discover_boards(
         if port > 65535:
             break
         started_here = False
+        launched = False
         try:
             result = launcher.start(name=name, port=port, wait_sec=wait_sec)
+            launched = True
             started_here = bool(result.get("started"))
             boards = discover_boards(
                 host="127.0.0.1",
@@ -156,10 +158,14 @@ def auto_discover_boards(
                 timeout_sec=timeout_sec,
                 register=register,
             )
-        except Exception:
+        except Exception as exc:
             # Adapter busy / not this config / OpenOCD failed — skip it. Only
-            # stop what this pass spawned; never touch a foreign instance.
-            _safe_stop(launcher, port)
+            # stop what this pass spawned (a start that failed part-way, or
+            # one that succeeded); never an instance that was already up.
+            if not launched or started_here:
+                _safe_stop(launcher, port)
+            if getattr(exc, "cancels_request", False):
+                raise  # cancelled: no more configs, no more OpenOCDs
             port += 1
             continue
 

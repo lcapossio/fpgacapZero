@@ -62,6 +62,12 @@ Vivado/XSDB are optional and only needed for hardware tests.
   `python tools/gen_docs.py`; CI fails if they are out of date. Only
   Markdown that GitHub renders belongs in `docs/`: `mkdocs build --strict`
   (see `mkdocs.yml`) rejects site-only syntax and broken links.
+- `tests/test_docs_sync.py` checks the hand-written examples: Verilog
+  snippets must only use parameters and ports the `rtl/` module has, every
+  `fcapz ...` command in a shell block must parse, and version strings must
+  match `VERSION`. Mark an example that is deliberately not current (a past
+  measurement, an illustration) with `<!-- docs-sync: skip (why) -->` on the
+  line before it.
 
 ---
 
@@ -362,8 +368,15 @@ Key rules when writing the top-level:
 Relevant RTL files: `rtl/fcapz_ela_ecp5.v`, `rtl/jtag_tap/jtag_tap_ecp5.v`,
 `rtl/vhdl/fcapz_ela_ecp5.vhd`.
 
-The ECP5 JTAG primitive is `JTAGG`. OpenOCD has built-in ECP5 support via the
-`jlink` or `ftdi` adapter drivers. A typical OpenOCD config skeleton:
+The ECP5 JTAG primitive is `JTAGG`. Lattice does not document its timing:
+`JTDI` is TDI registered on the rising edge of TCK, the state outputs
+(`JSHIFT`, `JCE1`/`JCE2`, `JUPDATE`) change on the rising edge, and `JTDO1`/`JTDO2`
+are registered on the falling edge. `jtag_tap_ecp5` therefore runs the scan
+logic on the falling edge and takes `tdo_next` (the interface's TDO after the
+next edge) instead of `tdo`; `sim/jtagg_stub.v` models this timing, and the
+cocotb bench drives it through a full TAP walk. OpenOCD has built-in ECP5
+support via the `jlink` or `ftdi` adapter drivers. A typical OpenOCD config
+skeleton:
 
 ```tcl
 # examples/ulx3s/ulx3s.cfg  (adjust VID/PID and IDCODE for your board)

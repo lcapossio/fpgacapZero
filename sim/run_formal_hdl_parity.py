@@ -14,7 +14,8 @@ This is the repo-local Layer 0/Layer 2 slice of the translateHDL parity ladder:
   miter distinguishes a shallow counterexample from a proof-depth limitation.
   Induction assumes both sides start in the same state, so the state of
   same-named registers after the manifest's reset (power-up values included)
-  is compared separately.
+  is compared separately. A GHDL or yosys run that exceeds ``--timeout``
+  reports its parameter set as TIMEOUT, which fails like any other non-PASS.
 
 Manifest files are JSON documents with a ``.yml`` suffix so they stay compatible
 with the translateHDL parity-manifest convention without adding PyYAML as a CI
@@ -29,9 +30,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +50,7 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "trig_compare.yml",
     ROOT / "sim" / "parity" / "fcapz_regbus_mux.yml",
     ROOT / "sim" / "parity" / "jtag_reg_iface.yml",
+    ROOT / "sim" / "parity" / "jtag_reg_iface_gowin.yml",
     ROOT / "sim" / "parity" / "jtag_burst_read.yml",
     ROOT / "sim" / "parity" / "jtag_pipe_iface.yml",
     ROOT / "sim" / "parity" / "fcapz_async_fifo.yml",
@@ -53,9 +58,17 @@ DEFAULT_MANIFESTS = (
     ROOT / "sim" / "parity" / "fcapz_core_manager.yml",
     ROOT / "sim" / "parity" / "fcapz_debug_multi_core.yml",
     ROOT / "sim" / "parity" / "fcapz_debug_multi.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi_ecp5.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi_polarfire.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi_efinix.yml",
+    ROOT / "sim" / "parity" / "fcapz_debug_multi_gowin.yml",
     ROOT / "sim" / "parity" / "fcapz_eio.yml",
     ROOT / "sim" / "parity" / "fcapz_ela.yml",
     ROOT / "sim" / "parity" / "fcapz_axi_mon.yml",
+    ROOT / "sim" / "parity" / "fcapz_axi_mon_ecp5.yml",
+    ROOT / "sim" / "parity" / "fcapz_axi_mon_polarfire.yml",
+    ROOT / "sim" / "parity" / "fcapz_axi_mon_efinix.yml",
+    ROOT / "sim" / "parity" / "fcapz_axi_mon_gowin.yml",
 )
 
 
@@ -65,6 +78,14 @@ class Port:
     direction: str
 
 
+class StepTimeout(Exception):
+    """A tool ran longer than --timeout allows."""
+
+
+# Seconds one tool invocation may run; None waits forever (--timeout 0).
+STEP_TIMEOUT: float | None = None
+
+
 def run(
     cmd: list[str],
     *,
@@ -72,31 +93,129 @@ def run(
     input_text: str | None = None,
     output: Path | None = None,
 ) -> tuple[int, str]:
-    print(f"[formal-parity] {' '.join(cmd)}", flush=True)
-    stdout = subprocess.PIPE
-    handle = None
-    if output is not None:
-        handle = output.open("w", encoding="utf-8")
-        stdout = handle
+    """Run a tool, echoing its log as it arrives (stderr only with ``output``)."""
+
+    def echo(line: str) -> None:
+        try:
+            print(line, end="", flush=True)
+        except UnicodeEncodeError:
+            enc = sys.stdout.encoding or "ascii"
+            print(line.encode(enc, "backslashreplace").decode(enc), end="", flush=True)
+
+    echo(f"[formal-parity] {' '.join(cmd)}\n")
+    handle = output.open("w", encoding="utf-8") if output is not None else None
+    lines: list[str] = []
+    errors: list[BaseException] = []
+
+    def pump(log: Any) -> None:
+        try:
+            for line in log:
+                echo(line)
+                lines.append(line)
+        except BaseException as exc:  # handed back to run()
+            errors.append(exc)
+
+    def feed(stdin: Any) -> None:
+        try:
+            stdin.write(input_text)
+        except (BrokenPipeError, OSError):
+            pass  # the tool exited without reading all of it
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            try:
+                stdin.close()
+            except OSError:
+                pass
+
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            input=input_text,
-            text=True,
-            stdout=stdout,
-            stderr=subprocess.PIPE if output is not None else subprocess.STDOUT,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=handle if handle is not None else subprocess.PIPE,
+            stderr=subprocess.PIPE if handle is not None else subprocess.STDOUT,
+            # Own process group, so a timeout can stop the tool's children too.
+            start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
-    finally:
+    except BaseException:
         if handle is not None:
             handle.close()
-    if output is not None:
-        text = result.stderr or ""
-    else:
-        text = result.stdout or ""
-    if text:
-        print(text, end="" if text.endswith("\n") else "\n")
-    return result.returncode, text
+        raise
+    threads = [threading.Thread(
+        target=pump, args=(proc.stderr if handle is not None else proc.stdout,), daemon=True
+    )]
+    if input_text is not None:
+        threads.append(threading.Thread(target=feed, args=(proc.stdin,), daemon=True))
+    tool = Path(cmd[0]).name
+    deadline = None if STEP_TIMEOUT is None else time.monotonic() + STEP_TIMEOUT
+
+    def remaining() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def alive() -> bool:
+        return any(thread.is_alive() for thread in threads)
+
+    try:
+        for thread in threads:
+            thread.start()
+        # Poll, so a failed reader or feeder ends the wait at once.
+        while not errors:
+            left = remaining()
+            if left == 0.0:
+                raise StepTimeout(f"{tool} ran over {STEP_TIMEOUT:g} s")
+            try:
+                proc.wait(timeout=0.2 if left is None else min(0.2, left))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        # A descendant can keep the pipe open after the tool exits; the log
+        # isn't complete until every reader has finished.
+        for thread in threads:
+            if not errors:
+                thread.join(timeout=remaining())
+        if not errors and alive():
+            raise StepTimeout(f"{tool} output still open after {STEP_TIMEOUT:g} s")
+    finally:
+        if errors or proc.poll() is None or alive():
+            kill_tree(proc)
+        for thread in threads:
+            thread.join(timeout=10)
+        if handle is not None:
+            handle.close()
+    if errors:
+        raise RuntimeError(f"reading {tool} output failed") from errors[0]
+    if alive():
+        raise RuntimeError(f"{tool} output still open after its tree was killed")
+    text = "".join(lines)
+    if text and not text.endswith("\n"):
+        print()
+    return proc.returncode, text
+
+
+def kill_tree(proc: subprocess.Popen[str]) -> None:
+    """Stop a tool and everything it started, then reap it."""
+
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    proc.wait()
 
 
 def require_tools(*names: str) -> bool:
@@ -297,7 +416,8 @@ def normalize_ghdl_isignal_aliases(netlist: Path) -> None:
     """Rename GHDL's hidden ``nNNN`` state registers back to signal names.
 
     GHDL emits many VHDL signals as a public combinational alias driven by an
-    anonymous state register, e.g. ``foo = n1234; // (isignal)``. Yosys then
+    anonymous state register, e.g. ``foo = n1234; // (isignal)`` (newer GHDL
+    names it ``n1234_q``). Yosys then
     sees the real flop as ``n1234`` and cannot line it up with the Verilog
     state named ``foo`` during induction. This pass keeps the synthesized logic
     identical while restoring those state names for SEC.
@@ -315,7 +435,7 @@ def normalize_ghdl_isignal_aliases(netlist: Path) -> None:
     alias_re = re.compile(
         r"^\s*always @\*\n"
         r"\s*(?P<public>[A-Za-z_][A-Za-z0-9_$]*)\s*=\s*"
-        r"(?P<hidden>n\d+)\s*;\s*// \(isignal\)\n",
+        r"(?P<hidden>n\d+(?:_q)?)\s*;\s*// \(isignal\)\n",
         re.M,
     )
 
@@ -456,6 +576,7 @@ def check_init_parity(
     manifest: dict[str, Any],
     work: Path,
     yosys: str,
+    after_reset: bool = True,
 ) -> str | None:
     """Compare the state the two sides start the proofs from.
 
@@ -471,13 +592,23 @@ def check_init_parity(
     ``"init_after_reset": false`` in its manifest, since its power-up value is
     that contract.  A register left undefined after the reset is reported:
     the check cannot compare it.  Returns a failure message, or ``None``.
+
+    The reset can also hide a difference: a register that follows an input
+    held at 0 (an edge detector's last-seen copy) is flushed to 0 on both
+    sides.  ``"raw_init_check": true`` in a manifest runs the check a second
+    time with *after_reset* False, on the raw power-up values.
     """
     formal = manifest.get("formal", {})
     reset_inputs = formal.get("reset_inputs", [])
     reset_cycles = int(formal.get("reset_cycles", 0))
     clock_inputs = formal.get("clock_inputs", [])
     reset_sim: list[str] = []
-    if reset_inputs and reset_cycles and formal.get("init_after_reset", True):
+    if (
+        after_reset
+        and reset_inputs
+        and reset_cycles
+        and formal.get("init_after_reset", True)
+    ):
         reset_sim.append(
             "sim -zinit -w"
             + "".join(f" -clock {clock}" for clock in clock_inputs)
@@ -489,7 +620,7 @@ def check_init_parity(
         ("gold", gold_read, golden),
         ("gate", gate_read, candidate),
     ):
-        out = work / f"init_{name}.json"
+        out = work / f"init_{name}{'' if after_reset else '_raw'}.json"
         renames = side.get("state_renames") or {}
         script = "\n".join(
             [
@@ -546,10 +677,11 @@ def check_init_parity(
         for name, index in gold.keys() & gate.keys()
         if "x" in (gold[(name, index)], gate[(name, index)])
     )
+    when = "after the reset" if reset_sim else "at power-up"
     if undefined:
         shown = ", ".join(undefined[:8])
         more = f" (+{len(undefined) - 8} more)" if len(undefined) > 8 else ""
-        return f"registers undefined after the reset: {shown}{more}"
+        return f"registers undefined {when}: {shown}{more}"
     mismatches = [
         f"{name}[{index}] {gold[(name, index)]}/{gate[(name, index)]}"
         for name, index in sorted(gold.keys() & gate.keys())
@@ -558,7 +690,7 @@ def check_init_parity(
     if mismatches:
         shown = ", ".join(mismatches[:8])
         more = f" (+{len(mismatches) - 8} more)" if len(mismatches) > 8 else ""
-        return f"power-up values differ (Verilog/VHDL): {shown}{more}"
+        return f"values {when} differ (Verilog/VHDL): {shown}{more}"
     return None
 
 
@@ -588,6 +720,11 @@ def prove_config(
     init_error = check_init_parity(
         gold_read, gate_read, golden, candidate, manifest, work, yosys
     )
+    if init_error is None and manifest.get("formal", {}).get("raw_init_check"):
+        init_error = check_init_parity(
+            gold_read, gate_read, golden, candidate, manifest, work, yosys,
+            after_reset=False,
+        )
     if init_error is not None:
         return "FAIL", init_error
     script = "\n".join(
@@ -617,12 +754,12 @@ def prove_config(
             "equiv_status",
         ]
     ) + "\n"
-    _, output = run([yosys, "-"], input_text=script)
-    if "Equivalence successfully proven" in output:
-        return "PASS", "equiv_induct closed"
+    code, output = run([yosys, "-"], input_text=script)
     if "ERROR:" in output:
         error = next(line for line in output.splitlines() if "ERROR:" in line)
         return "FAIL", error
+    if code == 0 and "Equivalence successfully proven" in output:
+        return "PASS", "equiv_induct closed"
 
     unproven = re.search(r"Found a total of (\d+) unproven", output) or re.search(
         r"(\d+) are unproven",
@@ -640,8 +777,8 @@ def prove_config(
     for cycle in range(1, bounded_depth + 1):
         for clock in clock_inputs:
             reset_args.extend(["-set-at", str(cycle), f"in_{clock}", "1"])
-        for signal in zero_inputs:
-            reset_args.extend(["-set-at", str(cycle), f"in_{signal}", "0"])
+        for zero in zero_inputs:
+            reset_args.extend(["-set-at", str(cycle), f"in_{zero}", "0"])
     for cycle in range(1, reset_cycles + 1):
         for reset in reset_inputs:
             reset_args.extend(["-set-at", str(cycle), f"in_{reset}", "1"])
@@ -719,15 +856,20 @@ def run_manifest(manifest_path: Path) -> bool:
         for module in formal["modules"]:
             for params in module.get("param_sets") or [{}]:
                 tag = ", ".join(f"{name}={value}" for name, value in params.items()) or "default"
-                status, detail = prove_config(
-                    manifest_path,
-                    manifest,
-                    params,
-                    work,
-                    induct_depth,
-                    bounded_depth,
-                    yosys,
-                )
+                try:
+                    status, detail = prove_config(
+                        manifest_path,
+                        manifest,
+                        params,
+                        work,
+                        induct_depth,
+                        bounded_depth,
+                        yosys,
+                    )
+                except StepTimeout as exc:
+                    status, detail = "TIMEOUT", str(exc)
+                except RuntimeError as exc:
+                    status, detail = "FAIL", f"{exc}: {exc.__cause__!r}"
                 print(
                     f"[formal-parity] {manifest['name']} {module['name']}[{tag}]: "
                     f"{status} - {detail}"
@@ -745,7 +887,16 @@ def main() -> None:
         action="store_true",
         help="only run Layer 0 manifest/interface checks",
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=7200,
+        help="seconds one GHDL/yosys run may take before its parameter set is "
+        "reported as TIMEOUT; 0 waits forever (default: 7200)",
+    )
     args = parser.parse_args()
+    global STEP_TIMEOUT
+    STEP_TIMEOUT = args.timeout if args.timeout > 0 else None
 
     manifests = tuple(args.manifest) if args.manifest else DEFAULT_MANIFESTS
     try:

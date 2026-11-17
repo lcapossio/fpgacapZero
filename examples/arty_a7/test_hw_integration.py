@@ -8,17 +8,30 @@ These tests require:
   - An Arty A7-100T physically connected via USB
   - For hw_server backend: Vivado/XSDB on PATH, hw_server on localhost:3121
   - For openocd backend: OpenOCD running with examples/arty_a7/arty_a7.cfg
+  - For ftdi backend: the board's onboard Digilent cable (channel A) through
+    FTDI's D2XX driver, with hw_server, Vivado's Hardware Manager and OpenOCD
+    closed.  The suite programs the bitstream over FTDI once per run, and
+    TestStartupArmGsr programs it again; no Vivado is needed.  OpenOCD does
+    not program the FPGA: load the bitstream first.
 
 Environment variables
 ---------------------
 FPGACAP_SKIP_HW=1
     Skip all hardware tests (CI default).
-FPGACAP_BACKEND=openocd|hw_server
+FPGACAP_BACKEND=hw_server|openocd|ftdi
     Select the transport backend.  Defaults to ``hw_server``.
 FPGACAP_OPENOCD_PORT=<port>
     OpenOCD TCL port.  Defaults to 6666.
 FPGACAP_OPENOCD_TAP=<tap>
     OpenOCD TAP name.  Defaults to ``xc7a100t.tap``.
+FPGACAP_FTDI_DEVICE=<name>
+    ``ftdi`` only: adapter channel description or serial.  Defaults to
+    ``Digilent USB Device A`` (the JTAG channel of the onboard cable).
+FPGACAP_FTDI_TCK_MHZ=<mhz>
+    ``ftdi`` only: TCK in MHz (30 MHz divided by an integer).  Defaults to 30.
+FPGACAP_FTDI_PROGRAM=0
+    ``ftdi`` only: do not program the bitstream at the start of the run; use
+    the one already loaded.  TestStartupArmGsr still programs it.
 
 Run:
     # hw_server backend (default)
@@ -27,6 +40,9 @@ Run:
     # OpenOCD backend (start openocd first)
     openocd -f examples/arty_a7/arty_a7.cfg &
     FPGACAP_BACKEND=openocd python -m pytest examples/arty_a7/test_hw_integration.py -v
+
+    # FTDI backend (hw_server stopped; the suite programs the bitstream)
+    FPGACAP_BACKEND=ftdi python -m pytest examples/arty_a7/test_hw_integration.py -v
 
 Skip if no hardware:
     FPGACAP_SKIP_HW=1 python -m pytest examples/arty_a7/test_hw_integration.py -v
@@ -50,16 +66,20 @@ _BITSTREAM_VARIANT = os.environ.get("FPGACAP_BITSTREAM_VARIANT", "vex").lower()
 # The open-source VexRiscv variant (arty_a7_vex_top) is now the DEFAULT design;
 # it is a drop-in for the deprecated MicroBlaze one (same debug cores, same
 # host-gated CPU bus pattern), so this whole suite runs against it unchanged.
-# Set FPGACAP_BITSTREAM_VARIANT=verilog for the legacy MicroBlaze top, or =vhdl
-# for the VHDL top.
+# Set FPGACAP_BITSTREAM_VARIANT=verilog for the legacy MicroBlaze top, =vhdl
+# for the VHDL top, or =openxc7 for the vex top built by openxc7/build_openxc7.py.
 _DEFAULT_BITNAME = {
     "vex": "arty_a7_vex_top.bit",
+    "openxc7": "arty_a7_vex_top_openxc7.bit",
     "vhdl": "arty_a7_top_vhdl.bit",
 }.get(_BITSTREAM_VARIANT, "arty_a7_top.bit")
 BITFILE = str(Path(_BITFILE_ENV).resolve() if _BITFILE_ENV else _EXAMPLE_DIR / _DEFAULT_BITNAME)
 _BACKEND = os.environ.get("FPGACAP_BACKEND", "hw_server").lower()
 _OPENOCD_PORT = int(os.environ.get("FPGACAP_OPENOCD_PORT", "6666"))
 _OPENOCD_TAP = os.environ.get("FPGACAP_OPENOCD_TAP", "xc7a100t.tap")
+_FTDI_DEVICE = os.environ.get("FPGACAP_FTDI_DEVICE") or "Digilent USB Device A"
+_FTDI_TCK_MHZ = float(os.environ.get("FPGACAP_FTDI_TCK_MHZ", "30"))
+_FTDI_PROGRAM = os.environ.get("FPGACAP_FTDI_PROGRAM", "1") != "0"
 PORT = 3121
 FPGA = "xc7a100t"
 ELA0_SAMPLE_CLOCK_HZ = 150_000_000
@@ -121,8 +141,8 @@ _BITSTREAM_SOURCES_VHDL = [
     _ROOT / "rtl" / "jtag_pipe_iface.v",
     _ROOT / "rtl" / "jtag_burst_read.v",
     _ROOT / "rtl" / "jtag_tap" / "jtag_tap_xilinx7.v",
-    _ROOT / "rtl" / "fcapz_async_fifo.v",
-    _ROOT / "rtl" / "fcapz_ejtagaxi.v",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+    _ROOT / "rtl" / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
     _ROOT / "rtl" / "fcapz_ejtagaxi_xilinx7.v",
     _ROOT / "rtl" / "vhdl" / "core" / "fcapz_axi_mon.vhd",
     _ROOT / "rtl" / "fcapz_axi_mon_xilinx7.v",
@@ -196,10 +216,22 @@ _BITSTREAM_SOURCES_VEX = [
     _EXAMPLE_DIR / "vex" / "fw" / "fw.mem",
 ]
 
+# The same design built by the open-source flow: its own XDC and build script
+# in place of Vivado's.
+_BITSTREAM_SOURCES_OPENXC7 = [
+    s for s in _BITSTREAM_SOURCES_VEX
+    if s not in (_EXAMPLE_DIR / "arty_a7.xdc", _EXAMPLE_DIR / "build_arty_vex.tcl")
+] + [
+    _EXAMPLE_DIR / "openxc7" / "arty_a7_openxc7.xdc",
+    _EXAMPLE_DIR / "openxc7" / "build_openxc7.py",
+]
+
 if _BITSTREAM_VARIANT == "vhdl":
     _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VHDL
 elif _BITSTREAM_VARIANT == "vex":
     _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VEX
+elif _BITSTREAM_VARIANT == "openxc7":
+    _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_OPENXC7
 else:
     _BITSTREAM_SOURCES = _BITSTREAM_SOURCES_VERILOG
 
@@ -226,6 +258,7 @@ def _check_bitstream_freshness() -> str | None:
         build_cmd = {
             "vhdl": "python examples/arty_a7/build_vhdl.py",
             "vex": "python examples/arty_a7/build_arty_vex.py",
+            "openxc7": "python examples/arty_a7/openxc7/build_openxc7.py",
         }.get(_BITSTREAM_VARIANT, "python examples/arty_a7/build.py")
         parts = []
         if missing:
@@ -246,20 +279,41 @@ if _STALE_MSG and not _SKIP:
     raise RuntimeError(_STALE_MSG)
 
 
-def _make_transport():
+def _make_transport(program: bool | None = None):
+    """A transport for the active backend.  *program* says whether its
+    connect programs ``BITFILE``; by default hw_server does on every connect
+    and ftdi does not (setUpModule programmed it once).  OpenOCD never can."""
+    if _BACKEND == "ftdi":
+        from fcapz.ftdi_transport import FtdiMpsseTransport
+        return FtdiMpsseTransport(
+            device=_FTDI_DEVICE, tck_hz=_FTDI_TCK_MHZ * 1e6,
+            bitfile=BITFILE if program else None,
+        )
     if _BACKEND == "openocd":
         from fcapz.transport import OpenOcdTransport
         return OpenOcdTransport(port=_OPENOCD_PORT, tap=_OPENOCD_TAP)
     from fcapz.transport import XilinxHwServerTransport
     return XilinxHwServerTransport(
-        port=PORT, fpga_name=FPGA, bitfile=BITFILE,
+        port=PORT, fpga_name=FPGA, bitfile=None if program is False else BITFILE,
     )
+
+
+def setUpModule():
+    """Over FTDI, program the bitstream once for the whole run."""
+    if _SKIP or _BACKEND != "ftdi" or not _FTDI_PROGRAM:
+        return
+    t = _make_transport(program=True)
+    t.connect()
+    t.close()
 
 
 def _rpc_connect_req():
     """`connect` request for the active backend — drives the RpcServer handlers
     (rebind / ejtag_axi_probe) exactly as the web/CLI do. hw_server programs the
-    bitstream on connect; openocd assumes the board is already loaded."""
+    bitstream on connect; openocd and ftdi use the one already loaded."""
+    if _BACKEND == "ftdi":
+        return {"cmd": "connect", "backend": "ftdi", "hardware": _FTDI_DEVICE,
+                "tck_mhz": _FTDI_TCK_MHZ, "ir_table": "xilinx7"}
     if _BACKEND == "openocd":
         return {"cmd": "connect", "backend": "openocd", "host": "127.0.0.1",
                 "port": _OPENOCD_PORT, "tap": _OPENOCD_TAP, "ir_table": "xilinx7"}
@@ -469,15 +523,30 @@ class TestMultiElaManager(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
-@unittest.skipIf(_BACKEND != "hw_server", "requires hw_server programming on connect")
+@unittest.skipIf(_BACKEND == "openocd", "requires programming on connect")
 class TestStartupArmGsr(unittest.TestCase):
     """Configuration-time startup arm validation for the Arty bitstream."""
 
+    SENTINEL = 0x5EED0028
+
     def test_bitstream_powers_up_armed_after_gsr(self):
-        """After FPGA programming, STARTUP_ARM=1 should arm without host reset."""
-        t = _make_transport()
+        """After FPGA programming, STARTUP_ARM=1 should arm without host reset.
+
+        A trigger mask written before programming must be gone after it, so
+        a connect that did not really reprogram the FPGA cannot pass."""
+        t = _make_transport(program=False)
         try:
             t.connect()
+            t.write_reg(0x0028, self.SENTINEL)
+            self.assertEqual(t.read_reg(0x0028), self.SENTINEL)
+        finally:
+            t.close()
+        t = _make_transport(program=True)
+        try:
+            t.connect()
+            self.assertNotEqual(
+                t.read_reg(0x0028), self.SENTINEL, "trigger mask survived programming"
+            )
             self.assertEqual(t.read_reg(0x00D8) & 0x1, 1)
             self.assertEqual(t.read_reg(0x00B4) & 0x3, 2)
 
@@ -1399,10 +1468,42 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
 
     def test_burst_write_read(self):
         """AXI4 burst write 8 words, burst read back, verify."""
-        data = [0xBEEF0000 + i for i in range(8)]
+        # Over openocd/ftdi the slave keeps earlier tests' words: seed others
+        # first, so a burst write that writes nothing cannot pass.
+        sentinel = [0x0DD00000 + i for i in range(8)]
+        self.bridge.write_block(0x00, sentinel)
+        self.assertEqual(self.bridge.read_block(0x00, 8), sentinel)
+        data = [0xC0DE0000 + i for i in range(8)]
         self.bridge.burst_write(0x00, data)
         result = self.bridge.burst_read(0x00, 8)
         self.assertEqual(result, data)
+
+    def test_stream_read(self):
+        """Streaming read of 64 Ki words, checked against the slave's words."""
+        import time
+
+        if not self.bridge.has_stream:
+            self.skipTest("bitstream built without STREAM_EN")
+        # The slave aliases (addr>>2) % 32, so this checks the data path, not
+        # address progression across bursts and 4 KiB pages (that is covered
+        # by tb/fcapz_ejtagaxi_stream_tb.sv).  Words 16..31 belong to the CPU:
+        # every word that holds still across the read is checked.
+        data = [0x5A000000 | (i * 0x00010203) for i in range(16)]
+        self.bridge.write_block(0x00, data)
+        before = self.bridge.read_block(0x00, 32)
+        self.assertEqual(before[:16], data)
+        n = 65536
+        t0 = time.perf_counter()
+        words = self.bridge.stream_read(0x00, n)
+        elapsed = time.perf_counter() - t0
+        print(f"\n  stream_read {n} words: {elapsed:.3f}s = "
+              f"{4 * n / 1e6 / elapsed:.2f} MB/s")
+        after = self.bridge.read_block(0x00, 32)
+        stable = {k for k in range(32) if before[k] == after[k]}
+        self.assertTrue(set(range(16)) <= stable, "host words changed during the read")
+        self.assertEqual(len(words), n)
+        bad = [i for i in range(n) if i % 32 in stable and words[i] != before[i % 32]]
+        self.assertEqual(bad, [], f"{len(bad)} wrong words, first at {bad[:4]}")
 
     def test_error_on_error_addr(self):
         """Write to test slave's ERROR_ADDR (0xFFFFFFFC) → AXIError."""
@@ -1430,6 +1531,119 @@ class TestEjtagAxiReadWrite(unittest.TestCase):
         # Sanity: > 0.3 KB/s (sequential, no batch) and < 200 KB/s.
         # With raw_dr_scan_batch transport optimization, expect ~80 KB/s.
         self.assertGreater(kb_per_s, 0.3)
+
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestEjtagAxiBusSafety(unittest.TestCase):
+    """EJTAG-AXI bridge: bus-safe model (FEATURES[25], CFG_AXI_STATUS).
+
+    Host words stay inside 0..15 (< 0x40): the CPU owns 16..31.
+    """
+
+    def setUp(self):
+        from fcapz.ejtagaxi import EjtagAxiController
+
+        self.bridge = EjtagAxiController(_make_transport(), chain=4)
+        self.bridge.connect()
+
+    def tearDown(self):
+        self.bridge.close()
+
+    def _assert_idle(self):
+        st = self.bridge.axi_status()
+        self.assertTrue(st["idle"], f"bridge still owes the slave: {st}")
+        self.assertEqual(st["raw"], 0, f"unexpected AXI status bits: {st}")
+
+    def test_safe_writes_feature_and_idle_status(self):
+        self.assertTrue(self.bridge.has_safe_writes)
+        self._assert_idle()
+
+    def test_idle_after_traffic_and_error(self):
+        from fcapz.ejtagaxi import AXIError
+
+        self.bridge.axi_write(0x00, 0x5A5A0001)
+        self.bridge.burst_write(0x00, [0x5A5A0100 + i for i in range(16)])
+        self.assertEqual(self.bridge.burst_read(0x00, 16),
+                         [0x5A5A0100 + i for i in range(16)])
+        self._assert_idle()
+        with self.assertRaises(AXIError):
+            self.bridge.axi_write(0xFFFFFFFC, 0x1234)
+        with self.assertRaises(AXIError):
+            self.bridge.axi_read(0xFFFFFFFC)
+        self._assert_idle()
+        self.bridge.axi_write(0x08, 0x600DF00D)
+        self.assertEqual(self.bridge.axi_read(0x08), 0x600DF00D)
+
+    def test_over_depth_burst_refused_without_bus_write(self):
+        from fcapz.ejtagaxi import AXIError
+
+        depth = self.bridge._fifo_depth
+        before = [0xC0DE0000 + i for i in range(16)]
+        self.bridge.write_block(0x00, before)
+        # Bypass the host-side guard so the RTL descriptor check is exercised.
+        self.bridge._fifo_depth = 0
+        try:
+            with self.assertRaises(AXIError):
+                self.bridge.burst_write(0x00, [0xBAD00000 + i for i in range(depth + 1)])
+        finally:
+            self.bridge._fifo_depth = depth
+        self._assert_idle()
+        self.assertEqual(self.bridge.read_block(0x00, 16), before)
+
+    def test_over_depth_burst_read_refused(self):
+        from fcapz.ejtagaxi import AXIError
+
+        depth = self.bridge._fifo_depth
+        data = [0x0DD00000 + i for i in range(8)]
+        self.bridge.write_block(0x00, data)
+        # Bypass the host-side guard: the RTL refuses a read that does not
+        # fit the FIFO room, so the R channel can never stall on a full FIFO.
+        self.bridge._fifo_depth = 0
+        try:
+            with self.assertRaises(AXIError):
+                self.bridge.burst_read(0x00, depth + 1)
+        finally:
+            self.bridge._fifo_depth = depth
+        self._assert_idle()
+        self.assertEqual(self.bridge.burst_read(0x00, 8), data)
+
+    def test_burst_word_shown_once(self):
+        from fcapz.ejtagaxi import (
+            CMD_BURST_RDATA, CMD_BURST_RSTART, CMD_BURST_SETUP, CMD_NOP)
+
+        data = [0x0F0F0000 + i for i in range(4)]
+        self.bridge.write_block(0x00, data)
+        config = (4 - 1) | (0b010 << 8) | (0b01 << 12)  # 4 beats, 32-bit, INCR
+        rd, nop = (CMD_BURST_RDATA, 0, 0, 0), (CMD_NOP, 0, 0, 0)
+        # Two words drained, a NOP shows the third: it must be popped there,
+        # so the next RDATA pair returns the fourth, not the third again.
+        scans = [(CMD_BURST_SETUP, 0x00, config, 0), (CMD_BURST_RSTART, 0, 0, 0)]
+        scans += [nop] * 4 + [rd, rd, rd, nop, rd, rd, nop]
+        out = self.bridge._scan_batch(scans)
+        self.assertEqual([out[i][2] for i in (7, 8, 9, 11)], data)
+        self.assertTrue(out[9][0] & 0x1, "NOP after RDATA showed no word")
+        self.assertFalse(out[12][0] & 0x9, f"word left over: status 0x{out[12][0]:X}")
+        self._assert_idle()
+        self.assertEqual(self.bridge.burst_read(0x00, 4), data)
+
+    def test_reset_mid_burst_leaves_slave_untouched(self):
+        from fcapz.ejtagaxi import CMD_BURST_SETUP, CMD_BURST_WDATA, CMD_NOP, CMD_RESET
+
+        before = [0x0B0B0000 + i for i in range(8)]
+        self.bridge.write_block(0x00, before)
+        config = (8 - 1) | (0b010 << 8) | (0b01 << 12)  # 8 beats, 32-bit, INCR
+        scans = [(CMD_BURST_SETUP, 0x00, config, 0)]
+        scans += [(CMD_BURST_WDATA, 0, 0xDEAD0000 + i, 0xF) for i in range(3)]
+        scans += [(CMD_RESET, 0, 0, 0)] + [(CMD_NOP, 0, 0, 0)] * 4
+        self.bridge._scan_batch(scans)
+        self.bridge._prime_cdc()
+        self._assert_idle()
+        self.assertEqual(self.bridge.read_block(0x00, 8), before)
+        # The bridge still works normally afterwards.
+        data = [0x77770000 + i for i in range(8)]
+        self.bridge.burst_write(0x00, data)
+        self.assertEqual(self.bridge.burst_read(0x00, 8), data)
 
 
 # ── AXI monitor tests (USER2) ────────────────────────────
@@ -1599,13 +1813,20 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
     def _set_go(self, value: int) -> None:
         self.bridge.axi_write(self.GO_OFF, value)
 
-    def _arm_on_writes(self, pretrigger=4, posttrigger=32):
+    def _seed_cpu_words(self) -> None:
+        """With the CPU gated off, overwrite words 16/17 with sentinels."""
+        for off in (self.D0_OFF, self.D1_OFF):
+            self.bridge.axi_write(off, 0x0BAD0000 | off)
+            self.assertEqual(self.bridge.axi_read(off), 0x0BAD0000 | off)
+
+    def _arm_on_writes(self, pretrigger=4, posttrigger=32, *, quiet_bus=True):
         cfg = self.mon.event_capture_config(
             "aw_hs", pretrigger=pretrigger, posttrigger=posttrigger, depth=256
         )
         self.an.configure(cfg)
         self.an.arm()
-        self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
+        if quiet_bus:  # with CPU writes flowing, it triggers before we look
+            self.assertEqual(self._status() & 0x1, 1, "monitor did not arm")
 
     def test_cpu_quiet_until_gated_on(self):
         """Gated off, the CPU issues no writes: an aw_hs-armed monitor stays
@@ -1624,8 +1845,14 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         bridge reads the CPU's pattern back from the shared slave (repeatably)."""
         import time
 
-        self._arm_on_writes(pretrigger=2, posttrigger=12)
-        self._set_go(1)  # turn the CPU loose
+        # Over openocd/ftdi the slave keeps an earlier test's CPU words: seed
+        # sentinels while the CPU is gated off, so only new CPU writes pass.
+        self._seed_cpu_words()
+        # Turn the CPU loose *first*: armed before, the host's own write to the
+        # go word would trigger the monitor.
+        self._set_go(1)
+        time.sleep(0.05)
+        self._arm_on_writes(pretrigger=2, posttrigger=12, quiet_bus=False)
 
         deadline = time.time() + 3.0
         status = 0
@@ -1650,6 +1877,7 @@ class TestAxiMonitorMicroBlaze(unittest.TestCase):
         written over word16 via EJTAG survives (the CPU no longer overwrites it)."""
         import time
 
+        self._seed_cpu_words()
         self._set_go(1)
         time.sleep(0.05)
         self.assertEqual(self.bridge.axi_read(self.D0_OFF), self.PATTERN)

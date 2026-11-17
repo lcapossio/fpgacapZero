@@ -211,7 +211,8 @@ either way: its entry looks ordinary and its identity is stable, but the
 bytes can belong to a file outside the root. Probe files are also capped at
 1 MiB.
 
-Programming is intentionally `hw_server`-only in the MCP layer.
+Programming is limited to the `hw_server` and `ftdi` backends in the MCP
+layer (`ftdi` programs AMD/Xilinx 7-series FPGAs only).
 
 If `program` is passed while programming is disabled, the server reports the
 permission error before backend-specific validation so agents see the global
@@ -226,22 +227,28 @@ The live RPC layer supports:
 | `hw_server` | `host`, `port`, `tap`, `ir_table` | `program`, `single_chain_burst` defaults to `true` |
 | `openocd` | `host`, `port`, `tap`, `ir_table` | - |
 | `usb_blaster` | `hardware`, `quartus_stp` | - |
-| `ftdi` | `hardware`, `ir_table` | `tck_mhz` (default 6) |
+| `ftdi` | `hardware`, `ir_table` | `tck_mhz` (default 6), `program` (AMD/Xilinx 7-series) |
 | `serial` | `serial_port` | `baudrate` (default 1000000) |
 
 `ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"`,
-`"gowin"`, `"polarfire"` or `"efinix"`. Omit it and the RPC layer infers one
-from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale, anything else
-7-series), or on `ftdi` from the device IDCODE; pass it when the tap name does
+`"gowin"`, `"polarfire"`, `"efinix"` or `"ecp5"`. Omit it and the RPC layer
+infers one from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale,
+`ecp5*`/`lfe5*` ECP5, anything else 7-series), or on `ftdi` from the device
+IDCODE; pass it when the tap name does
 not say which family the part is.
 
-`ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver, with no
-daemon: the PolarFire kits' embedded FlashPro5, a Digilent cable, or any
-FT2232H/FT4232H JTAG adapter (see [Transports](14_transports.md)). `hardware`
-names the adapter by its D2XX description (for example
-`"Embedded FlashPro5 A"`) or serial. Omit it only when a single FlashPro or
-Digilent adapter is attached: other FTDI adapters (a generic FT2232H board,
-say) are not recognised and must be named.
+`ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver or
+libusb, with no daemon: the PolarFire kits' embedded FlashPro5, a Digilent
+cable, the Kria KV260 carrier, or any FT2232H/FT4232H JTAG adapter (see
+[Transports](14_transports.md)). `hardware` names the adapter by its D2XX
+description (for example `"Embedded FlashPro5 A"`) or serial, or a libusb
+channel with a `usb:` selector (`"usb:"` alone picks the one known adapter).
+Omit it only when a single FlashPro, Digilent or KV260 adapter is attached:
+other FTDI adapters (a generic FT2232H board, say) are not recognised and
+must be named. On a chain of several devices the transport picks the one
+device whose family it recognises, provided every IR length can be worked
+out, and keeps the others in BYPASS; a chain it cannot resolve that way needs
+the Python API's `tap=` / `ir_lengths=`, which MCP does not expose.
 EIO, AXI and UART sessions on the same adapter share its handle.
 
 `serial` talks to the byte-stream TAP bridge (`rtl/fcapz_uart_tap.v`, used by
@@ -403,7 +410,8 @@ Valid `config` keys for `fcapz_capture` and `fcapz_configure` are:
 | `sample_clock_hz` | Optional sample clock rate for timestamp/event reporting. |
 | `probes` | Probe definitions, matching the RPC/Python probe schema. |
 | `probe_file` | Name of a probe definition file directly inside `--probe-root`. |
-| `channel` | Capture channel or runtime probe mux channel. |
+| `channel` | Input channel of the channel mux (`0`..`NUM_CHANNELS`-1). |
+| `probe_sel` | Runtime probe mux slice, on a core with `probe_mux_w > 0` in `fcapz_probe` (default `0`). |
 | `decimation` | Sample decimation factor. |
 | `ext_trigger_mode` | External trigger mode. |
 | `stor_qual_mode` | Storage qualification: `0` off, `1` store only matching samples, `2` store only non-matching ones. `1` needs a core reporting `COMPARE_CAPS` bit 22; older cores have only `2`. |
@@ -820,8 +828,8 @@ Debug a bus fault with the AXI monitor — anomalies first, then their context:
 fcapz_connect(backend="hw_server")
 fcapz_list_cores()                       # find the AXI monitor's chain
 fcapz_connect(backend="hw_server", chain=<monitor chain>)
-fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 512,
-                      "posttrigger": 3584}, timeout=10.0)
+fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 32,
+                      "posttrigger": 223}, timeout=10.0)
                                          # summary carries the AXI headline counts
 fcapz_axi_transactions(only_anomalies=True)
                                          # then widen around what it found
@@ -832,6 +840,7 @@ fcapz_close()
 AXI read:
 
 ```text
+fcapz_connect(backend="hw_server")       # the ELA session comes first
 fcapz_connect(core="axi", backend="hw_server", chain=4)
 fcapz_axi_read(addr="0x40000000")
 fcapz_axi_read(addr="0x40000000", count=16)
@@ -857,6 +866,7 @@ fcapz_close()
 UART receive:
 
 ```text
+fcapz_connect(backend="hw_server")       # the ELA session comes first
 fcapz_connect(core="uart", backend="hw_server", chain=4)
 fcapz_uart_recv(count=256, timeout=0.5)
 fcapz_close(core="uart")
@@ -867,13 +877,13 @@ fcapz_close(core="uart")
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
-| `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or not `hw_server`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
-| Tool call raises `TimeoutError` | The MCP 30 second response timeout fired before the backend returned. | The server attempted a session-wide backend cancellation. Retry only if `fcapz_status` responds; restart if the next call reports a previous RPC still running. |
-| A new tool call says a previous RPC is still running | A timed-out hardware call is still executing in the background. | The MCP client or host wrapper needs to restart `fcapz-mcp` before issuing more hardware commands. |
+| `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or neither `hw_server` nor `ftdi`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
+| Tool call raises `TimeoutError` | The RPC watchdog (`--rpc-timeout`, 30 s by default) fired before the backend returned. | The board session is torn down, or is being torn down if the call was abandoned. Poll `fcapz_status` until `session_state` is `ready`, then call `fcapz_connect` again. Restart `fcapz-mcp` only if it never returns to `ready`. |
+| A new tool call is refused while the session is recovering from an abandoned call (`session_recovering`) | A timed-out hardware call is still being torn down; `session_state` is `poisoned`. | Wait: once the abandoned call returns, the server closes the board session, clears its state and goes back to `ready`. Then reconnect. Restart only if recovery never completes. |
 | `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
 | USB-Blaster rejects `host` | That backend does not use host/port sockets. | Omit `host`, `port`, and `tap` entirely for `usb_blaster`. |
 | `serial_port ... is not a serial port on this machine` | The name is not one the OS lists, or the board is not in bridge mode yet. | Use a name from the error's `present:` list (or `fcapz list-ports`); program the FPGA first so the bridge enumerates. |
-| `ftdi` connect finds no adapter, or the wrong one | Another program (OpenOCD, a vendor tool) holds the channel, or several adapters are attached. | Close the other program; pass `hardware` with the adapter's D2XX description or serial. |
+| `ftdi` connect finds no adapter, or the wrong one | Another program (OpenOCD, a vendor tool) holds the channel, or several adapters are attached. | Close the other program; pass `hardware` with the adapter's description or serial (`usb:...` for a libusb channel). |
 | The next session cannot open the cable after an HTTP server went away | The server was killed rather than stopped, so its shutdown never closed the board session and a backend process (for example `quartus_stp`) may still hold the JTAG cable. | Stop an HTTP server with Ctrl-C, which closes every hardware connection. After a hard kill, end the leftover backend process before reconnecting. |
 | HTTP client gets `401` | Missing, misspelled or wrong `Authorization: Bearer` header. | Send the exact token the server was started with (`FCAPZ_MCP_TOKEN` or `--http-token-file`). |
 | HTTP client gets `421 Invalid Host header` | A loopback-bound server only accepts `127.0.0.1`, `localhost` or `[::1]` as the `Host`. | Connect by one of those names, or bind a network address with `--http-host` (plus TLS). |

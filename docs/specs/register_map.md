@@ -16,7 +16,7 @@
 - **EIO** (USER3 standalone, or a managed USER1 slot)
   - [Core register map](#regmap-eio) — [address table](#regmap-eio-addr), [clock domains](#regmap-eio-clk), [reset behaviour](#regmap-eio-rst)
 - **EJTAG-AXI** (USER4)
-  - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
+  - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [stream mode](#regmap-ejtag-axi-stream), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
 - **EJTAG-UART** (USER4, mutually exclusive with AXI)
   - [32-bit DR format](#regmap-ejtag-uart) — [commands](#regmap-ejtag-uart-cmd), [CONFIG byte map](#regmap-ejtag-uart-config), [shift-out status](#regmap-ejtag-uart-status)
 
@@ -72,7 +72,7 @@ in that bridge’s section.
 | `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
 | `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset, and set to 0 by every `CTRL` write with bit 0 (arm) or bit 1 (reset), so an offset a host left behind cannot shift the next capture's reads. See [DATA window readout](#regmap-data-user1). |
-| `0x00F8` | CAPTURE_GEN | RO | `COMPARE_CAPS` bit 21. `[15:0]` counts every `CTRL` write with bit 0 (arm) or bit 1 (reset) and every release of the core's register-side reset: each can start a capture that overwrites the buffer. A release and such a write in the same cycle count two. Never reset (power-up 0), wraps at 16 bits. `STARTUP_ARM` arms and segment re-arms are not counted: the first follows a counted reset, and the second fill the segments of one capture. (`0x00E8` is the AXI monitor's `AXI_MON_ID`.) A host reads it after its arm and around a readout to know that the samples it read are the capture it armed. |
+| `0x00F8` | CAPTURE_GEN | RO | `COMPARE_CAPS` bit 21. `[15:0]` counts every `CTRL` write with bit 0 (arm) or bit 1 (reset) and every release of the core's register-side reset: each can start a capture that overwrites the buffer. A release and such a write in the same cycle count two. Never reset (power-up 0 where the flow keeps initial values, arbitrary on PolarFire), wraps at 16 bits. `STARTUP_ARM` arms and segment re-arms are not counted: the first follows a counted reset, and the second fill the segments of one capture. (`0x00E8` is the AXI monitor's `AXI_MON_ID`.) A host reads it after its arm and around a readout to know that the samples it read are the capture it armed. |
 | `0x0100 + word*4` | DATA | RO | USER1 sample data window. Present when `USER1_DATA_EN=1`; minimal USER2-only builds may disable this slow fallback window and return zero. The host raises `DataWindowError` instead of reading it on a core that reports none (`COMPARE_CAPS` bit 21 without bit 20); older cores cannot say. |
 
 <a id="regmap-seq-cfg"></a>
@@ -185,10 +185,10 @@ ELA/EIO designs; the slot descriptors identify whether each slot is `"LA"` or
 | `0xF014` | MGR_DESC_INDEX | RW | Descriptor slot index for `MGR_DESC_*` and `MGR_SLOT_EPOCH` reads, and the slot `MGR_CTRL` bit 1 resets. Present when `MGR_CAPS[1]=1`. |
 | `0xF018` | MGR_DESC_CORE | RO | Descriptor core ID for `MGR_DESC_INDEX`: `"LA"` (`0x4C41`) for ELA, `"IO"` (`0x494F`) for EIO. |
 | `0xF01C` | MGR_DESC_CAPS | RO | Descriptor capability bits. Bit 0 = slot participates in fast 256-bit burst readback. EIO reports `0`; heterogeneous ELA slots whose width/depth/timestamp/segment shape does not match the manager's max burst pipe also report `0` and are read through the normal 49-bit DATA window. |
-| `0xF020` | MGR_EPOCH | RO | `[15:0]` counts both edges of the hub reset (`MGR_CTRL` bit 0, or the power-up reset): odd while it is held, even once it is released, so each reset adds 2. `[31:16]` read 0. The power-up value is 0, so a hub that came up normally reads 2. Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF020` | MGR_EPOCH | RO | `[15:0]` is `{releases, held}` for the hub reset (`MGR_CTRL` bit 0, or the power-up reset): bit 0 is the reset's level, so the epoch is odd while it is held and even once it is released, and each reset adds 2. `[31:16]` read 0. Never reset. The release count powers up 0 where the flow keeps initial values, so a hub that came up normally reads 2; where it does not (PolarFire), it powers up at an arbitrary value, so a host compares epochs and tests their parity, never their value. Present when `MGR_CAPS[3]=1`. |
 | `0xF024` | MGR_OWNER | RW | Owner token of the host session using the hub. Advisory: the hub never acts on it. The host writes a random nonzero token when it first selects a slot on the chain, warns if another nonzero token was there, and writes 0 when it closes. Cleared by the hub reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF028` | MGR_CTRL | WO | Reads 0. Write 1s to: bit 0 reset the hub (`MGR_ACTIVE`, `MGR_DESC_INDEX`, `MGR_OWNER` and the burst owner, but no slot); bit 1 reset the `MGR_DESC_INDEX` slot; bit 2 reset every slot. A slot reset is the slot's own reset: an ELA's sample and register sides together, an EIO's outputs. Present when `MGR_CAPS[5]=1`. |
-| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` counts both edges of the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2): odd while the slot is held in reset, and each reset adds 2. Never reset. Present when `MGR_CAPS[3]=1`. |
+| `0xF02C` | MGR_SLOT_EPOCH | RO | `[15:0]` is `{releases, held}` for the `MGR_DESC_INDEX` slot's reset (its sample reset, or `MGR_CTRL` bits 1/2), like `MGR_EPOCH`: odd while the slot is held in reset, and each reset adds 2. Never reset. Present when `MGR_CAPS[3]=1`. |
 | `0xF030` | MGR_TLR_COUNT | RO | `[15:0]` counts entries of the TAP into Test-Logic-Reset. Never reset. Present when `MGR_CAPS[5]=1`. |
 | `0xF034` | MGR_SELECT_COUNT | RO | `[15:0]` counts every `MGR_ACTIVE` write, from any controller, including writes the manager refuses. Never reset, wraps at 16 bits. Present when `MGR_CAPS[7]=1`. A host that counts its own `MGR_ACTIVE` writes learns from the difference that another controller selected a slot, even one that selected the host's slot back. |
 
@@ -210,7 +210,9 @@ Each slot resets alone. An ELA's `ela_sample_rst` (or `MGR_CTRL` bit 1/2)
 resets that ELA's sample side and, synchronised to TCK, its register side; it
 reaches no other slot, no EIO output and no manager register. The hub's own
 reset is the power-up reset, which follows the slots' sample resets only until
-it is first released, plus `MGR_CTRL` bit 0. Before per-slot resets, any ELA's
+it is first released, plus `MGR_CTRL` bit 0.  On PolarFire, whose flow drops
+register initial values, the shell's `hub_por` input marks power-up instead
+and resets the hub and every slot. Before per-slot resets, any ELA's
 sample reset reset the whole hub: `MGR_ACTIVE`, every EIO output, and the
 register side of every ELA, which made another ELA that had been armed once see
 a phantom arm and re-arm over its capture.
@@ -223,8 +225,9 @@ when the JTAG server keeps the TAP out of Test-Logic-Reset between scans:
 Xilinx `hw_server`/`xsdb` walks it through Test-Logic-Reset many times a second
 while a session is open, which would cancel bursts.  The epochs and
 `MGR_TLR_COUNT` are never reset, so a host compares them before and after an
-operation to learn that a reset happened in between; because an epoch counts
-both edges, it also differs when a reset was asserted and not yet released.
+operation to learn that a reset happened in between; because an epoch's bit 0
+is the reset level, it also differs when a reset was asserted and not yet
+released.
 The Python host reads `MGR_ACTIVE` (an analyzer with an `instance` refuses
 another slot there), that slot's epoch and `MGR_EPOCH` before and after
 `configure()`, refuses to
@@ -395,6 +398,7 @@ polling required.
 | 0x7 | BURST_WDATA | Push one word into burst write buffer |
 | 0x8 | BURST_RDATA | Pop one word from burst read FIFO |
 | 0x9 | BURST_RSTART | Initiate burst read (addr channel) |
+| 0xA | STREAM_RSTART | Start a streaming read: addr = start (word aligned), payload = word count. Only with `STREAM_EN=1` (`FEATURES[24]`); otherwise a NOP (nothing is queued, no response). |
 | 0xE | CONFIG | Read bridge config register (addr selects register) |
 | 0xF | RESET | Reset bridge state machines |
 
@@ -413,6 +417,32 @@ polling required.
 > arready, rvalid). Inter-beat timing in burst writes is host-paced via
 > JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
 > delay — the host sends a priming `BURST_RDATA` before reading N words.
+> A read that times out on `rvalid`, or that RESET cuts off after the
+> slave accepted its address, is drained: the bridge holds `rready` high
+> and discards the beats up to `rlast`, however late. Commands wait for
+> the drain up to `TIMEOUT` cycles without a beat; then writes and CONFIG
+> run, and reads answer SLVERR without issuing an AR until the drain ends.
+
+<a id="regmap-ejtag-axi-stream"></a>
+### Stream mode (`STREAM_RSTART`)
+
+After `STREAM_RSTART` the DR stops decoding commands.  Every scan, of any
+length, shifts out 33-bit slots `{data[31:0], valid}`, LSB first:
+
+| Slot | `valid` | `data` |
+|------|---------|--------|
+| 0 (header) | 0 | words not yet delivered |
+| 1… | 1 | next word of the range |
+| 1… | 0 | FIFO empty, nothing consumed |
+
+A word is delivered once all 33 bits of its slot are out; a scan that ends
+inside a slot re-sends that word in the next scan.  TDI must be 0: a scan
+that shifts in any 1 aborts the stream like `CMD_RESET`.  Stream mode ends
+at the UPDATE of the first scan whose header reads 0, and the next normal
+scan returns the range's AXI response (the first non-OKAY `rresp`) with
+`prev_valid`.  The AXI side reads the range in INCR bursts of
+`FIFO_DEPTH/4` beats that never cross 4 KB and start only when the burst
+FIFO has room for the whole burst.
 
 <a id="regmap-ejtag-axi-config"></a>
 ### Config registers (CMD_CONFIG)
@@ -421,7 +451,8 @@ polling required.
 |---------|------|-------|-------------|
 | `0x0000` | VERSION | varies | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"JX"` (`0x4A58`). Hosts verify `VERSION[15:0]` before trusting the core. Legacy bitstreams that still return `"EJAX"` (`0x454A4158`) at this address are accepted with a warning. |
 | `0x0004` | VERSION_ALIAS | same as `0x0000` | Mirror of VERSION for explorer-friendly reads at the old VERSION slot. |
-| `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
+| `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). `[24]`=STREAM_ON (streaming read built in, `STREAM_EN=1`). `[25]`=bus-safe writes: whole bursts buffered before AW, VALIDs held to READY, B always taken, illegal bursts (4 KB crossing, bad FIXED/WRAP, size, type, write longer than `FIFO_DEPTH`) refused with SLVERR before the bus, and `CFG_AXI_STATUS`. The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
+| `0x0030` | AXI_STATUS | varies | What the bridge still owes the slave (FEATURES[25]): `[0]` write engine busy, `[1]` it is finishing a write nobody waits for (timed out or RESET), `[2]` ARVALID held after a timeout or RESET, `[3]` beats of an abandoned read being drained, `[4]` burst write being collected, `[5]` anything owed (`[0]`, `[2]` or `[3]`) as one AXI-side flop. Each bit is 2-FF synchronized on its own, so `[0]`-`[4]` may all read 0 for a moment while an obligation passes between them; test `[5]` for idle. |
 
 [↑ Top](#regmap-top)
 

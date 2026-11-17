@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
 
-"""Native JTAG over an FTDI MPSSE adapter, through FTDI's D2XX driver.
+"""Native JTAG over an FTDI MPSSE adapter, through FTDI's D2XX driver or
+libusb.
 
 :class:`FtdiMpsseTransport` drives an FT2232H / FT4232H JTAG channel
 directly: no OpenOCD, no vendor tool.  It uses the D2XX library
@@ -10,18 +11,24 @@ elsewhere), which is the driver Microchip's FlashPro and Digilent's
 adapters already use on Windows, so it coexists with Libero / Vivado: the
 transport holds the adapter only while connected.
 
-Scope: one device on the JTAG chain.  At connect the transport reads the
-IDCODE chain, measures the IR length, and picks the IR table from the
-IDCODE manufacturer unless one is given.
+Scope: one selected device on the JTAG chain, the others in BYPASS.  At
+connect the transport reads the IDCODE chain, measures the IR length, and
+picks the IR table from the IDCODE unless one is given.  A ``usb:``
+selector opens the channel through libusb instead
+(:mod:`fcapz.ftdi_libusb`).  It can also configure an
+AMD/Xilinx 7-series FPGA (:meth:`FtdiMpsseTransport.program`).
 """
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import functools
 import os
 import sys
 import threading
-from typing import Any, List, NamedTuple
+import time
+from typing import List, NamedTuple, Sequence
 
 from .transport import (
     BurstIntegrityError,
@@ -70,13 +77,23 @@ def _load_d2xx():
 
 
 class FtdiDevice(NamedTuple):
-    """One FTDI channel as D2XX enumerates it."""
+    """One FTDI channel, as D2XX or libusb enumerates it."""
 
     index: int
     description: str
     serial: str
     usb_id: int  # VID << 16 | PID
     opened: bool
+    #: ``"d2xx"``, or ``"libusb"`` for a channel from
+    #: :func:`fcapz.ftdi_libusb.list_usb_devices`.
+    backend: str = "d2xx"
+    #: USB interface number of the channel (A = 0); libusb only.
+    interface: int = 0
+    #: Where libusb found it (``backend:bus:address``); libusb only.
+    location: str = ""
+
+#: Prefix of a ``device=`` selector that names a libusb channel.
+USB_PREFIX = "usb:"
 
 
 def list_ftdi_devices() -> list[FtdiDevice]:
@@ -117,6 +134,9 @@ ADAPTER_LAYOUTS: tuple[tuple[str, int, int], ...] = (
     ("FlashPro", 0x18, 0x1B),
     # Digilent adapters (Arty, HS1/HS2-style): ADBUS7 enables the JTAG buffer.
     ("Digilent", 0x88, 0x8B),
+    # AMD Kria KV260 carrier card (FT4232H, channel A): the chain answers
+    # only with ADBUS5 driven low.
+    ("ML Carrier Card", 0x08, 0x2B),
 )
 #: Layout for adapters not listed above: TMS high, TCK/TDI/TMS outputs.
 DEFAULT_LAYOUT = (0x08, 0x0B)
@@ -139,13 +159,137 @@ def _layout_for(description: str) -> tuple[int, int] | None:
     return None
 
 
+def _channel_key(dev: FtdiDevice) -> tuple[int, str, str] | None:
+    """The physical channel *dev* names: ``(VID/PID, USB serial, channel
+    letter)``, the same whichever driver enumerated it, or ``None`` when the
+    chip has no serial number to tell it from a twin.
+
+    D2XX appends the channel letter to the serial of a multi-channel chip
+    ("FT1234A") and to its description ("... A"); the letter comes off the
+    serial only when the description ends with the same one.
+    """
+    serial, letter = dev.serial, "A"
+    desc = dev.description
+    if len(desc) >= 2 and desc[-2] == " " and desc[-1] in "ABCD":
+        letter = desc[-1]
+        if serial.endswith(letter):
+            serial = serial[:-1]
+    if not serial:
+        return None
+    return dev.usb_id, serial, letter
+
+
+def _same_channel(a: FtdiDevice, b: FtdiDevice) -> bool:
+    """Whether *a* and *b* are the same physical channel.  Two libusb
+    channels compare by where libusb found them, which also tells apart
+    clones that share a serial number or have none; across backends only
+    the serial-based :func:`_channel_key` can match them."""
+    if a.backend == b.backend == "libusb":
+        return (a.location, a.interface) == (b.location, b.interface)
+    key = _channel_key(a)
+    return key is not None and key == _channel_key(b)
+
+
+def _is_default(device: str | None) -> bool:
+    """Whether the selector names no channel: ``None``, or ``usb:`` alone."""
+    return device is None or device == USB_PREFIX
+
+
+def _selects(dev: FtdiDevice, device: str) -> bool:
+    """Whether the ``device=`` selector names *dev*: by description or
+    serial; a ``usb:`` selector names a libusb channel only."""
+    if device.startswith(USB_PREFIX):
+        if dev.backend != "libusb":
+            return False
+        device = device[len(USB_PREFIX):]
+        if not device:
+            return True
+    return device in (dev.description, dev.serial)
+
+
+def list_ftdi_targets() -> list[str]:
+    """``device=`` selectors for every channel either backend reaches: D2XX
+    descriptions, then ``usb:`` names of libusb channels (when pyusb is
+    installed).  Raises the D2XX error when neither backend works."""
+    targets: list[str] = []
+    error: RuntimeError | None = None
+    try:
+        targets += [d.description for d in list_ftdi_devices() if d.description]
+    except RuntimeError as exc:
+        error = exc
+    try:
+        from .ftdi_libusb import list_usb_devices
+
+        targets += [USB_PREFIX + d.description for d in list_usb_devices() if d.description]
+    except RuntimeError:
+        if error is not None:
+            raise error from None
+    return targets
+
+
+def _pick(device: str | None) -> FtdiDevice:
+    """:func:`_pick_device` over the channels *device* chooses from; when
+    nothing fits, says whether the other backend lists the channel."""
+    try:
+        return _pick_device(_list_devices(device), device)
+    except RuntimeError as exc:
+        hint = _other_backend_hint(device)
+        if not hint:
+            raise
+        raise RuntimeError(f"{exc} ({hint})") from exc
+
+
+def _other_backend_hint(device: str | None) -> str:
+    """Where the other backend lists the channel *device* failed to find."""
+    try:
+        if device is not None and device.startswith(USB_PREFIX):
+            name = device[len(USB_PREFIX):]
+            listed = [d for d in list_ftdi_devices()
+                      if d.description and (not name or _selects(d, name))]
+            if listed:
+                return (f"D2XX lists {listed[0].description!r}: its driver keeps libusb "
+                        "away, so name it without the usb: prefix")
+            return ""
+        from .ftdi_libusb import list_usb_devices
+
+        listed = [d for d in list_usb_devices() if device is None or _selects(d, device)]
+        if listed:
+            return f"libusb lists it: name it {USB_PREFIX + listed[0].description!r}"
+    except (RuntimeError, OSError):
+        pass
+    return ""
+
+
+def _list_devices(device: str | None) -> list[FtdiDevice]:
+    """The channels *device* chooses from: libusb's for a ``usb:``
+    selector, else D2XX's (libusb's when the D2XX library is missing and
+    pyusb is installed)."""
+    if device is not None and device.startswith(USB_PREFIX):
+        from .ftdi_libusb import list_usb_devices
+
+        return list_usb_devices()
+    try:
+        return list_ftdi_devices()
+    except RuntimeError as exc:
+        try:
+            import usb.core  # noqa: F401
+        except ImportError:
+            raise exc from None  # the D2XX error says what to install
+        from .ftdi_libusb import list_usb_devices
+
+        return list_usb_devices()
+
+
 def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
     """Pick the adapter channel: by exact description or serial, or the
     single known JTAG adapter's channel A."""
+    if device is not None and device.startswith(USB_PREFIX):
+        devices = [d for d in devices if d.backend == "libusb"]
+        device = device[len(USB_PREFIX):] or None
     listing = ", ".join(repr(d.description) for d in devices) or "none"
     if device:
         for d in devices:
-            if device in (d.description, d.serial):
+            if _selects(d, device):
                 return d
         raise RuntimeError(
             f"no FTDI channel with description or serial {device!r}; found: {listing}"
@@ -160,7 +304,8 @@ def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
         busy = sum(1 for d in devices if d.opened)
         hint = (
             f" {busy} FTDI channel(s) are open in another program (Libero, "
-            "FlashPro Express, hw_server, OpenOCD) and cannot be named; close it."
+            "FlashPro Express, hw_server, OpenOCD) or held by open_pins() in "
+            "this process, and cannot be named; close it."
             if busy else ""
         )
         raise RuntimeError(
@@ -173,12 +318,75 @@ def _pick_device(devices: list[FtdiDevice], device: str | None) -> FtdiDevice:
     )
 
 
-def _release(lib, handle: ctypes.c_void_p) -> None:
-    """Leave MPSSE mode and close a D2XX handle."""
-    try:
-        lib.FT_SetBitMode(handle, 0, 0)
-    finally:
-        lib.FT_Close(handle)
+class _D2xxIo:
+    """Byte I/O on one channel through a D2XX handle.
+
+    The transport's MPSSE logic sits on top of this: :meth:`setup` puts the
+    chip in MPSSE mode, :meth:`write` / :meth:`read` move bytes, and
+    :meth:`transfer` sends commands and reads their whole reply.  The D2XX
+    driver keeps reading from the chip in the background, so a write never
+    stalls on replies the host has not read yet and :meth:`transfer` is a
+    plain write then read.
+    """
+
+    backend = "d2xx"
+
+    def __init__(self, lib, handle: ctypes.c_void_p) -> None:
+        self.lib = lib
+        self.handle = handle
+        self.closed = False
+
+    def _call(self, name: str, *args) -> None:
+        status = getattr(self.lib, name)(self.handle, *args)
+        if status != _FT_OK:
+            raise RuntimeError(f"{name} failed: D2XX status {status}")
+
+    def setup(self, timeout_ms: int) -> None:
+        """Reset the channel, set its timeouts and put it in MPSSE mode."""
+        self.timeout_ms = timeout_ms
+        self._call("FT_ResetDevice")
+        self._call("FT_SetUSBParameters", 65536, 65536)
+        self._call("FT_SetChars", 0, 0, 0, 0)
+        self._call("FT_SetTimeouts", timeout_ms, timeout_ms)
+        self._call("FT_SetLatencyTimer", 1)
+        self._call("FT_SetFlowControl", 0x0100, 0, 0)  # RTS/CTS, per AN_135
+        self._call("FT_SetBitMode", 0, 0)
+        self._call("FT_SetBitMode", 0, 2)  # MPSSE
+        self._call("FT_Purge", 3)
+
+    def write(self, data: bytes) -> None:
+        written = ctypes.c_ulong()
+        self._call("FT_Write", data, len(data), ctypes.byref(written))
+        if written.value != len(data):
+            raise RuntimeError(f"FTDI write short: {written.value} of {len(data)} bytes")
+
+    def read(self, n: int) -> bytes:
+        if n == 0:
+            return b""
+        buf = ctypes.create_string_buffer(n)
+        got = ctypes.c_ulong()
+        self._call("FT_Read", buf, n, ctypes.byref(got))
+        if got.value != n:
+            raise RuntimeError(
+                f"FTDI read timed out: {got.value} of {n} bytes (adapter unplugged "
+                "or held by another program?)"
+            )
+        return buf.raw[:n]
+
+    def transfer(self, cmd: bytes, reply_bytes: int) -> bytes:
+        """Send *cmd* and read its *reply_bytes* bytes of reply."""
+        self.write(cmd)
+        return self.read(reply_bytes)
+
+    def close(self) -> None:
+        """Leave MPSSE mode and close the handle (once)."""
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.lib.FT_SetBitMode(self.handle, 0, 0)
+        finally:
+            self.lib.FT_Close(self.handle)
 
 
 # -- MPSSE JTAG batches ----------------------------------------------------
@@ -192,6 +400,17 @@ _DATA_BITS_INOUT = 0x3B
 _TMS_OUT = 0x4B
 _TMS_INOUT = 0x6B
 _SEND_IMMEDIATE = 0x87
+_READ_PINS = 0x81  # ADBUS low byte
+# Not an opcode: its rejection (0xFA 0xAB) marks the end of setup replies.
+_SYNC_MARK = 0xAB
+# ADBUS bits of the JTAG pins (TDO is ADBUS2).
+_PIN_TCK, _PIN_TDI, _PIN_TMS = 0x01, 0x02, 0x08
+# Read opcode bit 2 samples TDO on the falling edge instead: a full TCK
+# period after the target drove it, for cables whose TDO round trip is longer
+# than half a period (the Arty A7's onboard FT2232H at 30 MHz).
+_READ_FALLING = 0x04
+#: Above this TCK, TDO is sampled on the falling edge unless told otherwise.
+_FALLING_EDGE_ABOVE_HZ = 15_000_000
 
 # TAP paths from Run-Test/Idle.
 _IDLE_TO_SHIFT_IR = (1, 1, 0, 0)
@@ -202,20 +421,46 @@ _LAST_BIT_TO_IDLE = (1, 1, 0)
 
 class _Batch:
     """MPSSE command bytes for a run of JTAG scans, plus how to decode the
-    bytes they return."""
+    bytes they return.
 
-    def __init__(self) -> None:
+    *pad* puts the scans through one device of a multi-device chain:
+    ``(IR bits, DR bits)`` of the other devices on the TDO side, then on
+    the TDI side.  Their IRs get all ones (BYPASS), their 1-bit BYPASS DRs
+    a zero; callers pass and get back the target's bits only.
+
+    Each MPSSE command is also kept with its TCK clocks and reply bytes,
+    so :meth:`pieces` can cut a long batch into short transfers."""
+
+    def __init__(
+        self, sample_falling: bool = False, pad: tuple[int, int, int, int] = (0, 0, 0, 0)
+    ) -> None:
         self.cmd = bytearray()
         self.read_bytes = 0
-        # Per captured scan: (width, whole data bytes, leftover bits).
-        self.captures: list[tuple[int, int, int]] = []
+        self.clocks = 0
+        # Per command: (start in cmd, end, TCK clocks, reply bytes).
+        self._commands: list[tuple[int, int, int, int]] = []
+        self._pad = pad
+        # Per captured scan: (shifted width, whole data bytes, leftover
+        # bits, target offset, target width).
+        self.captures: list[tuple[int, int, int, int, int]] = []
+        edge = _READ_FALLING if sample_falling else 0
+        self._bytes_inout = _DATA_BYTES_INOUT | edge
+        self._bits_inout = _DATA_BITS_INOUT | edge
+        self._tms_inout = _TMS_INOUT | edge
+
+    def _add(self, command: bytes, clocks: int, reply: int) -> None:
+        start = len(self.cmd)
+        self.cmd += command
+        self._commands.append((start, len(self.cmd), clocks, reply))
+        self.clocks += clocks
+        self.read_bytes += reply
 
     def tms(self, bits, tdi: int = 0) -> None:
         bits = list(bits)
         while bits:
             chunk, bits = bits[:7], bits[7:]
             value = sum(b << i for i, b in enumerate(chunk)) | ((tdi & 1) << 7)
-            self.cmd += bytes((_TMS_OUT, len(chunk) - 1, value))
+            self._add(bytes((_TMS_OUT, len(chunk) - 1, value)), len(chunk), 0)
 
     def idle(self, n: int) -> None:
         self.tms([0] * max(0, int(n)))
@@ -227,6 +472,15 @@ class _Batch:
         """One IR or DR scan from Run-Test/Idle back to Run-Test/Idle."""
         if width < 1:
             raise ValueError(f"scan width must be >= 1, got {width}")
+        tdo_ir, tdo_dr, tdi_ir, tdi_dr = self._pad
+        before, after = (tdo_ir, tdi_ir) if ir else (tdo_dr, tdi_dr)
+        target_width = width
+        if before or after:
+            # The first bits shifted end up nearest TDO.
+            value = (value & ((1 << width) - 1)) << before
+            if ir:
+                value |= ((1 << before) - 1) | (((1 << after) - 1) << (before + width))
+            width += before + after
         self.tms(_IDLE_TO_SHIFT_IR if ir else _IDLE_TO_SHIFT_DR)
         body = width - 1
         nbytes, rem = divmod(body, 8)
@@ -236,27 +490,61 @@ class _Batch:
             while done < nbytes:
                 n = min(nbytes - done, 0x10000)
                 chunk = (value >> (done * 8)) & ((1 << (n * 8)) - 1)
-                op = _DATA_BYTES_INOUT if capture else _DATA_BYTES_OUT
-                self.cmd += bytes((op, (n - 1) & 0xFF, (n - 1) >> 8))
-                self.cmd += chunk.to_bytes(n, "little")
+                op = self._bytes_inout if capture else _DATA_BYTES_OUT
+                self._add(
+                    bytes((op, (n - 1) & 0xFF, (n - 1) >> 8)) + chunk.to_bytes(n, "little"),
+                    8 * n, n if capture else 0,
+                )
                 done += n
         if rem:
-            op = _DATA_BITS_INOUT if capture else _DATA_BITS_OUT
+            op = self._bits_inout if capture else _DATA_BITS_OUT
             bits = (value >> (nbytes * 8)) & ((1 << rem) - 1)
-            self.cmd += bytes((op, rem - 1, bits))
+            self._add(bytes((op, rem - 1, bits)), rem, 1 if capture else 0)
         last = (value >> (width - 1)) & 1
         tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | (last << 7)
-        self.cmd += bytes(
-            (_TMS_INOUT if capture else _TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)
+        self._add(
+            bytes((self._tms_inout if capture else _TMS_OUT,
+                   len(_LAST_BIT_TO_IDLE) - 1, tms_value)),
+            len(_LAST_BIT_TO_IDLE), 1 if capture else 0,
         )
         if capture:
-            self.captures.append((width, nbytes, rem))
-            self.read_bytes += nbytes + (1 if rem else 0) + 1
+            self.captures.append((width, nbytes, rem, before, target_width))
+
+    def pieces(self, max_clocks: int):
+        """Yield ``(commands, reply bytes)`` of at most *max_clocks* TCK
+        each (one bit or TMS command may exceed it by its 7 clocks).  A byte
+        command is cut into shorter ones: the TAP stays in its shift state
+        between commands, so the pieces clock exactly what the batch does,
+        and their replies concatenate to the batch's."""
+        max_clocks = max(8, int(max_clocks))
+        cmd, clocks, reply = bytearray(), 0, 0
+        for start, end, n_clocks, n_reply in self._commands:
+            op = self.cmd[start]
+            if n_clocks > max_clocks and op in (_DATA_BYTES_OUT, self._bytes_inout):
+                data = self.cmd[start + 3:end]
+                step = max_clocks // 8
+                parts = []
+                for pos in range(0, len(data), step):
+                    part = data[pos:pos + step]
+                    n = len(part) - 1
+                    parts.append((bytes((op, n & 0xFF, n >> 8)) + part, 8 * len(part),
+                                  len(part) if n_reply else 0))
+            else:
+                parts = [(self.cmd[start:end], n_clocks, n_reply)]
+            for part, n_clocks, n_reply in parts:
+                if cmd and clocks + n_clocks > max_clocks:
+                    yield bytes(cmd), reply
+                    cmd, clocks, reply = bytearray(), 0, 0
+                cmd += part
+                clocks += n_clocks
+                reply += n_reply
+        if cmd:
+            yield bytes(cmd), reply
 
     def decode(self, rx: bytes) -> list[int]:
         values: list[int] = []
         pos = 0
-        for width, nbytes, rem in self.captures:
+        for width, nbytes, rem, before, target_width in self.captures:
             value = int.from_bytes(rx[pos:pos + nbytes], "little")
             pos += nbytes
             if rem:
@@ -267,7 +555,8 @@ class _Batch:
             # The last data bit is the first of the TMS read's clocks.
             last = (rx[pos] >> (8 - len(_LAST_BIT_TO_IDLE))) & 1
             pos += 1
-            values.append(value | (last << (width - 1)))
+            value |= last << (width - 1)
+            values.append((value >> before) & ((1 << target_width) - 1))
         return values
 
 
@@ -281,9 +570,21 @@ _FAMILY_IR_TABLES: dict[str, dict[int, int]] = {
     "xilinx7": {1: 0x02, 2: 0x03, 3: 0x22, 4: 0x23},
     "polarfire": {1: 0x20, 2: 0x21},
     "gowin": {1: 0x42, 2: 0x43},
+    # Zynq UltraScale+ MPSoC PL (12-bit IR, PS and PL TAP in series): the
+    # BSDL's USER1-4.
+    "zynqus": {1: 0x902, 2: 0x903, 3: 0x922, 4: 0x923},
 }
 #: Whether each family's wrappers build a burst path by default.
-_FAMILY_BURST: dict[str, bool] = {"xilinx7": True, "polarfire": True, "gowin": False}
+_FAMILY_BURST: dict[str, bool] = {
+    "xilinx7": True, "polarfire": True, "gowin": False, "zynqus": True,
+}
+#: The family field (IDCODE bits 27:21) of AMD/Xilinx parts by their IR
+#: length: 7-series and Zynq-7000, and Zynq UltraScale+ MPSoC.
+_XILINX_FAMILY_IR = {0x1B: 6, 0x23: 12}
+#: Multi-die (SSI) 7-series parts share family 0x1B with longer IRs, by
+#: IDCODE bits 27:12 (UG470 table 1-1).  The 7V2000T's bits 13:12 vary.
+_XILINX_SSI_IR = {0x36D5: 24, 0x36D9: 22, 0x36DB: 38}
+_XILINX_7V2000T = 0x36B0  # IR 24
 
 
 def family_from_idcode(idcode: int, ir_length: int) -> str | None:
@@ -293,57 +594,230 @@ def family_from_idcode(idcode: int, ir_length: int) -> str | None:
         return "polarfire"
     if mfg == _MFG_XILINX and ir_length == 6:
         return "xilinx7"
+    if mfg == _MFG_XILINX and ir_length == 12 and (idcode >> 21) & 0x7F == 0x23:
+        return "zynqus"
     if mfg == _MFG_GOWIN and ir_length == 8:
         return "gowin"
     return None
 
 
+def known_ir_length(idcode: int | None) -> int | None:
+    """The IR length of a device with *idcode*, where the IDCODE tells it;
+    ``None`` for a device in BYPASS or one not known."""
+    if idcode is None:
+        return None
+    if idcode & 0x0FFF0FFF == 0x0BA00477:  # ARM JTAG-DP (Zynq's DAP)
+        return 4
+    if (idcode >> 1) & 0x7FF == _MFG_XILINX:
+        part = (idcode >> 12) & 0xFFFF
+        if part & 0xFFFC == _XILINX_7V2000T:
+            return 24
+        if part in _XILINX_SSI_IR:
+            return _XILINX_SSI_IR[part]
+        return _XILINX_FAMILY_IR.get((idcode >> 21) & 0x7F)
+    return None
+
+
+# -- AMD/Xilinx JTAG configuration -------------------------------------------
+
+# Configuration instructions of 7-series and single-die UltraScale (UG470,
+# UG570), and the status bits their IR capture carries.
+_XC_CFG_IN = 0x05
+_XC_JPROGRAM = 0x0B
+_XC_JSTART = 0x0C
+_XC_BYPASS = 0x3F
+_XC_IR_INIT = 0x10  # INIT_COMPLETE: housecleaning finished
+_XC_IR_DONE = 0x20
+_XC_SYNC = b"\xaa\x99\x55\x66"
+_XC_WRITE_IDCODE = b"\x30\x01\x80\x01"  # type-1 packet: write 1 word to IDCODE
+#: Bytes with their bit order reversed: configuration data is shifted MSB first.
+_BIT_REVERSE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
+
+
+class _ConfigFailed(RuntimeError):
+    """Configuration did not complete, but every scan went out whole, so
+    the adapter and TAP are in a known state."""
+
+
+def read_xilinx_bitstream(path: str) -> tuple[bytes, str | None]:
+    """Return the configuration data of a ``.bit`` or raw ``.bin`` file and
+    the part the ``.bit`` header names (``None`` for ``.bin``)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    data, part = raw, None
+    if raw[:2] == b"\x00\x09":
+        # .bit: a 9-byte magic field, 0x0001, then keyed fields; 'e' holds the
+        # configuration data with a 4-byte length, the others a 2-byte one.
+        pos = 2 + 9 + 2
+        fields: dict[str, bytes] = {}
+        while pos < len(raw):
+            key = chr(raw[pos])
+            if key == "e":
+                n = int.from_bytes(raw[pos + 1:pos + 5], "big")
+                data = raw[pos + 5:pos + 5 + n]
+                if len(data) != n:
+                    raise ValueError(f"{path}: bitstream truncated ({len(data)} of {n} bytes)")
+                break
+            n = int.from_bytes(raw[pos + 1:pos + 3], "big")
+            fields[key] = raw[pos + 3:pos + 3 + n]
+            pos += 3 + n
+        else:
+            raise ValueError(f"{path}: .bit header has no configuration data field")
+        if "b" in fields:
+            part = fields["b"].rstrip(b"\0").decode("ascii", errors="replace")
+    if _XC_SYNC not in data[:1024]:
+        raise ValueError(
+            f"{path}: no AMD/Xilinx sync word (0xAA995566) near the start; not a "
+            ".bit or a raw, unswapped .bin bitstream"
+        )
+    return data, part
+
+
+def bitstream_idcode(data: bytes) -> int | None:
+    """The IDCODE a bitstream checks the device against, or ``None``."""
+    i = data.find(_XC_WRITE_IDCODE, data.find(_XC_SYNC))
+    if i < 0 or i + 8 > len(data):
+        return None
+    return int.from_bytes(data[i + 4:i + 8], "big")
+
+
 class _OpenChannel:
-    """One D2XX handle, shared by every transport on that channel in this
-    process: D2XX opens a channel exclusively, and the ELA, EIO and bridge
+    """One open adapter channel, shared by every transport on it in this
+    process: a channel opens exclusively, and the ELA, EIO and bridge
     sessions of one server each hold their own transport.  Every scan batch
     starts with its own IR scan, so instances interleave safely under
-    ``lock``."""
+    ``lock``.
 
-    def __init__(self, lib, handle: ctypes.c_void_p, adapter: FtdiDevice) -> None:
-        self.lib = lib
-        self.handle = handle
+    ``broken`` is set when a USB transfer failed partway: MPSSE may be left
+    mid-command and the TAP mid-scan, so every transport on the channel
+    refuses I/O until it reconnects, which opens the channel afresh.
+
+    ``exclusive`` marks a channel opened with ``open_pins()``: registered so
+    that nothing else in the process opens it, but never shared."""
+
+    def __init__(self, io, adapter: FtdiDevice, *, exclusive: bool = False) -> None:
+        self.io = io
         self.adapter = adapter
+        self.exclusive = exclusive
+        self.broken: str | None = None
         self.lock = threading.RLock()
         self.users = 0
         self.idcode: int | None = None
         self.ir_length: int | None = None
         self.family: str | None = None
         self.actual_tck_hz: float | None = None
+        self.sample_falling = False
+        self.chain: list[tuple[int | None, int]] = []
+        self.chain_tap = 0
 
 
 _OPEN_CHANNELS: list[_OpenChannel] = []
 _OPEN_CHANNELS_LOCK = threading.Lock()
 
 
+_PIN_CHANNEL_BUSY = (
+    "FTDI channel {!r} is held by open_pins() in this process "
+    "(fcapz openocd-bridge); close that first"
+)
+
+
+def _live_channels() -> list[_OpenChannel]:
+    """The registry, less broken channels: those are already closed, and
+    their transports leave them on their next call.  Called with
+    ``_OPEN_CHANNELS_LOCK`` held."""
+    _OPEN_CHANNELS[:] = [ch for ch in _OPEN_CHANNELS if ch.broken is None]
+    return _OPEN_CHANNELS
+
+
 def _find_open_channel(device: str | None) -> _OpenChannel | None:
-    if device is None:
-        return _OPEN_CHANNELS[0] if len(_OPEN_CHANNELS) == 1 else None
-    for ch in _OPEN_CHANNELS:
-        if device in (ch.adapter.description, ch.adapter.serial):
-            return ch
-    return None
+    """The open channel the ``device=`` selector names, if any; before
+    enumerating, as a driver may list an open channel without its name.
+    Refuses a channel held by ``open_pins()``."""
+    live = _live_channels()
+    if _is_default(device):
+        # The one channel transports share (of libusb's, for ``usb:``); a
+        # pin channel is never the default, and enumeration refuses it if
+        # the default is its channel.
+        shared = [
+            c for c in live
+            if not c.exclusive and (device is None or c.adapter.backend == "libusb")
+        ]
+        ch = shared[0] if len(shared) == 1 else None
+    else:
+        ch = next((c for c in live if _selects(c.adapter, device)), None)
+    if ch is not None and ch.exclusive:
+        raise RuntimeError(_PIN_CHANNEL_BUSY.format(ch.adapter.description))
+    return ch
+
+
+def _channel_open_as(dev: FtdiDevice) -> _OpenChannel | None:
+    """The open channel on the same physical channel as *dev*, however it
+    was named or enumerated.  Refuses a channel held by ``open_pins()``."""
+    ch = next((c for c in _live_channels() if _same_channel(c.adapter, dev)), None)
+    if ch is not None and ch.exclusive:
+        raise RuntimeError(_PIN_CHANNEL_BUSY.format(ch.adapter.description))
+    return ch
+
+
+def _in_one_session(method):
+    """Bind a top-level transport call to the session it started under.
+
+    A call that runs several batches (a window read, a burst after its
+    ``SAMPLE_W`` read in :meth:`read_block`) must not finish on a session that :meth:`connect`
+    started after a :meth:`~FtdiMpsseTransport.cancel` while it sat between
+    batches: it fails at its next write instead.  Nested calls keep the
+    outermost call's session.
+    """
+
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        local = self._call_local
+        if getattr(local, "session", None) is not None:
+            return method(self, *args, **kwargs)
+        local.session = self._session_count
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            local.session = None
+
+    return call
 
 
 class FtdiMpsseTransport(_ScanBurstMixin, Transport):
-    """fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver).
+    """fcapz JTAG transport on an FTDI MPSSE adapter (D2XX driver, or
+    libusb with a ``usb:`` selector).
 
     ``device`` names the adapter channel by its D2XX description (for
-    example ``"Embedded FlashPro5 A"``) or serial; by default the single
-    known JTAG adapter's channel A is used.  ``ir_table`` defaults to the
+    example ``"Embedded FlashPro5 A"``) or serial, or a libusb channel as
+    ``usb:DESCRIPTION`` or ``usb:SERIAL`` (``usb:`` alone: the one known
+    adapter); by default the single known JTAG adapter's channel A
+    (FlashPro, Digilent or KV260 carrier) is used.  ``ir_table`` defaults to the
     family read from the device IDCODE: PolarFire (``0x20`` / ``0x21``),
     AMD/Xilinx 7-series and single-die UltraScale (``0x02`` / ``0x03`` /
-    ``0x22`` / ``0x23``) or Gowin.  ``burst`` defaults to that
+    ``0x22`` / ``0x23``), Zynq UltraScale+ MPSoC (``0x902`` / ``0x903`` /
+    ``0x922`` / ``0x923``) or Gowin.  ``burst`` defaults to that
     family's wrapper default (on for PolarFire and AMD/Xilinx, off for
     Gowin).  ``layout`` overrides the adapter's ``(ADBUS value, direction)``.
+    A chain of several devices (a Zynq's ARM DAP beside its PL, say) is
+    reached through one of them, *tap*, numbered from the TDO end as the
+    IDCODEs are read (0 is nearest TDO); by default the one device whose
+    family is known.  The others are kept in BYPASS.  Each device's IR
+    length comes from its IDCODE where known (AMD/Xilinx 7-series, Zynq
+    UltraScale+, ARM DAP), a single unknown one from the measured total;
+    otherwise pass *ir_lengths*, in the same order.
+    ``tdo_sample_edge`` is ``"rising"`` or ``"falling"``; by default TDO is
+    sampled on the rising edge up to 15 MHz and on the falling edge above,
+    where a cable's TDO round trip can exceed half a TCK period (the Arty
+    A7 reads a shifted IDCODE at 30 MHz on the rising edge).
+
+    ``bitfile`` programs an AMD/Xilinx 7-series FPGA with that ``.bit`` or
+    ``.bin`` at connect (see :meth:`program`), only when this transport opens
+    the channel: one joining a channel another transport holds never
+    reprograms the FPGA under it.
 
     Transports on the same channel in one process share its handle (the
-    first one's clock and layout apply); the channel closes with the last.
+    first one's clock, layout and sample edge apply); the channel closes
+    with the last.
     """
 
     READ_IDLE_CYCLES = 20
@@ -351,6 +825,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     RAW_DR_IDLE_CYCLES = 8
     USER1_PIPE_PRIME_READS = 3
     MAX_DEVICES = 8
+    #: TCKs in Run-Test/Idle after JSTART, for the startup sequence (UG470
+    #: asks for at least 2000).
+    STARTUP_IDLE_CYCLES = 4000
+    #: TCKs in Run-Test/Idle between configuration status polls.
+    STATUS_POLL_IDLE_CYCLES = 1000
     #: Flush a batch to the adapter at this many command or reply bytes.
     _FLUSH_CMD_BYTES = 0xF000
     _FLUSH_READ_BYTES = 0x8000
@@ -366,9 +845,26 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         burst_data_chain: int = 2,
         layout: tuple[int, int] | None = None,
         timeout_ms: int = 2000,
+        tdo_sample_edge: str | None = None,
+        bitfile: str | None = None,
+        tap: int | None = None,
+        ir_lengths: Sequence[int] | None = None,
     ):
         if not 1_000 <= tck_hz <= 30_000_000:
             raise ValueError(f"tck_hz must be 1 kHz..30 MHz, got {tck_hz}")
+        if tdo_sample_edge not in (None, "rising", "falling"):
+            raise ValueError(
+                f"tdo_sample_edge must be 'rising' or 'falling', got {tdo_sample_edge!r}"
+            )
+        if tap is not None and not 0 <= tap < self.MAX_DEVICES:
+            raise ValueError(f"tap must be 0..{self.MAX_DEVICES - 1}, got {tap}")
+        if ir_lengths is not None and not all(int(n) >= 2 for n in ir_lengths):
+            raise ValueError(f"every IR length must be >= 2, got {list(ir_lengths)}")
+        self.tap = tap
+        self.ir_lengths = [int(n) for n in ir_lengths] if ir_lengths is not None else None
+        self.tdo_sample_edge = tdo_sample_edge
+        #: Set from the clock by connect(), or taken from a shared channel.
+        self.sample_falling = False
         self.device = device
         self.ir_table = dict(ir_table) if ir_table else {}
         self._ir_table_given = bool(ir_table)
@@ -379,9 +875,22 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.burst_data_chain = int(burst_data_chain)
         self.layout = layout
         self.timeout_ms = int(timeout_ms)
+        self.bitfile = bitfile
+        #: :meth:`cancel` counts up; a session started at another count is
+        #: cancelled.
+        self._cancel_count = 0
+        self._session_count = 0
+        #: Makes each ``_cancel_count`` bump one read-modify-write: two
+        #: unlocked bumps could store a stale count, erasing a cancel.
+        #: Held only for the bump, never across USB I/O.
+        self._cancel_count_lock = threading.Lock()
+        #: The session count a thread's top-level call started under (see
+        #: :func:`_in_one_session`).
+        self._call_local = threading.local()
         self._active_chain = 1
-        self._handle: ctypes.c_void_p | None = None
-        self._lib = None
+        #: The channel's byte I/O (:class:`_D2xxIo`, or
+        #: :class:`fcapz.ftdi_libusb.LibusbIo`) while connected.
+        self._handle = None
         self._channel: _OpenChannel | None = None
         self._io_lock = threading.RLock()
         #: Filled by :meth:`connect`.
@@ -390,65 +899,118 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self.ir_length: int | None = None
         self.family: str | None = None
         self.actual_tck_hz: float | None = None
+        #: The chain read at connect: ``(IDCODE or None for BYPASS, IR
+        #: length)`` per device from the TDO end, and the one scanned.
+        self.chain: list[tuple[int | None, int]] = []
+        self.chain_tap = 0
         #: ``(ADBUS value, direction)`` set up by :meth:`open_pins`.
         self.pin_layout: tuple[int, int] | None = None
+        #: Set by :meth:`open_pins`: whether the MPSSE pin commands work
+        #: (``0x80`` write, ``0x81`` read).  False on FT2232-compatible
+        #: adapters that implement only the clocked commands.
+        self.gpio: bool | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        with self._new_session():
+            self._connect()
+
+    def _connect(self) -> None:
+        count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
-                return
+                if not self._cancelled and self._channel.broken is None:
+                    return
+                # A cancelled session: let its call in flight end (it fails
+                # at its next write; a read already waiting ends within the
+                # D2XX timeout, as close() may wait), then start a new one.
+                # A broken channel is reopened the same way, in a new
+                # session: a call paused between batches must not carry on
+                # over the new channel (a cancel() meanwhile still counts).
+                broken = not self._cancelled
+                with self._io_lock:
+                    self._detach(retire=broken)
+                if broken:
+                    count += 1
+            self._session_count = count
             ch = _find_open_channel(self.device)
             if ch is None:
-                ch = self._open_channel()
-                _OPEN_CHANNELS.append(ch)
+                dev = _pick(self.device)
+                ch = _channel_open_as(dev)
+            opened = ch is None
+            if opened:
+                ch = self._open_channel(dev)
+            else:
+                self._check_joined_chain(ch)
             ch.users += 1
             self._channel = ch
-            self._lib, self._handle, self.adapter = ch.lib, ch.handle, ch.adapter
+            self._handle, self.adapter = ch.io, ch.adapter
             self._io_lock = ch.lock
             self.idcode, self.ir_length = ch.idcode, ch.ir_length
             self.family, self.actual_tck_hz = ch.family, ch.actual_tck_hz
-        try:
-            self._apply_family_defaults()
-        except Exception:
-            self.close()
-            raise
+            self.sample_falling = ch.sample_falling
+            self.chain, self.chain_tap = ch.chain, ch.chain_tap
+            # The FPGA may hold another bitstream than on a past connection.
+            self._forget_hub_state()
+            try:
+                self._apply_family_defaults()
+                if opened and self.bitfile:
+                    # Before the channel is published: no transport joins
+                    # while the FPGA is being configured.
+                    self._program(self._load_bitstream(self.bitfile), self.bitfile)
+                if self._cancelled:
+                    raise RuntimeError("FTDI transport cancelled; reconnect")
+            except BaseException:
+                self._channel = self._handle = None
+                ch.users -= 1
+                if opened:
+                    ch.io.close()
+                raise
+            if opened:
+                _OPEN_CHANNELS.append(ch)
 
-    def _open_mpsse(self) -> tuple[Any, ctypes.c_void_p, FtdiDevice, tuple[int, int]]:
-        """Open the device and put it in MPSSE mode: ``(lib, handle, device,
-        layout)``, with ``_lib``/``_handle`` set.  Released again on failure."""
-        lib = _load_d2xx()
-        dev = _pick_device(list_ftdi_devices(), self.device)
+    def _open_mpsse(self, dev: FtdiDevice) -> tuple[object, tuple[int, int]]:
+        """Open channel *dev* and put it in MPSSE mode: ``(io, layout)``,
+        with ``_handle`` set.  Released again on failure."""
         layout = self.layout or _layout_for(dev.description) or DEFAULT_LAYOUT
-        handle = ctypes.c_void_p()
-        status = lib.FT_Open(dev.index, ctypes.byref(handle))
-        if status != _FT_OK:
-            busy = " (in use by another program?)" if dev.opened else ""
-            raise RuntimeError(
-                f"cannot open FTDI channel {dev.description!r}{busy}: D2XX status {status}"
-            )
-        self._lib, self._handle = lib, handle
+        if dev.backend == "libusb":
+            from .ftdi_libusb import LibusbIo, open_port
+
+            io = LibusbIo(open_port(dev, self.timeout_ms), self.timeout_ms)
+        else:
+            lib = _load_d2xx()
+            handle = ctypes.c_void_p()
+            status = lib.FT_Open(dev.index, ctypes.byref(handle))
+            if status != _FT_OK:
+                busy = " (in use by another program?)" if dev.opened else ""
+                raise RuntimeError(
+                    f"cannot open FTDI channel {dev.description!r}{busy}: D2XX status {status}"
+                )
+            io = _D2xxIo(lib, handle)
+        self._handle = io
         try:
             self._setup_mpsse(layout)
         except Exception:
             self._handle = None
-            _release(lib, handle)
+            io.close()
             raise
-        return lib, handle, dev, layout
+        return io, layout
 
-    def _open_channel(self) -> _OpenChannel:
+    def _open_channel(self, dev: FtdiDevice) -> _OpenChannel:
         """Open, set up and identify a channel no transport holds yet."""
-        lib, handle, dev, _layout = self._open_mpsse()
+        io, _layout = self._open_mpsse(dev)
         try:
             self._identify()
         except Exception:
             self._handle = None
-            _release(lib, handle)
+            io.close()
             raise
-        ch = _OpenChannel(lib, handle, dev)
+        ch = _OpenChannel(io, dev)
         ch.idcode, ch.ir_length = self.idcode, self.ir_length
         ch.family, ch.actual_tck_hz = self.family, self.actual_tck_hz
+        ch.sample_falling = self.sample_falling
+        ch.chain, ch.chain_tap = self.chain, self.chain_tap
         return ch
 
     def open_pins(self) -> tuple[int, int]:
@@ -456,45 +1018,151 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
         Sets up MPSSE like :meth:`connect` but does not scan the chain, so any
         chain works, and the channel is not shared: no transport in this
-        process can join it.  Drive it with :meth:`exchange`; :meth:`close`
+        process can join or open it.  Drive it with :meth:`exchange`; :meth:`close`
         releases it.  Returns the ``(ADBUS value, direction)`` layout in
-        force.  For ``fcapz openocd-bridge``.
+        force, and sets :attr:`gpio`.  For ``fcapz openocd-bridge``.
         """
+        with self._new_session():
+            return self._open_pins()
+
+    def _open_pins(self) -> tuple[int, int]:
+        count = self._cancel_count  # a cancel() while this waits cancels it
         with _OPEN_CHANNELS_LOCK:
             if self._channel is not None:
                 raise RuntimeError("this transport already holds its channel")
-            lib, handle, dev, layout = self._open_mpsse()
-            ch = _OpenChannel(lib, handle, dev)
+            self._session_count = count
+            # A pin session reaches no core: nothing to claim or release.
+            self._forget_hub_state()
+            held = None
+            if not _is_default(self.device):
+                held = next(
+                    (c for c in _live_channels() if _selects(c.adapter, self.device)), None
+                )
+            if held is None:
+                dev = _pick(self.device)
+                held = next((c for c in _live_channels() if _same_channel(c.adapter, dev)), None)
+            if held is not None:
+                raise RuntimeError(
+                    f"FTDI channel {held.adapter.description!r} is already open "
+                    "in this process; close its other users first"
+                )
+            io, layout = self._open_mpsse(dev)
+            ch = _OpenChannel(io, dev, exclusive=True)
             ch.users = 1
             self._channel, self.adapter = ch, dev
             self._io_lock = ch.lock
             self.pin_layout = layout
-            return layout
+            _OPEN_CHANNELS.append(ch)
+        try:
+            self.gpio = self._gpio_works(layout)
+        except Exception:
+            self.close()
+            raise
+        return layout
 
+    @_in_one_session
     def exchange(self, commands: bytes, reply_bytes: int) -> bytes:
         """Send raw MPSSE *commands*, then read *reply_bytes* bytes of reply.
 
         For a channel opened with :meth:`open_pins`; *commands* must end with
         a send-immediate (``0x87``) when a reply is expected.
         """
-        with self._io_lock:
+        lock = self._io_lock
+        with lock:
+            if lock is not self._io_lock:
+                # Waited on a channel that a reopen has since replaced.
+                raise RuntimeError("FTDI transport reconnected; call again")
             if commands:
-                self._write(commands)
+                return self._transfer(commands, reply_bytes)
             return self._read(reply_bytes)
 
     def close(self) -> None:
+        ch = self._channel
+        if ch is not None and not self._cancelled and ch.broken is None:
+            # Clear this session's MGR_OWNER token, as the other backends do.
+            # Under the channel lock, so the owner check and the clear are one
+            # unit against a peer's claim and against program(), which
+            # forgets the claims it voids.  Bounded: a close does not wait
+            # out a hung call.
+            if ch.lock.acquire(timeout=max(1.0, self.timeout_ms / 1000)):
+                try:
+                    if self._channel is ch:
+                        self._release_ownership_on_close()
+                finally:
+                    ch.lock.release()
+        else:
+            # A cancelled session can no longer write: its token stays.
+            self.__dict__.pop("_fcapz_owned_managers", None)
         with _OPEN_CHANNELS_LOCK:
-            ch, self._channel = self._channel, None
+            self._detach()
+
+    def _detach(self, *, retire: bool = True) -> None:
+        """:meth:`close`, with ``_OPEN_CHANNELS_LOCK`` held.
+
+        With *retire* the session ends too, in the same locked step: a call
+        in flight on another thread fails at its next write instead of
+        carrying on after a later :meth:`connect` (which takes the same
+        lock).  Waits for the channel lock before the handle goes, so a
+        write/read pair in flight ends first: a reply left unread would be
+        taken by the next transport on the channel.
+        """
+        if retire:
+            self._bump_cancel_count()
+        ch = self._channel
+        if ch is None:
             self._handle = None
-            if ch is None:
-                return
+            return
+        with ch.lock:
+            self._channel = None
+            self._handle = None
             ch.users -= 1
             if ch.users > 0:
                 return
-            if ch in _OPEN_CHANNELS:  # an open_pins() channel never is
+            if ch in _OPEN_CHANNELS:  # gone already if it broke
                 _OPEN_CHANNELS.remove(ch)
-            with ch.lock:
-                _release(ch.lib, ch.handle)
+            ch.io.close()
+
+    def cancel(self) -> None:
+        """Abort the call in flight from another thread, without a lock.
+
+        The call stops at its next USB write (a read already waiting ends
+        within the D2XX timeout), with nothing half sent, so other
+        transports on the channel carry on.  Programming stops within
+        about a quarter second of TCK and closes the channel.  This
+        transport then refuses I/O until :meth:`close` or :meth:`connect`.
+        """
+        self._bump_cancel_count()
+
+    def _bump_cancel_count(self) -> None:
+        with self._cancel_count_lock:
+            self._cancel_count += 1
+
+    @contextlib.contextmanager
+    def _new_session(self):
+        """Run a connect outside any call of the calling thread bound by
+        :func:`_in_one_session`: its I/O belongs to the session it starts."""
+        local = self._call_local
+        outer = getattr(local, "session", None)
+        local.session = None
+        try:
+            yield
+        finally:
+            local.session = outer
+
+    @property
+    def _cancelled(self) -> bool:
+        """Whether the current session has been cancelled."""
+        return self._session_count != self._cancel_count
+
+    @property
+    def _call_cancelled(self) -> bool:
+        """Whether the session the calling thread's top-level call started
+        under (see :func:`_in_one_session`) has been cancelled; outside such
+        a call, :attr:`_cancelled`."""
+        count = getattr(self._call_local, "session", None)
+        if count is None:
+            count = self._session_count
+        return count != self._cancel_count
 
     @property
     def opened_device(self) -> str | None:
@@ -502,7 +1170,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         if self.idcode is None:
             return None
         family = f" ({self.family})" if self.family else ""
-        return f"IDCODE 0x{self.idcode:08x}{family}"
+        where = (
+            f", device {self.chain_tap} of {len(self.chain)}" if len(self.chain) > 1 else ""
+        )
+        return f"IDCODE 0x{self.idcode:08x}{family}{where}"
 
     def __enter__(self) -> "FtdiMpsseTransport":
         self.connect()
@@ -511,89 +1182,279 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def _call(self, name: str, *args) -> None:
-        status = getattr(self._lib, name)(self._handle, *args)
-        if status != _FT_OK:
-            raise RuntimeError(f"{name} failed: D2XX status {status}")
-
     def _setup_mpsse(self, layout: tuple[int, int]) -> None:
-        self._call("FT_ResetDevice")
-        self._call("FT_SetUSBParameters", 65536, 65536)
-        self._call("FT_SetChars", 0, 0, 0, 0)
-        self._call("FT_SetTimeouts", self.timeout_ms, self.timeout_ms)
-        self._call("FT_SetLatencyTimer", 1)
-        self._call("FT_SetFlowControl", 0x0100, 0, 0)  # RTS/CTS, per AN_135
-        self._call("FT_SetBitMode", 0, 0)
-        self._call("FT_SetBitMode", 0, 2)  # MPSSE
-        self._call("FT_Purge", 3)
+        self._handle.setup(self.timeout_ms)
         # An invalid opcode must come back as 0xFA <opcode>: MPSSE is in sync.
         self._write(bytes((0xAA, _SEND_IMMEDIATE)))
         echo = self._read(2)
         if echo != b"\xfa\xaa":
             raise RuntimeError(f"MPSSE did not sync (got {echo.hex()})")
-        divisor = max(0, min(0xFFFF, round(30e6 / self.tck_hz) - 1))
-        self.actual_tck_hz = 30e6 / (divisor + 1)
+        # 60 MHz base, no adaptive clocking, no 3-phase: H-series opcodes.  A
+        # full-speed FT2232C/D rejects each one (0xFA <opcode>) and clocks
+        # from 6 MHz.  Read their replies up to a marker opcode, so none is
+        # left to be taken for a scan's data.
+        self._write(bytes((0x8A, 0x97, 0x8D, _SYNC_MARK, _SEND_IMMEDIATE)))
+        rejected = self._read_rejections(_SYNC_MARK, limit=3)
+        base_hz = 6e6 if 0x8A in rejected else 30e6
+        divisor = max(0, min(0xFFFF, round(base_hz / self.tck_hz) - 1))
+        # The TCK the divisor programs.  An FT2232-compatible clone can
+        # accept the opcodes and still run a clock of its own.
+        self.actual_tck_hz = base_hz / (divisor + 1)
+        if self.tdo_sample_edge is None:
+            self.sample_falling = self.actual_tck_hz > _FALLING_EDGE_ABOVE_HZ
+        else:
+            self.sample_falling = self.tdo_sample_edge == "falling"
         value, direction = layout
         self._write(bytes((
-            0x8A, 0x97, 0x8D,                       # 60 MHz base, no adaptive / 3-phase
-            0x86, divisor & 0xFF, divisor >> 8,     # TCK = 30 MHz / (divisor + 1)
+            0x86, divisor & 0xFF, divisor >> 8,     # TCK = base / (divisor + 1)
             0x80, value & 0xFF, direction & 0xFF,   # ADBUS value / direction
             0x85,                                   # loopback off
         )))
 
+    def _read_rejections(self, mark: int, limit: int) -> list[int]:
+        """Read ``0xFA <opcode>`` replies up to the one for *mark*; return
+        the other rejected opcodes (at most *limit* of them)."""
+        rejected: list[int] = []
+        while True:
+            echo = self._read(2)
+            if echo[0] != 0xFA or (echo[1] != mark and len(rejected) == limit):
+                raise RuntimeError(f"unexpected MPSSE setup reply {echo.hex()}")
+            if echo[1] == mark:
+                return rejected
+            rejected.append(echo[1])
+
+    def _gpio_works(self, layout: tuple[int, int]) -> bool:
+        """Whether ADBUS reads (0x81) return the levels ADBUS writes (0x80)
+        drive.
+
+        Some FT2232-compatible adapters ignore the writes and answer the
+        reads with a constant.  This drives TMS and TDI both ways with TCK
+        held low, so the TAP sees no clock, then restores the layout's
+        levels.
+        """
+        value, direction = layout
+        idle = value & ~(_PIN_TCK | _PIN_TDI | _PIN_TMS) & 0xFF
+        both = _PIN_TDI | _PIN_TMS
+        reply = self.exchange(bytes((
+            0x80, idle | both, direction, 0x81,
+            0x80, idle, direction, 0x81,
+            0x80, value & 0xFF, direction, _SEND_IMMEDIATE,
+        )), 2)
+        mask = _PIN_TCK | both
+        return reply[0] & mask == both and reply[1] & mask == 0
+
+    def _io(self):
+        """The channel's I/O, if this session may use it."""
+        io = self._handle
+        if io is None:
+            raise RuntimeError("not connected — call connect() first")
+        ch = self._channel
+        if ch is not None and ch.broken is not None:
+            raise RuntimeError(f"FTDI channel broken ({ch.broken}); reconnect")
+        return io
+
+    def _io_call(self, fn, *args):
+        """Run one I/O call; a failure breaks the channel (see
+        :class:`_OpenChannel`).  So does an interrupt (Ctrl-C): the reply
+        stream is out of step and a read may still be in flight.  During
+        connect there is no channel yet: the caller releases the half-open
+        handle."""
+        try:
+            return fn(*args)
+        except BaseException as exc:
+            self._break_channel(exc)
+            raise
+
+    def _break_channel(self, exc: BaseException) -> None:
+        """Close the channel's handle and mark it broken by *exc*, once."""
+        ch = self._channel
+        if ch is not None and ch.broken is None:
+            # Under the channel lock (every I/O path holds it).  The
+            # handle closes before the channel is marked: the registry
+            # drops a broken channel without its lock, and a peer must
+            # not reopen the adapter while this close is still running.
+            try:
+                ch.io.close()
+            except Exception:
+                pass
+            finally:
+                ch.broken = str(exc) or type(exc).__name__
+
     def _write(self, data: bytes) -> None:
-        written = ctypes.c_ulong()
-        self._call("FT_Write", data, len(data), ctypes.byref(written))
-        if written.value != len(data):
-            raise RuntimeError(f"FTDI write short: {written.value} of {len(data)} bytes")
+        io = self._io()
+        if self._call_cancelled:
+            raise RuntimeError("FTDI transport cancelled; reconnect")
+        self._io_call(io.write, data)
 
     def _read(self, n: int) -> bytes:
         if n == 0:
             return b""
-        buf = ctypes.create_string_buffer(n)
-        got = ctypes.c_ulong()
-        self._call("FT_Read", buf, n, ctypes.byref(got))
-        if got.value != n:
-            raise RuntimeError(
-                f"FTDI read timed out: {got.value} of {n} bytes (adapter unplugged "
-                "or held by another program?)"
-            )
-        return buf.raw[:n]
+        io = self._io()
+        return self._io_call(io.read, n)
+
+    def _transfer(self, cmd: bytes, reply_bytes: int) -> bytes:
+        """Send *cmd* and read its whole reply.  The backend keeps reading
+        while it writes, so a reply larger than the chip's buffer cannot
+        stall the write."""
+        io = self._io()
+        if self._call_cancelled:
+            raise RuntimeError("FTDI transport cancelled; reconnect")
+        return self._io_call(io.transfer, cmd, reply_bytes)
 
     def _flush(self, batch: _Batch) -> list[int]:
+        """Run *batch* and decode what it captured.  A batch longer than
+        :meth:`_piece_clocks` goes in pieces, each waited for, so no
+        transfer outlasts the USB timeout at a slow TCK and a cancel lands
+        between pieces."""
         if not batch.cmd:
             return []
-        if self._handle is None:
-            raise RuntimeError("not connected — call connect() first")
-        self._write(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)))
-        return batch.decode(self._read(batch.read_bytes))
+        limit = self._piece_clocks()
+        if not limit or batch.clocks <= limit:
+            rx = self._transfer(bytes(batch.cmd) + bytes((_SEND_IMMEDIATE,)), batch.read_bytes)
+            return batch.decode(rx)
+        rx = bytearray()
+        started = False  # the TAP may be mid-scan from here on
+        try:
+            for cmd, reply in batch.pieces(limit):
+                if started and self._call_cancelled:
+                    # Leave the TAP in Run-Test/Idle, not in a shift state
+                    # a peer would inherit.
+                    reset = _Batch()
+                    reset.reset()
+                    self._io_call(self._io().transfer,
+                                  bytes(reset.cmd) + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
+                    started = False
+                    raise RuntimeError("FTDI transport cancelled; reconnect")
+                # The pin read answers only once the piece has been clocked.
+                # Past the first piece the check above is the only cancel
+                # gate: _transfer's own would refuse mid-scan without the
+                # reset.
+                cmd += bytes((_READ_PINS, _SEND_IMMEDIATE))
+                if started:
+                    rx += self._io_call(self._io().transfer, cmd, reply + 1)[:-1]
+                else:
+                    rx += self._transfer(cmd, reply + 1)[:-1]
+                started = True
+        except BaseException as exc:
+            # Anything else between pieces (Ctrl-C) leaves the TAP where the
+            # last piece did: no peer may scan through it.
+            if started:
+                self._break_channel(exc)
+            raise
+        return batch.decode(bytes(rx))
+
+    def _piece_clocks(self) -> int:
+        """TCK clocks per transfer of a long batch: about a quarter second,
+        and at most half the USB timeout (the channel's: whoever opened
+        it set it).  0 before the clock is known."""
+        if not self.actual_tck_hz:
+            return 0
+        timeout_ms = getattr(self._handle, "timeout_ms", None) or self.timeout_ms
+        return int(self.actual_tck_hz * min(0.25, timeout_ms / 2000))
 
     # -- chain discovery -----------------------------------------------------
 
     def _identify(self) -> None:
-        batch = _Batch()
+        batch = _Batch(self.sample_falling)
         batch.reset()
         width = 32 * (self.MAX_DEVICES + 1)
         batch.scan(False, (1 << width) - 1, width, True)
         (chain,) = self._flush(batch)
         idcodes = self._parse_idcodes(chain, width)
-        if len(idcodes) != 1:
-            found = ", ".join(
-                f"0x{c:08x}" if c is not None else "BYPASS" for c in idcodes
-            )
-            raise RuntimeError(
-                f"FtdiMpsseTransport supports one device on the JTAG chain; "
-                f"found {len(idcodes)}: {found}"
-            )
-        self.idcode = idcodes[0]
-        self.ir_length = self._measure_ir_length()
-        batch = _Batch()
+        if len(idcodes) > self.MAX_DEVICES:
+            raise RuntimeError(f"more than {self.MAX_DEVICES} devices on the JTAG chain")
+        total = self._measure_ir_length()
+        batch = _Batch(self.sample_falling)
         batch.reset()  # back to IDCODE / BYPASS after the IR probe
         self._flush(batch)
+        lengths = self._ir_lengths_for(idcodes, total)
+        tap = self._pick_tap(idcodes, lengths)
+        self.chain = list(zip(idcodes, lengths))
+        self.chain_tap = tap
+        self.idcode, self.ir_length = idcodes[tap], lengths[tap]
         self.family = (
             family_from_idcode(self.idcode, self.ir_length)
             if self.idcode is not None else None
         )
+
+    @staticmethod
+    def _describe_chain(idcodes: list[int | None]) -> str:
+        return ", ".join(
+            f"{i}: " + (f"0x{c:08x}" if c is not None else "BYPASS")
+            for i, c in enumerate(idcodes)
+        )
+
+    def _ir_lengths_for(self, idcodes: list[int | None], total: int) -> list[int]:
+        """Each device's IR length, checked against the measured *total*."""
+        found = self._describe_chain(idcodes)
+        if len(idcodes) == 1 and self.ir_lengths is None:
+            return [total]
+        if self.ir_lengths is not None:
+            if len(self.ir_lengths) != len(idcodes) or sum(self.ir_lengths) != total:
+                raise RuntimeError(
+                    f"ir_lengths={self.ir_lengths} does not match the JTAG chain: "
+                    f"{len(idcodes)} device(s) ({found}), {total} IR bits in all"
+                )
+            return list(self.ir_lengths)
+        lengths = [known_ir_length(c) for c in idcodes]
+        unknown = [i for i, n in enumerate(lengths) if n is None]
+        rest = total - sum(n for n in lengths if n is not None)
+        if len(unknown) == 1 and rest >= 2:
+            lengths[unknown[0]] = rest
+            unknown = []
+        if unknown or sum(lengths) != total:
+            raise RuntimeError(
+                f"cannot tell the IR length of each device on the JTAG chain "
+                f"({found}; {total} IR bits in all); pass ir_lengths=[...] "
+                f"from the TDO end"
+            )
+        return lengths
+
+    def _pick_tap(self, idcodes: list[int | None], lengths: list[int]) -> int:
+        """The device to scan: *tap*, or the one device of a known family."""
+        found = self._describe_chain(idcodes)
+        if self.tap is not None:
+            if self.tap >= len(idcodes):
+                raise RuntimeError(
+                    f"tap={self.tap} but the JTAG chain has {len(idcodes)} "
+                    f"device(s): {found}"
+                )
+            return self.tap
+        if len(idcodes) == 1:
+            return 0
+        known = [
+            i for i, (c, n) in enumerate(zip(idcodes, lengths))
+            if c is not None and family_from_idcode(c, n) is not None
+        ]
+        if len(known) != 1:
+            raise RuntimeError(
+                f"{len(idcodes)} devices on the JTAG chain ({found}); pass "
+                f"tap=<index from the TDO end> to choose one"
+            )
+        return known[0]
+
+    def _check_joined_chain(self, ch: _OpenChannel) -> None:
+        """A transport joining open channel *ch* scans the device the channel
+        was identified for: refuse another *tap* or *ir_lengths*, before
+        this transport takes anything from the channel."""
+        if self.tap is not None and self.tap != ch.chain_tap:
+            raise RuntimeError(
+                f"the FTDI channel is open for JTAG device {ch.chain_tap}, "
+                f"not tap={self.tap}; close its other transports first"
+            )
+        lengths = [n for _code, n in ch.chain]
+        if self.ir_lengths is not None and self.ir_lengths != lengths:
+            raise RuntimeError(
+                f"the FTDI channel is open with IR lengths {lengths}, not "
+                f"ir_lengths={self.ir_lengths}"
+            )
+
+    def _batch(self) -> _Batch:
+        """A scan batch that reaches the selected device of the chain."""
+        lengths = [n for _code, n in self.chain]
+        t = self.chain_tap
+        pad = (sum(lengths[:t]), t, sum(lengths[t + 1:]), max(0, len(lengths) - 1 - t))
+        return _Batch(self.sample_falling, pad)
 
     def _apply_family_defaults(self) -> None:
         """IR table and burst default from the detected family, unless given."""
@@ -633,10 +1494,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         return codes
 
     def _measure_ir_length(self) -> int:
-        """Fill the IR with ones, then time a single zero through it."""
-        width, mark = 256, 128
+        """Fill the IR with ones, then time a single zero through it.  The
+        zero goes in past every capture bit of a chain of up to 511 IR bits
+        (eight multi-die parts of 38 bits fit)."""
+        width, mark = 1024, 512
         pattern = ((1 << width) - 1) & ~(1 << mark)
-        batch = _Batch()
+        batch = _Batch(self.sample_falling)
         batch.scan(True, pattern, width, True)
         (out,) = self._flush(batch)
         for j in range(mark + 1, width):
@@ -646,12 +1509,17 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     # -- scans -----------------------------------------------------------------
 
+    @_in_one_session
     def _run_scans(self, ops: list[ScanOp]) -> list[int]:
         if self.ir_length is None:
             raise RuntimeError("not connected — call connect() first")
         out: list[int] = []
-        with self._io_lock:
-            batch = _Batch()
+        lock = self._io_lock
+        with lock:
+            if lock is not self._io_lock:
+                # Waited on a channel that a reconnect has since replaced.
+                raise RuntimeError("FTDI transport reconnected; call again")
+            batch = self._batch()
             for op in ops:
                 kind = op[0]
                 if kind == "ir":
@@ -671,9 +1539,181 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     or batch.read_bytes >= self._FLUSH_READ_BYTES
                 ):
                     out.extend(self._flush(batch))
-                    batch = _Batch()
+                    batch = self._batch()
             out.extend(self._flush(batch))
         return out
+
+    # -- configuration -----------------------------------------------------------
+
+    @_in_one_session
+    def program(self, bitfile: str, *, timeout_s: float = 2.0) -> None:
+        """Configure an AMD/Xilinx 7-series FPGA with *bitfile* over JTAG.
+
+        Takes a Vivado ``.bit`` or a raw ``.bin``.  Follows UG470's JTAG
+        sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
+        the bitstream through CFG_IN, JSTART, then wait for DONE.  A
+        bitstream built for another part is refused before the FPGA is
+        cleared.  Every core on the FPGA is lost, so this is refused while
+        other transports share the channel.  If a USB transfer fails
+        partway, the adapter may be left mid-command, so the channel is
+        closed: connect again.  :meth:`cancel` from another thread stops it
+        within about a quarter second of TCK, closing the channel too.
+        *timeout_s* bounds each of the two waits.
+        Single-die UltraScale shares the IR table and this sequence (UG570)
+        but is not hardware-validated.
+        """
+        ch = self._channel
+        if self._handle is None or ch is None or self.ir_length is None:
+            raise RuntimeError("not connected — call connect() first")
+        data = self._load_bitstream(bitfile)  # checked against this channel's device
+        with _OPEN_CHANNELS_LOCK:  # no transport joins while it runs
+            if self._channel is not ch or self._handle is None:
+                raise RuntimeError(
+                    "the transport disconnected or reconnected while the "
+                    "bitstream loaded; call program() again"
+                )
+            if self._call_cancelled:
+                raise RuntimeError("FTDI transport cancelled; reconnect")
+            if ch.users > 1:
+                raise RuntimeError(
+                    f"cannot program: {ch.users - 1} other transport(s) share "
+                    "this FTDI channel and would lose their cores; close them first"
+                )
+            try:
+                self._program(data, bitfile, timeout_s)
+            except _ConfigFailed:
+                raise
+            except BaseException:
+                # MPSSE may be mid-command: closed before the lock goes, so
+                # no transport joins it.  A cancel already ended the session;
+                # retiring it again would cancel the connect() that waits to
+                # recover it.
+                self._detach(retire=not self._cancelled)
+                raise
+
+    def _load_bitstream(self, bitfile: str) -> bytes:
+        """*bitfile*'s configuration data, checked against the device."""
+        if self.family != "xilinx7":
+            raise RuntimeError(
+                "programming over FTDI supports AMD/Xilinx 7-series only; this "
+                f"device is {self.opened_device}"
+            )
+        data, part = read_xilinx_bitstream(bitfile)
+        want = bitstream_idcode(data)
+        if want is not None and self.idcode is not None and (want ^ self.idcode) & 0x0FFFFFFF:
+            built = f" ({part})" if part else ""
+            raise RuntimeError(
+                f"{bitfile} is built for IDCODE 0x{want:08x}{built}; the device "
+                f"reads 0x{self.idcode:08x}"
+            )
+        return data
+
+    def _program(self, data: bytes, bitfile: str, timeout_s: float = 2.0) -> None:
+        """The UG470 sequence for :meth:`program`.  The FPGA not clearing or
+        DONE staying low raises :class:`_ConfigFailed` with the TAP reset;
+        any other exception may leave MPSSE mid-command."""
+        with self._io_lock:
+            try:
+                batch = self._batch()
+                batch.reset()
+                batch.scan(True, _XC_JPROGRAM, self.ir_length, False)
+                self._flush(batch)
+                self._wait_config_status(
+                    lambda s: s & _XC_IR_INIT and not s & _XC_IR_DONE,
+                    timeout_s,
+                    "the FPGA did not finish clearing after JPROGRAM (INIT_COMPLETE "
+                    "stayed low)",
+                )
+                batch = self._batch()
+                batch.scan(True, _XC_CFG_IN, self.ir_length, False)
+                self._flush(batch)
+                self._shift_dr_bytes(data.translate(_BIT_REVERSE))
+                batch = self._batch()
+                batch.scan(True, _XC_JSTART, self.ir_length, False)
+                self._flush(batch)
+                self._idle(self.STARTUP_IDLE_CYCLES)
+                self._wait_config_status(
+                    lambda s: s & _XC_IR_DONE,
+                    timeout_s,
+                    f"{bitfile} did not configure the FPGA: DONE stayed low after "
+                    "JSTART (a corrupt bitstream fails its CRC this way)",
+                )
+            except _ConfigFailed:
+                self._reset_tap()
+                raise
+            finally:
+                # The old bitstream's cores are gone: what was learned is void.
+                self._forget_hub_state()
+            self._reset_tap()
+
+    def _reset_tap(self) -> None:
+        batch = self._batch()
+        batch.reset()  # back to IDCODE / BYPASS
+        self._flush(batch)
+
+    def _idle(self, cycles: int) -> None:
+        """Clock *cycles* TCK in Run-Test/Idle, in pieces of about a quarter
+        second of TCK, each waited for (see :meth:`_write_paced`)."""
+        piece = max(7, int(self.actual_tck_hz * 0.25))
+        for done in range(0, cycles, piece):
+            batch = self._batch()
+            batch.idle(min(piece, cycles - done))
+            self._write_paced(bytes(batch.cmd))
+
+    def _write_paced(self, cmd: bytes) -> None:
+        """Write *cmd*, then wait until MPSSE has run it: a pin read behind
+        it answers only then.  Commands that read nothing return as soon as
+        the adapter buffers them, and its buffer holds seconds of clocks at
+        a slow TCK, enough to delay the next read past the D2XX timeout."""
+        self._transfer(cmd + bytes((_READ_PINS, _SEND_IMMEDIATE)), 1)
+
+    def _config_status(self) -> int:
+        """The IR capture: configuration status bits over the fixed ``01``."""
+        batch = self._batch()
+        batch.scan(True, _XC_BYPASS, self.ir_length, True)
+        (status,) = self._flush(batch)
+        if status & 0b11 != 0b01:
+            raise RuntimeError(f"IR capture 0x{status:02x} lacks the fixed 01 bits")
+        return status
+
+    def _wait_config_status(self, ready, timeout_s: float, failure: str) -> int:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            self._idle(self.STATUS_POLL_IDLE_CYCLES)
+            status = self._config_status()
+            if ready(status):
+                return status
+            if time.monotonic() > deadline:
+                raise _ConfigFailed(f"{failure} (IR status 0x{status:02x})")
+
+    def _shift_dr_bytes(self, data: bytes) -> None:
+        """Shift *data* through the selected DR, each byte LSB first, from
+        Run-Test/Idle back to Run-Test/Idle, without reading TDO.
+
+        Written in pieces of about a quarter second of TCK, each waited
+        for, so no write or read outlasts the D2XX timeout at a slow clock.
+        The device streams the data in as it arrives, so devices on the
+        TDO side need nothing; each BYPASS bit on the TDI side delays it by
+        a clock, made up with zero bits after it.
+        """
+        if not data:
+            raise ValueError("no data to shift")
+        after = max(0, len(self.chain) - 1 - self.chain_tap)
+        piece = max(1, min(0x10000, int(self.actual_tck_hz * 0.25) // 8))
+        batch = self._batch()
+        batch.tms(_IDLE_TO_SHIFT_DR)
+        self._write(bytes(batch.cmd))
+        body, last = (data, 0) if after else (data[:-1], data[-1])
+        for pos in range(0, len(body), piece):
+            chunk = body[pos:pos + piece]
+            n = len(chunk) - 1
+            self._write_paced(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk)
+        # The last bit (the last byte's top bit, or the last padding bit)
+        # leaves Shift-DR with TMS.
+        tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | ((last >> 7) << 7)
+        bits = after - 1 if after else 7
+        tail = bytes((_DATA_BITS_OUT, bits - 1, last & 0x7F)) if bits else b""
+        self._write(tail + bytes((_TMS_OUT, len(_LAST_BIT_TO_IDLE) - 1, tms_value)))
 
     # -- Transport API -----------------------------------------------------------
 
@@ -686,6 +1726,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     def _frame(addr: int, data: int, write: bool) -> int:
         return (int(write) << 48) | ((addr & 0xFFFF) << 32) | (data & 0xFFFFFFFF)
 
+    @_in_one_session
     def read_reg(self, addr: int) -> int:
         frame = self._frame(addr, 0, False)
         (value,) = self._run_scans([
@@ -696,6 +1737,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         ])
         return value & 0xFFFFFFFF
 
+    @_in_one_session
     def write_reg(self, addr: int, value: int) -> None:
         self._run_scans([
             ("ir", self._active_chain),
@@ -703,6 +1745,30 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             ("idle", self.WRITE_IDLE_CYCLES),
         ])
 
+    @_in_one_session
+    def read_regs_after_write(
+        self, write_addr: int, value: int, addrs: List[int]
+    ) -> List[int]:
+        """The write and the reads run as one scan batch."""
+        # The chain is read under the transaction lock, as the base
+        # implementation does: another controller may hold it with another
+        # chain selected.
+        with self.transaction_lock():
+            ops: list[ScanOp] = [
+                ("ir", self._active_chain),
+                ("dr", self._frame(write_addr, value, True), self.DR_BITS, False),
+                ("idle", self.WRITE_IDLE_CYCLES),
+            ]
+            for addr in addrs:
+                frame = self._frame(addr, 0, False)
+                ops += [
+                    ("dr", frame, self.DR_BITS, False),
+                    ("idle", self.READ_IDLE_CYCLES),
+                    ("dr", frame, self.DR_BITS, True),
+                ]
+            return [v & 0xFFFFFFFF for v in self._run_scans(ops)]
+
+    @_in_one_session
     def read_block(self, addr: int, words: int) -> List[int]:
         """Read *words* registers; the DATA window of a narrow core goes
         through the burst DR when ``burst`` is on."""
@@ -711,6 +1777,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             return burst
         return self.read_window_block(addr, words)
 
+    @_in_one_session
     def read_window_block(self, addr: int, words: int) -> List[int]:
         """Pipelined register-window read, one batch per 512 words.
 
@@ -744,10 +1811,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             results.extend(v & 0xFFFFFFFF for v in captured[prime:])
         return results
 
+    @_in_one_session
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
         (value,) = self.raw_dr_scan_batch([(bits, width)], chain=chain)
         return value
 
+    @_in_one_session
     def raw_dr_scan_batch(
         self, scans: list[tuple[int, int]], *, chain: int | None = None
     ) -> list[int]:
@@ -755,3 +1824,4 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         for bits, width in scans:
             ops += [("dr", bits, width, True), ("idle", self.RAW_DR_IDLE_CYCLES)]
         return self._run_scans(ops)
+

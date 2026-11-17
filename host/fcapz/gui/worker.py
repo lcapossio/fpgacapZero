@@ -141,14 +141,18 @@ class ConnectWorker(QObject):
         self._transport: object | None = None
 
     def request_cancel(self) -> None:
-        """Ask the worker to stop; closes the transport from any thread (may unblock I/O)."""
+        """Ask the worker to stop; cancels the transport from any thread (may unblock I/O).
+
+        ``Transport.cancel()`` closes it without waiting on the connect in
+        flight (FTDI programming only flags it and stops shortly after).
+        """
         self._cancel_requested = True
         t = self._transport
         if t is not None:
             try:
-                close = getattr(t, "close", None)
-                if callable(close):
-                    close()
+                cancel = getattr(t, "cancel", None) or getattr(t, "close", None)
+                if callable(cancel):
+                    cancel()
             except OSError:
                 pass
 

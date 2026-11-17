@@ -127,7 +127,7 @@ module fcapz_ela_xilinx7 #(
                 .BURST_PTR_ADDR(16'h002C)
             ) u_pipe (
                 .arst(jtag_rst_ctrl),
-                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo), .tdo_next(),
                 .capture(tap1_capture), .shift_en(tap1_shift),
                 .update(tap1_update), .sel(tap1_sel),
                 .reg_clk(jtag_clk), .reg_rst(jtag_rst),
@@ -144,7 +144,7 @@ module fcapz_ela_xilinx7 #(
         end else begin : g_reg_iface
             jtag_reg_iface u_reg (
                 .arst(jtag_rst_ctrl),
-                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo),
+                .tck(tap1_tck), .tdi(tap1_tdi), .tdo(tap1_tdo), .tdo_next(),
                 .capture(tap1_capture), .shift_en(tap1_shift),
                 .update(tap1_update), .sel(tap1_sel),
                 .reg_clk(jtag_clk), .reg_rst(jtag_rst),
@@ -257,7 +257,7 @@ module fcapz_ela_xilinx7 #(
                 .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
             ) u_burst (
                 .arst(jtag_rst_data),
-                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo),
+                .tck(tap2_tck), .tdi(tap2_tdi), .tdo(tap2_tdo), .tdo_next(),
                 .capture(tap2_capture), .shift_en(tap2_shift),
                 .update(tap2_update), .sel(tap2_sel),
                 .mem_addr(burst_rd_addr),

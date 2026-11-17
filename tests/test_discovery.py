@@ -371,6 +371,20 @@ class RpcDiscoverTests(unittest.TestCase):
         ])
         self.assertEqual(t.devices[1].mgr[0xF008], 1)
 
+    def test_list_cores_gives_a_core_on_another_chain_its_slot(self):
+        # Connected to USER2: the manager on USER1 is listed by the ELA slot a
+        # rebind to chain 1 binds, and every entry carries ``instance``.
+        t = _board()
+        srv = RpcServer()
+        srv._analyzer = Analyzer(t, chain=2)  # noqa: SLF001
+        r = srv.handle({"cmd": "list_cores"})
+        self.assertTrue(r["ok"], r)
+        for core in r["cores"]:
+            self.assertIn("instance", core)
+        others = [(c["type"], c["instance"]) for c in r["cores"] if c["chain"] == 1]
+        self.assertIn(("ela", 1), others)
+        r = srv.handle({"cmd": "rebind", "chain": 1})
+        self.assertEqual((r["chain"], r["instance"]), (1, 1))
 
     def test_list_cores_on_a_bridge_chain_reads_only_below_0x2000(self):
         # A session connected to the bridge chain: list_cores must not read

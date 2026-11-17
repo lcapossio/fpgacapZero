@@ -2000,6 +2000,104 @@ class RpcSharedEioTests(unittest.TestCase):
         # The fake answers on every chain: chain 2's first ELA slot.
         self.assertEqual(server._analyzer.instance, 0)
 
+    def test_connect_and_rebind_report_the_bound_slot(self):
+        server, hub, _ = self._server()
+        hub._cores[1], hub._slots[1] = ELA_CORE_ID, dict(hub._slots[0])
+        reply = server.handle({"cmd": "connect", "chain": 1})
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 0))
+        reply = server.handle({"cmd": "rebind", "chain": 1, "instance": 1})
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 1))
+
+    def test_rebind_with_only_an_instance_stays_on_the_chain(self):
+        server, hub, _ = self._server()
+        hub._cores[1], hub._slots[1] = ELA_CORE_ID, dict(hub._slots[0])
+        server.handle({"cmd": "connect", "chain": 1})
+        reply = server.handle({"cmd": "rebind", "instance": 1})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual((reply["chain"], reply["instance"]), (1, 1))
+        self.assertEqual(hub._manager_regs[0xF008], 1)
+
+    def test_rebind_without_a_chain_or_an_instance_is_refused(self):
+        server, _, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        with self.assertRaisesRegex(ValueError, "chain or an instance"):
+            server.handle({"cmd": "rebind"})
+        self.assertEqual(server._analyzer.instance, 0)
+
+    def test_a_failed_rebind_keeps_the_session(self):
+        # Slot 1 is the EIO: the rebind is refused and the ELA session, with
+        # its slot, stays usable.
+        server, hub, _ = self._server()
+        server.handle({"cmd": "connect", "chain": 1})
+        analyzer = server._analyzer
+        with self.assertRaisesRegex(RuntimeError, "identity"):
+            server.handle({"cmd": "rebind", "instance": 1})
+        self.assertIs(server._analyzer, analyzer)
+        self.assertEqual(analyzer.instance, 0)
+        self.assertTrue(server.handle({"cmd": "probe"})["ok"])
+        self.assertEqual(hub._manager_regs[0xF008], 0)
+
+    def test_a_slot_named_without_a_manager_is_reported_as_none(self):
+        from fcapz.rpc import RpcServer
+
+        transport = FakeTransport()
+        del transport._manager_regs[0xF000]
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        reply = server.handle({"cmd": "connect", "chain": 1, "instance": 7})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIsNone(reply["instance"])
+        reply = server.handle({"cmd": "rebind", "instance": 3})
+        self.assertIsNone(reply["instance"])
+        cores = server.handle({"cmd": "list_cores"})["cores"]
+        self.assertIsNone(cores[0]["instance"])
+
+    def test_a_slot_named_on_a_bridge_chain_never_reads_the_manager_block(self):
+        # USER4's EJTAG-AXI bridge decodes a 0xF000 read frame as burst write
+        # data; reporting the bound slot may send it only the 0x0000 frame.
+        from fcapz.rpc import RpcServer
+
+        class _BridgeChain(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.chain4_reads: list[int] = []
+
+            def read_reg(self, addr):
+                if self._active_chain == 4:
+                    self.chain4_reads.append(addr)
+                    return 0
+                return super().read_reg(addr)
+
+        transport = _BridgeChain()
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        reply = server.handle({"cmd": "connect", "chain": 4, "instance": 0})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIsNone(reply["instance"])
+        self.assertTrue(transport.chain4_reads)
+        self.assertEqual(set(transport.chain4_reads), {0x0000})
+
+    def test_a_failed_slot_check_fails_the_connect(self):
+        # The manager read for the report fails: connect raises and closes the
+        # transport rather than report a slot nobody confirmed.
+        from fcapz.rpc import RpcServer
+
+        transport = FakeTransport()
+        del transport._manager_regs[0xF000]
+        transport.closed = 0
+
+        def close():
+            transport.closed += 1
+
+        transport.close = close
+        server = RpcServer()
+        server._build_transport = lambda req: transport
+        with mock.patch.object(Analyzer, "_behind_manager", side_effect=OSError("lost")):
+            with self.assertRaises(OSError):
+                server.handle({"cmd": "connect", "chain": 1, "instance": 7})
+        self.assertIsNone(server._analyzer)
+        self.assertEqual(transport.closed, 1)
+
     def test_managed_eio_on_another_target_gets_its_own_transport(self):
         """A managed EIO on another board must not borrow the analyzer's
         transport (BUG-238)."""

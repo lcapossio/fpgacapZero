@@ -147,11 +147,13 @@ def list_xilinx_hw_server_targets(
         text=True,
         env=env,
     )
-    if register is not None:
-        register(_ProcessCancel(proc))
     try:
+        if register is not None:
+            register(_ProcessCancel(proc))
         stdout, stderr = proc.communicate(script, timeout=float(timeout_sec))
-    except subprocess.TimeoutExpired:
+    except BaseException:
+        # A timeout, or a cancel (which may have refused the registration
+        # itself): kill and reap the child, never leave it or its pipes.
         proc.kill()
         proc.communicate()
         raise
@@ -1209,6 +1211,19 @@ class Transport(ABC):
         """
         return [self.raw_dr_scan(bits, width, chain=chain) for bits, width in scans]
 
+    def raw_dr_capture(
+        self, width: int, *, chain: int | None = None, tdi: int = 0
+    ) -> int:
+        """One DR scan of *width* bits shifting a constant *tdi* (0 or 1).
+
+        Returns the captured TDO value.  Used for long scans such as the
+        EJTAG-AXI streaming read, where only TDO carries data.  The default
+        builds the constant word and calls :meth:`raw_dr_scan`; transports
+        with a cheaper way to shift a constant override it.
+        """
+        fill = (1 << width) - 1 if tdi else 0
+        return self.raw_dr_scan(fill, width, chain=chain)
+
 
 #: One step of a raw scan batch (see :meth:`_ScanBurstMixin._run_scans`):
 #: ``("ir", chain)`` loads the IR of a USER chain, ``("dr", value, width,
@@ -1532,6 +1547,9 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     # T20F256 (4-bit IR) and Ti60F225 (5-bit IR).  The IR length comes from the
     # OpenOCD tap definition (-irlen 4 for Trion, 5 for Titanium), not from here.
     IR_TABLE_EFINIX: dict[int, int] = {1: 0x08, 2: 0x09}
+    # Lattice ECP5 JTAGG ER1/ER2 opcodes (8-bit IR), as in
+    # rtl/jtag_tap/jtag_tap_ecp5.v.  Not yet hardware-validated.
+    IR_TABLE_ECP5: dict[int, int] = {1: 0x32, 2: 0x38}
     # Zynq UltraScale+ MPSoC PL TAP opcodes.  OpenOCD's TCL listener
     # delegates chain walking (IR padding for the ARM DAP + DR BYPASS
     # bits) to the openocd config file rather than to host code, so this
@@ -1583,6 +1601,16 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         self._sock: socket.socket | None = None
         # Re-entrant: a burst holds it across all of its Tcl scripts.
         self._sock_lock = threading.RLock()
+        # Short lifecycle lock over _sock, _session_gen and _dropped, never
+        # held across I/O: cancel() takes only this one, so it never waits
+        # on the call it aborts.
+        self._life_lock = threading.Lock()
+        # Bumped by cancel(): a connect() that began before a cancel does
+        # not publish its socket.
+        self._session_gen = 0
+        # Why the last session ended, when it did not end by close(): the
+        # next command reports it instead of "not connected".
+        self._dropped: str | None = None
         self.burst = bool(burst)
         self.single_chain_burst = bool(single_chain_burst)
         self.burst_data_chain = int(burst_data_chain)
@@ -1591,16 +1619,36 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         if self._sock is not None:
             self.close()
         self._forget_hub_state()
-        self._sock = socket.create_connection(
+        with self._life_lock:
+            gen = self._session_gen
+        sock = socket.create_connection(
             (self.host, self.port),
             timeout=self._connect_timeout_sec,
         )
-        self._sock.settimeout(0.2)
         try:
-            self._sock.recv(4096)
-        except OSError:
-            pass
-        self._sock.settimeout(5)
+            sock.settimeout(0.2)
+            try:
+                sock.recv(4096)
+            except OSError:
+                pass
+            sock.settimeout(5)
+        except BaseException:
+            sock.close()
+            raise
+        with self._life_lock:
+            cancelled = self._session_gen != gen
+            if not cancelled:
+                self._sock, self._dropped = sock, None
+        if cancelled:
+            sock.close()
+            raise ConnectionError("OpenOCD connect cancelled")
+        # OpenOCD cannot abort a command line it has started: after a
+        # session is dropped (a timeout, a cancel) it finishes that line --
+        # seconds for a stream read's scan on a slow adapter -- before it
+        # serves anyone.  Wait for it here, with the room the longest scan
+        # gets, so the first real command does not time out behind it.
+        with self._read_timeout(self._CONNECT_SYNC_TIMEOUT_SEC):
+            self._cmd("set __fcapz_sync 1")
         if self.tap.strip().lower() in ("", "auto"):
             self.tap = self._resolve_auto_tap()
 
@@ -1625,33 +1673,89 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     def close(self) -> None:
         if self._sock:
             self._release_ownership_on_close()
-        self._close_socket()
+        with self._life_lock:
+            sock, self._sock, self._dropped = self._sock, None, None
+        self._shut(sock)
 
-    def _close_socket(self) -> None:
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+    @staticmethod
+    def _shut(sock: socket.socket | None) -> None:
+        """Close *sock*, shutting it down first: on Linux only a shutdown
+        wakes a ``recv()`` blocked on it in another thread."""
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _retire(self, sock: socket.socket, why: str) -> None:
+        """End the session *sock* belongs to, unless it has ended already.
+
+        A reply cut short leaves its tail on the way, and reading on would
+        take that tail for the next command's reply.  Never replayed: the
+        caller reconnects.
+        """
+        with self._life_lock:
+            if self._sock is not sock:
+                return
+            self._sock, self._dropped = None, why
+        self._shut(sock)
 
     def cancel(self) -> None:
-        # No MGR_OWNER release: that is scans from the cancelling thread,
-        # racing the operation being aborted.  The owner's close() does it.
-        self._close_socket()
+        """Abort the call in flight from another thread.
+
+        Takes no lock the call holds: it detaches the session and shuts its
+        socket down, so a blocked ``recv()`` ends at once and the call fails
+        with ``ConnectionError``.  No ``MGR_OWNER`` release either, as that
+        is scans from the cancelling thread racing the call being aborted;
+        the token stays set, as after a cancel on the other backends.  A
+        :meth:`connect` in progress does not publish its socket.
+        """
+        with self._life_lock:
+            sock, self._sock = self._sock, None
+            self._session_gen += 1
+            self._dropped = "cancelled"
+        self._shut(sock)
 
     def _cmd(self, tcl: str) -> str:
-        if not self._sock:
-            raise RuntimeError("not connected — call connect() first")
         with self._sock_lock:
-            self._sock.sendall((tcl + "\x1a").encode())
-            buf = b""
-            while not buf.endswith(b"\x1a"):
-                chunk = self._sock.recv(4096)
-                if not chunk:
-                    raise ConnectionError("OpenOCD closed the connection")
-                buf += chunk
-            return buf[:-1].decode().strip()
+            with self._life_lock:
+                sock, dropped = self._sock, self._dropped
+            if sock is None:
+                if dropped:
+                    raise ConnectionError(f"OpenOCD session {dropped}; reconnect")
+                raise RuntimeError("not connected — call connect() first")
+            try:
+                sock.sendall((tcl + "\x1a").encode())
+                buf = bytearray()
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        raise ConnectionError("OpenOCD closed the connection")
+                    buf += chunk
+                    end = buf.find(b"\x1a")
+                    if end < 0:
+                        continue
+                    if end != len(buf) - 1:
+                        # One command, one reply: bytes past its terminator
+                        # are a reply this session lost track of.
+                        raise ConnectionError(
+                            "OpenOCD sent data past the end of its reply"
+                        )
+                    return buf[:end].decode().strip()
+            except OSError as exc:  # ConnectionError and socket timeouts too
+                self._retire(sock, f"dropped ({exc or type(exc).__name__})")
+                with self._life_lock:
+                    cancelled = self._dropped == "cancelled"
+                if cancelled:
+                    raise ConnectionError(
+                        "OpenOCD transport cancelled; reconnect"
+                    ) from exc
+                raise
 
     def select_chain(self, chain: int) -> None:
         """Select BSCANE2 USER chain for subsequent register accesses."""
@@ -1667,12 +1771,39 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         self._cmd(f"irscan {self.tap} {ir}")
 
     def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int:
-        """Perform a raw DR scan via irscan + drscan on the OpenOCD socket."""
+        """Perform a raw DR scan via irscan + drscan on the OpenOCD socket.
+
+        OpenOCD answers only once the whole scan has shifted, so the read
+        timeout grows with *width*: a streaming read's scan of half a
+        million bits outlasts the base timeout on a slow adapter.
+        """
         self._select_ir(chain)
         hex_width = (width + 3) // 4
         hex_in = f"0x{bits:0{hex_width}x}"
-        result = self._cmd(f"drscan {self.tap} {width} {hex_in}")
+        with self._read_timeout(
+            self._BATCH_TIMEOUT_SEC + self._SCAN_TIMEOUT_PER_BIT_SEC * width
+        ):
+            result = self._cmd(f"drscan {self.tap} {width} {hex_in}")
         return self._parse_drscan_result(result, command="drscan", width=width)
+
+    @contextmanager
+    def _read_timeout(self, seconds: float):
+        """Allow *seconds* for each socket read of the commands run inside,
+        then restore the base timeout."""
+        with self._sock_lock:
+            sock = self._sock
+            if sock is not None:
+                sock.settimeout(seconds)
+            try:
+                yield
+            finally:
+                if sock is not None:
+                    try:
+                        sock.settimeout(self._BATCH_TIMEOUT_SEC)
+                    except OSError:
+                        # cancel() closed the socket: keep the error that
+                        # ended the command, not this one.
+                        pass
 
     def _parse_drscan_result(self, result: str, *, command: str, width: int) -> int:
         token = result.split()[0] if result.split() else ""
@@ -1798,6 +1929,13 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     #: line has run, so a deep burst gets a base plus a margin per scan.
     _BATCH_TIMEOUT_SEC = 5.0
     _BATCH_TIMEOUT_PER_SCAN_SEC = 0.05
+    #: Extra read timeout per bit of a raw DR scan: room for an adapter
+    #: shifting as slowly as 20 kbit/s (remote_bitbang through a bridge).
+    _SCAN_TIMEOUT_PER_BIT_SEC = 50e-6
+    #: How long connect() waits for OpenOCD to finish a dropped session's
+    #: last line: covers an EJTAG-AXI stream scan (16384 x 33 bits) at the
+    #: per-bit allowance above.
+    _CONNECT_SYNC_TIMEOUT_SEC = 40.0
 
     def _slot_select_ops(self, addr: int) -> list[ScanOp]:
         return [("tcl", cmd) for cmd in self._slot_select_cmds([addr])]
@@ -1850,22 +1988,10 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
                 raise ValueError(f"unknown scan op {op!r}")
             i += 1
         cmds.append("set __fcapz_r")
-        with self._sock_lock:
-            sock = self._sock
-            if sock is not None:
-                sock.settimeout(
-                    self._BATCH_TIMEOUT_SEC + self._BATCH_TIMEOUT_PER_SCAN_SEC * expected
-                )
-            try:
-                result = self._run_line(cmds)
-            finally:
-                if sock is not None:
-                    try:
-                        sock.settimeout(self._BATCH_TIMEOUT_SEC)
-                    except OSError:
-                        # cancel() closed the socket: keep the error that
-                        # ended the batch, not this one.
-                        pass
+        with self._read_timeout(
+            self._BATCH_TIMEOUT_SEC + self._BATCH_TIMEOUT_PER_SCAN_SEC * expected
+        ):
+            result = self._run_line(cmds)
         try:
             values = [int(t, 16) for t in result.split()]
         except ValueError as exc:
@@ -2063,9 +2189,21 @@ class TapBridgeTransport(Transport):
         """
         return 0.0
 
+    # Counts cancel() calls, so a connect() that is still opening the
+    # channel (open_channel not yet set) notices one.
+    _cancel_seq = 0
+
     def _channel_name(self) -> str:
         """Short identifier for error messages (a port name, say)."""
         return type(self).__name__
+
+    def _raise_if_cancelled(self, exc: BaseException | None = None) -> None:
+        """A read cut short because cancel() closed the channel is a
+        cancelled link, not a bridge that stopped replying."""
+        if not self._open_channel:
+            raise ConnectionError(
+                f"link to {self._channel_name()} cancelled; reconnect"
+            ) from exc
 
     # -- lifecycle ----------------------------------------------------------
     def connect(self) -> None:
@@ -2074,8 +2212,18 @@ class TapBridgeTransport(Transport):
         # A new session may reach another image: nothing cached about the
         # old one's managers holds.
         self._forget_hub_state()
+        seq = self._cancel_seq
         self._open()
         self._open_channel = True
+        if seq != self._cancel_seq:
+            # cancel() ran while the channel was opening (it found nothing
+            # open to close): honour it now.
+            self._open_channel = False
+            try:
+                self._close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            raise ConnectionError(f"link to {self._channel_name()} cancelled while opening")
         self._out_of_step = False
         try:
             self._identify()
@@ -2096,6 +2244,26 @@ class TapBridgeTransport(Transport):
             except Exception:  # pragma: no cover - best effort
                 pass
             self._open_channel = False
+
+    def cancel(self) -> None:
+        """Abort the call in flight from another thread: close the byte
+        channel and nothing more.
+
+        Unlike :meth:`close` it scans nothing: the ``MGR_OWNER`` release
+        would run whenever the transaction lock is free, which is between
+        two transactions of the very call being aborted.  That call fails
+        at its next read or write with ``ConnectionError``.  The session's
+        ``MGR_OWNER`` token stays set, as after a cancel on the other
+        backends; :meth:`connect` starts a new session.
+        """
+        self._cancel_seq += 1  # seen by a connect still opening the channel
+        if not self._open_channel:
+            return
+        self._open_channel = False
+        try:
+            self._close()
+        except Exception:  # pragma: no cover - best effort
+            pass
 
     def _require_open(self) -> None:
         if not self._open_channel:
@@ -2151,6 +2319,7 @@ class TapBridgeTransport(Transport):
             ) from exc
 
         if len(header) < 2:
+            self._raise_if_cancelled()
             self._resync(2 + resp_bytes - len(header))
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()} did not reply "
@@ -2174,8 +2343,14 @@ class TapBridgeTransport(Transport):
 
         if resp_bytes == 0:
             return b""
-        payload = self._read_bytes(resp_bytes)
+        try:
+            payload = self._read_bytes(resp_bytes)
+        except OSError as exc:
+            raise ConnectionError(
+                f"link to {self._channel_name()} failed mid-transaction: {exc}"
+            ) from exc
         if len(payload) < resp_bytes:
+            self._raise_if_cancelled()
             self._resync(resp_bytes - len(payload))
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()}: short reply "
@@ -2651,15 +2826,23 @@ class SerialTapTransport(TapBridgeTransport):
             pass
 
     def _close(self) -> None:
-        if self._ser is not None:
-            try:
-                self._ser.close()
-            finally:
-                self._ser = None
+        ser, self._ser = self._ser, None
+        if ser is not None:
+            ser.close()
+
+    def _port(self):
+        """The open port, read once per use: :meth:`cancel` may close it
+        from another thread at any moment, and a closed port reads as an
+        ``OSError`` (a lost link), never as ``None``."""
+        ser = self._ser
+        if ser is None:
+            raise OSError(f"serial port {self.port!r} is closed")
+        return ser
 
     def _write_bytes(self, data: bytes) -> None:
-        self._ser.write(data)
-        self._ser.flush()
+        ser = self._port()
+        ser.write(data)
+        ser.flush()
 
     def _read_bytes(self, count: int) -> bytes:
         """Read *count* bytes, for as long as they keep arriving.
@@ -2673,18 +2856,20 @@ class SerialTapTransport(TapBridgeTransport):
         returns what arrived within it, reading continues while anything did,
         and a read that brings nothing ends the reply.
         """
+        ser = self._port()
         data = bytearray()
         while len(data) < count:
-            chunk = self._ser.read(count - len(data))
+            chunk = ser.read(count - len(data))
             if not chunk:
                 break
             data += chunk
         return bytes(data)
 
     def _discard_input(self) -> int:
-        pending = self._ser.in_waiting
+        ser = self._port()
+        pending = ser.in_waiting
         if pending:
-            self._ser.read(pending)
+            ser.read(pending)
         return pending
 
     def _wire_time_s(self, nbytes: int) -> float:
@@ -4030,6 +4215,10 @@ class XilinxHwServerTransport(Transport):
         bits[48]    = rnw  (1 = write, 0 = read)
     """
 
+    # Counts cancel() calls, so a connect() still spawning xsdb (before
+    # _proc points at the child) notices one.
+    _cancel_seq = 0
+
     # Default BSCANE2 IR codes for Xilinx 7-series.
     # USER1 (0x02) and USER2 (0x03) are verified.
     # Verified on xc7a100t (Arty A7): USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
@@ -4213,6 +4402,7 @@ class XilinxHwServerTransport(Transport):
                 "xsdb not found. Add Vivado bin to PATH or pass xsdb_path=."
             )
 
+        seq = self._cancel_seq
         self._proc = subprocess.Popen(
             [xsdb],
             stdin=subprocess.PIPE,
@@ -4221,6 +4411,14 @@ class XilinxHwServerTransport(Transport):
             text=True,
             bufsize=1,
         )
+        if seq != self._cancel_seq:
+            # cancel() ran while xsdb was spawning, before _proc pointed at
+            # it: kill and reap it here, or the connect would wait out its
+            # whole timeout on a session already cancelled.
+            proc, self._proc = self._proc, None
+            proc.kill()
+            proc.communicate()
+            raise ConnectionError("hw_server connect cancelled")
         self._poisoned = False
         self._stdout_lines = queue.Queue()
         self._stderr_lines = []
@@ -4563,6 +4761,7 @@ class XilinxHwServerTransport(Transport):
         # holds the pipe's buffer lock, and an "exit" write would wait on it.
         # Leaves _proc for the owner: its _send fails on the dead pipe and
         # its close() reaps the process.
+        self._cancel_seq += 1  # seen by a connect still spawning xsdb
         self._poisoned = True
         proc = self._proc
         if proc is not None:
@@ -4628,6 +4827,61 @@ class XilinxHwServerTransport(Transport):
         parts.append("puts [$_rdb run -bits]; $_rdb delete")
         out = self._send("; ".join(parts))
         return self._parse_scan_bits_list(out, widths, totals)
+
+    def jtag_lock(self, timeout_ms: int = 5000) -> None:
+        """Lock the FPGA's scan chain against every other hw_server client.
+
+        One ``jtag sequence`` always runs uninterrupted, but between two
+        sequences other clients (the MicroBlaze debugger, Vivado, hw_server's
+        own polls) may scan the chain.  A protocol that keeps state across
+        sequences, such as the EJTAG-AXI streaming read, holds this lock for
+        its whole length.  Raises RuntimeError if the lock is not granted.
+        """
+        out = self._send(
+            f"if {{[catch {{jtag lock {int(timeout_ms)}}} _lk]}} "
+            f"{{puts \"FCAPZ_LOCK_ERR $_lk\"}} else {{puts FCAPZ_LOCK_OK}}"
+        )
+        if "FCAPZ_LOCK_OK" not in out:
+            raise RuntimeError(f"xsdb: jtag lock failed: {out.strip()[:300]!r}")
+
+    def jtag_unlock(self) -> None:
+        """Release :meth:`jtag_lock` (errors ignored: best effort)."""
+        self._send("catch {jtag unlock}")
+
+    def raw_dr_capture(
+        self, width: int, *, chain: int | None = None, tdi: int = 0
+    ) -> int:
+        """One long DR scan of a constant *tdi*.
+
+        The constant data is built inside xsdb (``string repeat``), so no
+        per-bit TCL string crosses the pipe, and ``run -hex`` brings TDO back
+        at 4 bits per character (little-endian bytes, two hex digits each).
+        The scan then runs at what hw_server shifts through the cable: on
+        the Arty A7 at TCK 30 MHz, about 18 Mbit/s.  Not
+        ``drshift -tdi 0``: through the Arty's Digilent cable (Vivado 2025.2)
+        it shifts ones, which aborts an EJTAG-AXI stream.
+        """
+        ch = chain if chain is not None else self._active_chain
+        total = self._user_dr_bits(width)
+        fill = f"[string repeat {'F' if tdi else '0'} {(total + 7) // 8 * 2}]"
+        tcl = (
+            f"set _rc [jtag sequence]; "
+            f"{self._irshift_tcl('_rc', ch)}; "
+            f"$_rc drshift -state DRUPDATE -capture -hex {total} {fill}; "
+            f"$_rc state IDLE {self.RAW_DR_IDLE_CYCLES}; "
+            f"puts [$_rc run -hex]; $_rc delete"
+        )
+        out = self._send(tcl)
+        ndigits = (total + 7) // 8 * 2
+        hexdigits = set("0123456789abcdefABCDEF")
+        for token in reversed(out.replace("{", " ").replace("}", " ").split()):
+            if len(token) == ndigits and set(token) <= hexdigits:
+                value = int.from_bytes(bytes.fromhex(token), "little")
+                return (value >> self._dr_data_offset()) & ((1 << width) - 1)
+        raise RuntimeError(
+            f"xsdb: expected a {ndigits}-digit hex DR capture, "
+            f"stdout={out[:500]!r}; recent stderr={self._stderr_lines[-10:]!r}"
+        )
 
     # -- register access -----------------------------------------------------
 

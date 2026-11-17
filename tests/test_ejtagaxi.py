@@ -7,6 +7,11 @@ import unittest
 from typing import List
 
 from fcapz.ejtagaxi import (
+    AXI_ST_COLLECTING,
+    AXI_ST_OWED,
+    AXI_ST_R_DRAIN,
+    AXI_ST_WE_BUSY,
+    AXI_ST_WE_DETACHED,
     AXIError,
     CMD_BURST_RDATA,
     CMD_BURST_RSTART,
@@ -419,6 +424,54 @@ class EjtagAxiTests(unittest.TestCase):
         result = ctrl.burst_read(0x0000, 4)
         self.assertEqual(result, [0xBB00 + i for i in range(4)])
 
+    def test_burst_chunks_respect_fifo_depth_and_4k(self):
+        ctrl, _ = self._make_ctrl()  # FIFO_DEPTH=16
+        self.assertEqual(
+            ctrl._burst_chunks(0x0000, 40), [(0, 0x0, 16), (16, 0x40, 16), (32, 0x80, 8)]
+        )
+        # 0xFF8: two words left before the 4 KiB boundary.
+        self.assertEqual(
+            ctrl._burst_chunks(0x0FF8, 5), [(0, 0x0FF8, 2), (2, 0x1000, 3)]
+        )
+        ctrl._fifo_depth = 512  # the AXI4 256-beat limit still applies
+        self.assertEqual(
+            [n for _, _, n in ctrl._burst_chunks(0x0000, 600)], [256, 256, 88]
+        )
+
+    def test_burst_range_read_and_write(self):
+        class _BigMemory(FakeBridgeTransport):  # 64 words, no wrap at 16
+            def __init__(self):
+                super().__init__()
+                self.regs = [0] * 64
+
+            def _addr_to_idx(self, addr):
+                return (addr >> 2) & 0x3F
+
+        ctrl, t = self._make_ctrl(_BigMemory())
+        data = [0xC000 + i for i in range(40)]
+        calls = []
+        real = ctrl.burst_write
+        ctrl.burst_write = lambda a, d, wstrb=0xF: (calls.append((a, len(d))), real(a, d, wstrb))
+        ctrl.burst_write_range(0x0000, data)
+        self.assertEqual(calls, [(0x0, 16), (0x40, 16), (0x80, 8)])
+        self.assertEqual([t.regs[i] for i in range(40)], data)
+        self.assertEqual(ctrl.burst_read_range(0x0000, 40), data)
+        with self.assertRaises(ValueError):
+            ctrl.burst_read_range(0x0000, 0)
+        with self.assertRaises(ValueError):
+            ctrl.burst_write_range(0x0000, [])
+
+    def test_burst_range_rejects_unaligned_and_wrapping(self):
+        ctrl, t = self._make_ctrl()
+        with self.assertRaises(ValueError):
+            ctrl.burst_read_range(0x0001, 4)
+        with self.assertRaises(ValueError):
+            ctrl.burst_write_range(0xFFFF_FFFC, [1, 2])
+        with self.assertRaises(ValueError):
+            ctrl.burst_read_range(-4, 1)
+        # The last word of the address space is fine.
+        self.assertEqual(ctrl._burst_chunks(0xFFFF_FFFC, 1), [(0, 0xFFFF_FFFC, 1)])
+
     def test_connect_caches_fifo_depth(self):
         ctrl, _ = self._make_ctrl()
         self.assertEqual(ctrl._fifo_depth, 16)
@@ -450,6 +503,39 @@ class EjtagAxiTests(unittest.TestCase):
         ctrl, _ = self._make_ctrl()
         with self.assertRaisesRegex(ValueError, "FIFO_DEPTH"):
             ctrl.burst_write(0x0000, [0] * 17)
+
+    def test_single_bursts_reject_4k_crossing(self):
+        ctrl, t = self._make_ctrl()
+        with self.assertRaisesRegex(ValueError, "4 KiB"):
+            ctrl.burst_write(0x0FF8, [1, 2, 3])
+        with self.assertRaisesRegex(ValueError, "4 KiB"):
+            ctrl.burst_read(0x1FFC, 2)
+        self.assertNotIn(CMD_BURST_SETUP, t.scan_log[5:])  # nothing sent
+        # Ending exactly on the boundary is legal.
+        ctrl.burst_write(0x0FF8, [1, 2])
+        self.assertEqual(ctrl.burst_read(0x0FF8, 2), [1, 2])
+
+    def test_safe_writes_feature_and_axi_status(self):
+        ctrl, _ = self._make_ctrl()
+        self.assertFalse(ctrl.has_safe_writes)
+        with self.assertRaisesRegex(RuntimeError, "FEATURES\\[25\\]"):
+            ctrl.axi_status()
+
+        t = FakeBridgeTransport()
+        t._config_regs[0x002C] |= 1 << 25
+        t._config_regs[0x0030] = (AXI_ST_WE_BUSY | AXI_ST_WE_DETACHED | AXI_ST_R_DRAIN
+                                  | AXI_ST_OWED)
+        ctrl, _ = self._make_ctrl(t)
+        self.assertTrue(ctrl.has_safe_writes)
+        st = ctrl.axi_status()
+        self.assertEqual(st["raw"], 0x2B)
+        self.assertTrue(st["write_busy"] and st["write_detached"] and st["r_drain"])
+        self.assertFalse(st["ar_held"] or st["collecting"] or st["idle"])
+        t._config_regs[0x0030] = AXI_ST_COLLECTING
+        self.assertTrue(ctrl.axi_status()["idle"])
+        # Mid hand-over the per-flag bits may all read 0; bit 5 decides.
+        t._config_regs[0x0030] = AXI_ST_OWED
+        self.assertFalse(ctrl.axi_status()["idle"])
 
     def test_error_raises_axi_error(self):
         ctrl, t = self._make_ctrl()
@@ -520,6 +606,44 @@ class EjtagAxiTests(unittest.TestCase):
         info = ctrl.connect()
         self.assertEqual(info["bridge_id"], _BRIDGE_ID)
         self.assertEqual(t.stale_config_id_reads, 0)
+
+    def test_connect_recovers_a_bridge_left_mid_stream(self):
+        """A session that dropped mid-stream sent no RESET; the bridge
+        answers the first identity scan with stream slots, and that scan's
+        TDI ones abort the stream (RTL: like CMD_RESET).  Connect must ask
+        again, even with the deadline used up.  Seen on the Arty over
+        OpenOCD after a stream read timed out."""
+
+        class _StuckStreaming(FakeBridgeTransport):
+            stuck = True
+
+            def _exec(self, cmd, addr, payload, wstrb):
+                if self.stuck:
+                    if cmd or addr or payload or wstrb:
+                        self.stuck = False  # TDI ones: the stream aborts
+                    self.prev_rdata = 0
+                    self.prev_valid = True
+                    return
+                super()._exec(cmd, addr, payload, wstrb)
+
+        t = _StuckStreaming()
+        t.ready_probe_timeout = 0.0  # used up, as behind a long scan
+        info = EjtagAxiController(t, chain=4).connect()
+        self.assertEqual(info["bridge_id"], _BRIDGE_ID)
+        # Recovered by the re-read alone: no RESET before the identity.
+        self.assertEqual(
+            t.scan_log[:8], [CMD_CONFIG, CMD_CONFIG, CMD_CONFIG, CMD_NOP] * 2
+        )
+
+    def test_connect_sends_no_reset_to_a_core_that_is_not_a_bridge(self):
+        """Another core on the chain (an EJTAG-UART, also chain 4 by
+        default) takes a 72-bit RESET frame as its own CMD_RESET and
+        flushes its FIFOs: a failed probe must not send one."""
+        t = FakeBridgeTransport(stale_config_id_reads=100)
+        t.ready_probe_timeout = 0.0
+        with self.assertRaises(RuntimeError):
+            EjtagAxiController(t, chain=4).connect()
+        self.assertNotIn(CMD_RESET, t.scan_log)
 
     def test_connect_timeout_with_stale_bridge_id_raises(self):
         t = FakeBridgeTransport(stale_config_id_reads=100)

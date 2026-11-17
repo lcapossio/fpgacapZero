@@ -336,6 +336,9 @@ def test_unknown_cmd_in_band(monkeypatch):
     body = _rpc(c, "bogus").json()
     assert body["ok"] is False
     assert body["type"] == "ValueError"
+    # BUG-298: no source path in a reply; trace is only "Type: message".
+    assert body["trace"] == f"ValueError: {body['error']}"
+    assert "File" not in body["trace"]
 
 
 def test_eio_shared_chain_over_rpc(monkeypatch):
@@ -741,6 +744,99 @@ def test_ws_non_object_json_answers_in_band(monkeypatch):
         assert ws.receive_json()["ok"] is True
 
 
+def test_ws_cancel_is_read_while_a_request_runs(monkeypatch):
+    """BUG-292: the socket keeps reading during a request, so a cancel
+    interrupts a blocked connect; replies match by request_id."""
+    import threading
+
+    entered, cancelled = threading.Event(), threading.Event()
+
+    class _Hung(FakeTransport):
+        def connect(self) -> None:
+            entered.set()
+            cancelled.wait(10)
+            raise ConnectionError("transport cancelled")
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: _Hung())
+    c = TestClient(create_app())
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_json({"cmd": "connect", "request_id": "c1", **_GOWIN})
+        assert entered.wait(5)
+        ws.send_json({"cmd": "cancel", "target": "c1", "request_id": "x1"})
+        replies = {r["request_id"]: r for r in (ws.receive_json(), ws.receive_json())}
+    assert replies["x1"]["cancelled"] is True
+    assert replies["c1"]["ok"] is False
+
+
+def test_ws_close_interrupts_its_own_request_in_flight(monkeypatch):
+    """A close on the same socket as a hung connect interrupts it instead of
+    queueing behind it."""
+    import threading
+
+    entered, cancelled = threading.Event(), threading.Event()
+
+    class _Hung(FakeTransport):
+        def connect(self) -> None:
+            entered.set()
+            cancelled.wait(10)
+            raise ConnectionError("transport cancelled")
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: _Hung())
+    c = TestClient(create_app())
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_json({"cmd": "connect", "request_id": "c1", **_GOWIN})
+        assert entered.wait(5)
+        ws.send_json({"cmd": "close", "request_id": "z1"})
+        replies = {r["request_id"]: r for r in (ws.receive_json(), ws.receive_json())}
+    assert cancelled.is_set()
+    assert replies["c1"]["ok"] is False
+    assert replies["z1"]["ok"] is True
+
+
+def test_ws_close_drops_what_was_queued_behind_the_request_in_flight(monkeypatch):
+    import threading
+
+    entered, cancelled = threading.Event(), threading.Event()
+
+    class _Hung(FakeTransport):
+        def connect(self) -> None:
+            entered.set()
+            cancelled.wait(10)
+            raise ConnectionError("transport cancelled")
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: _Hung())
+    c = TestClient(create_app())
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_json({"cmd": "connect", "request_id": "c1", **_GOWIN})
+        assert entered.wait(5)
+        ws.send_json({"cmd": "connect", "request_id": "c2", **_GOWIN})
+        ws.send_json({"cmd": "close", "request_id": "z1"})
+        replies = {r["request_id"]: r for r in (ws.receive_json() for _ in range(3))}
+    assert replies["c2"]["type"] == "RequestCancelled"
+    assert replies["c1"]["ok"] is False
+    assert replies["z1"]["ok"] is True
+
+
+def test_ws_a_non_string_cmd_is_refused_and_the_socket_keeps_serving(monkeypatch):
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
+    c = TestClient(create_app())
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_json({"cmd": [], "request_id": "bad"})
+        bad = ws.receive_json()
+        assert bad["ok"] is False and bad["request_id"] == "bad"
+        ws.send_json({"cmd": "connect", **_GOWIN})
+        assert ws.receive_json()["ok"] is True
+
+
 def test_openocd_status_disabled_without_launcher(monkeypatch):
     c = _local_client(monkeypatch)
     r = _rpc(c, "openocd_status").json()
@@ -1101,10 +1197,17 @@ def test_discovery_infers_polarfire_from_tap_name():
 
     for tap in ("MPFS095T.tap", "mpf300t.tap"):
         assert _infer_ir_table_name(tap) == "polarfire"
+    assert _infer_ir_table_name("ecp5.tap") == "ecp5"
+    assert _infer_ir_table_name("LFE5U-25F.tap") == "ecp5"
+    assert _infer_ir_table_name("trion-t20.tap") == "efinix"
+    assert _infer_ir_table_name("xc7a100t.tap") == "xilinx7"
+    assert _DISCOVERY_IR_TABLES["ecp5"] == OpenOcdTransport.IR_TABLE_ECP5
     assert _DISCOVERY_IR_TABLES["polarfire"] == OpenOcdTransport.IR_TABLE_POLARFIRE
     assert RpcServer._ir_table("ultrascale") is not None
     assert RpcServer._ir_table("efinix") == OpenOcdTransport.IR_TABLE_EFINIX
     assert RpcServer._ir_table("trion") == OpenOcdTransport.IR_TABLE_EFINIX
+    assert RpcServer._ir_table("ecp5") == OpenOcdTransport.IR_TABLE_ECP5
+    assert RpcServer._ir_table("lattice") == OpenOcdTransport.IR_TABLE_ECP5
     with pytest.raises(ValueError):
         RpcServer._ir_table("bogus")
 

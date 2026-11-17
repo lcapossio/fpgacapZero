@@ -38,7 +38,8 @@ def ir_table_preset(name: str) -> dict[int, int]:
 
     Aliases: ``xilinx7``, ``7series`` → 7-series table; ``ultrascale``, ``us`` → US+ table;
     ``gowin``, ``gw`` → Gowin ER1/ER2 table (OpenOCD, FTDI);
-    ``polarfire``, ``microchip`` → PolarFire UJTAG table.  ``auto`` (FTDI:
+    ``polarfire``, ``microchip`` → PolarFire UJTAG table; ``efinix`` →
+    Efinix User TAP table; ``ecp5``, ``lattice`` → ECP5 ER1/ER2 table.  ``auto`` (FTDI:
     family from the IDCODE) is resolved by the transport, not here.
     """
     key = name.strip().lower().replace("-", "_")
@@ -50,6 +51,10 @@ def ir_table_preset(name: str) -> dict[int, int]:
         return dict(OpenOcdTransport.IR_TABLE_GOWIN)
     if key in ("polarfire", "microchip"):
         return dict(OpenOcdTransport.IR_TABLE_POLARFIRE)
+    if key in ("efinix", "trion", "titanium"):
+        return dict(OpenOcdTransport.IR_TABLE_EFINIX)
+    if key in ("ecp5", "lattice"):
+        return dict(OpenOcdTransport.IR_TABLE_ECP5)
     raise ValueError(f"unknown ir_table preset {name!r}")
 
 

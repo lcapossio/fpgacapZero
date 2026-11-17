@@ -22,6 +22,8 @@ entity jtag_burst_read is
         tck      : in  std_logic;
         tdi      : in  std_logic;
         tdo      : out std_logic;
+        -- The value tdo takes at the next tck edge; see jtag_reg_iface.v.
+        tdo_next : out std_logic;
         capture  : in  std_logic;
         shift_en : in  std_logic;
         update   : in  std_logic;
@@ -87,6 +89,12 @@ begin
         severity failure;
 
     tdo <= sr(0);
+    -- The priming capture of a burst leaves sr as it is.
+    tdo_next <= '0'        when arst = '1' else
+                sr(0)      when (sel and capture and (burst_start xor burst_start_seen)) = '1' else
+                staging(0) when (sel and capture) = '1' else
+                sr(1)      when (sel and shift_en) = '1' else
+                sr(0);
     mem_active <= loading or (sel and capture);
 
     words_per_scan <= to_unsigned(TS_PER_SCAN, LOAD_CTR_W)

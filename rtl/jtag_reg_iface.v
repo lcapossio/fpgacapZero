@@ -6,7 +6,9 @@
 // JTAG to parallel register bus bridge (vendor-agnostic).
 //
 // TAP signals (tck, tdi, tdo, capture, shift, update, sel) are
-// provided by an external vendor-specific TAP wrapper.
+// provided by an external vendor-specific TAP wrapper.  tdo_next is the
+// value tdo takes at the next tck edge, for a TAP that samples TDO at the
+// same edge the scan logic advances on (jtag_tap_ecp5); others leave it open.
 //
 // 49-bit DR protocol (LSB-first on the wire):
 //   bits[31:0]  = wdata / rdata
@@ -20,6 +22,7 @@ module jtag_reg_iface (
     input  wire        tck,
     input  wire        tdi,
     output wire        tdo,
+    output wire        tdo_next,
     input  wire        capture,
     input  wire        shift_en,
     input  wire        update,
@@ -38,6 +41,31 @@ module jtag_reg_iface (
     reg [48:0] sr;
 
     assign tdo     = sr[0];
+    assign tdo_next = arst              ? 1'b0 :
+                      sel && capture    ? reg_rdata[0] :
+                      sel && shift_en   ? sr[1] :
+                                          sr[0];
+
+`ifndef SYNTHESIS
+    // tdo_next has to be the tdo of the next tck edge.
+    reg tdo_next_q, tdo_next_seen;
+    initial begin
+        tdo_next_q = 1'b0;
+        tdo_next_seen = 1'b0;
+    end
+    always @(posedge tck or posedge arst) begin
+        if (arst) begin
+            tdo_next_seen <= 1'b0;
+        end else begin
+            tdo_next_q <= tdo_next;
+            tdo_next_seen <= 1'b1;
+        end
+    end
+    always @(negedge tck) begin
+        if (!arst && tdo_next_seen && tdo !== tdo_next_q)
+            $fatal(1, "jtag_reg_iface: tdo_next was %b, tdo became %b", tdo_next_q, tdo);
+    end
+`endif
     assign reg_clk = tck;
     assign reg_rst = arst;
 

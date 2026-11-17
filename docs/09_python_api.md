@@ -7,9 +7,6 @@
 > and reuse the same controllers that the CLI, RPC server, and GUI
 > are built on top of.
 >
-> **Audience**: junior FPGA dev who can write basic Python and has
-> read [chapter 02](02_install.md) so the package is installed.
->
 > **Reference**: every public name with its full signature and docstring
 > is in the generated [Python API reference](specs/python_api.md).
 
@@ -66,7 +63,7 @@ transport = XilinxHwServerTransport(
     host="127.0.0.1",
     port=3121,
     fpga_name="xc7a100t",
-    bitfile="examples/arty_a7/arty_a7_top.bit",   # optional, programs FPGA on connect()
+    bitfile="examples/arty_a7/arty_a7_vex_top.bit",   # optional, programs FPGA on connect()
     ir_table=None,                                 # default = 7-series IR codes
     ready_probe_addr=0x0000,                       # ELA VERSION register
     ready_probe_timeout=2.0,                       # seconds
@@ -202,7 +199,7 @@ check).
 info = a.probe()
 # {
 #   "version_major": 0,
-#   "version_minor": 3,
+#   "version_minor": 5,
 #   "core_id": 19521,           # 0x4C41 = "LA"
 #   "sample_width": 8,
 #   "depth": 1024,
@@ -381,7 +378,7 @@ class CaptureConfig:
     trigger:          TriggerConfig
     sample_width:     int = 8       # must match hardware SAMPLE_W
     depth:            int = 1024    # must match hardware DEPTH
-    sample_clock_hz:  int = 100_000_000   # used for VCD timescale
+    sample_clock_hz:  int = 100_000_000   # recorded in JSON/summary; VCD time is in ticks
     probes:           list[ProbeSpec] = []
     channel:          int = 0       # NUM_CHANNELS mux selector
     decimation:       int = 0       # 0=every cycle, N=every N+1
@@ -527,12 +524,13 @@ info = bridge.connect()
 #   "core_id": 0x4A58,
 #   "legacy_id": False,
 #   "legacy_raw_id": None,
-#   "version": 0x00044A58,
+#   "version": 0x00054A58,
 #   "version_major": 0,
-#   "version_minor": 4,
+#   "version_minor": 5,
 #   "addr_w": 32,
 #   "data_w": 32,
 #   "fifo_depth": 16,
+#   "stream": False,
 # }
 
 # Single transactions
@@ -547,12 +545,19 @@ bridge.write_block(0x40000000, [0xAA, 0xBB, 0xCC])
 words = bridge.burst_read(0x40000000, count=16)    # count <= fifo_depth
 bridge.burst_write(0x40000000, [0xAA, 0xBB, 0xCC, 0xDD])
 
+# Streaming read (bitstreams built with STREAM_EN=1)
+if bridge.has_stream:
+    words = bridge.stream_read(0x40000000, count=65536)
+
 bridge.close()
 ```
 
 `axi_read` / `axi_write` raise `AXIError` on a non-OKAY response.
 `burst_read` / `burst_write` raise `ValueError` if the count
 exceeds `fifo_depth` or AXI4's max burst (256).
+`stream_read` raises `RuntimeError` on a bitstream without the
+streaming read and `AXIError` when the range's AXI response is not OKAY
+or every retry failed.
 Old EJTAG-AXI bitstreams that still report `"EJAX"` are accepted with a
 `RuntimeWarning`; their `connect()` info includes `legacy_id=True` and
 `legacy_raw_id=0x454A4158`. `bridge_id` and `core_id` stay normalized to
@@ -572,9 +577,9 @@ info = uart.connect()
 #   "core_id": 0x4A55,
 #   "legacy_id": False,
 #   "legacy_raw_id": None,
-#   "version": 0x00044A55,
+#   "version": 0x00054A55,
 #   "version_major": 0,
-#   "version_minor": 4,
+#   "version_minor": 5,
 # }
 
 uart.send(b"Hello\n")
@@ -692,7 +697,7 @@ from fcapz import (
 transport = XilinxHwServerTransport(
     port=3121,
     fpga_name="xc7a100t",
-    bitfile="examples/arty_a7/arty_a7_top.bit",   # programs FPGA on connect
+    bitfile="examples/arty_a7/arty_a7_vex_top.bit",   # programs FPGA on connect
 )
 
 analyzer = Analyzer(transport)
@@ -705,6 +710,7 @@ cfg = CaptureConfig(
     trigger     = TriggerConfig(mode="value_match", value=0x42, mask=0xFF),
     sample_width= 8,
     depth       = 1024,
+    sample_clock_hz = 150_000_000,   # reference ELA0 samples at 150 MHz
     probes      = [ProbeSpec(name="counter", width=8, lsb=0)],
 )
 

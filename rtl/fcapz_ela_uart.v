@@ -153,7 +153,7 @@ module fcapz_ela_uart #(
     // ---- Chain 1: control registers ----
     jtag_reg_iface u_reg (
         .arst(jtag_rst_sync),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo[0]),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo[0]), .tdo_next(),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel[0]),
         .reg_clk(jtag_clk), .reg_rst(jtag_rst),
@@ -196,7 +196,7 @@ module fcapz_ela_uart #(
         .DEPTH(DEPTH), .BURST_W(BURST_W), .SEG_DEPTH(BURST_SEG_DEPTH)
     ) u_burst (
         .arst(jtag_rst_sync),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo[1]),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo[1]), .tdo_next(),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel[1]),
         .mem_addr(burst_rd_addr),

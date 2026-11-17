@@ -67,7 +67,7 @@ module fcapz_uart_tap_tb;
 
     jtag_reg_iface u_reg (
         .arst(arst),
-        .tck(tck), .tdi(tdi), .tdo(tdo[0]),
+        .tck(tck), .tdi(tdi), .tdo(tdo[0]), .tdo_next(),
         .capture(capture), .shift_en(shift), .update(update), .sel(sel[0]),
         .reg_clk(reg_clk), .reg_rst(reg_rst),
         .reg_wr_en(reg_wr_en), .reg_rd_en(reg_rd_en),

@@ -127,7 +127,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
                  ("segmented_capture", "segmented_windows_are_contiguous",
                   "segment_restart_keeps_the_first_sample",
                   "rearm_mid_capture_restarts_cleanly",
-                  "capture_gen_counts_restarts")),
+                  "capture_gen_counts_restarts",
+                  "soft_reset_clears_segment_metadata")),
     CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
     *(
         CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},

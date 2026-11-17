@@ -54,7 +54,8 @@ module fcapz_eio_polarfire #(
     // ---- TAP wrapper (USER1 used; USER2 tied off with ch2_tdo=0) ----
     jtag_tap_polarfire #(
         .IR_USER1(IR_USER1),
-        .IR_USER2(IR_USER2)
+        .IR_USER2(IR_USER2),
+        .CH2_EN(0)
     ) u_tap (
         .tck_pad_i(tck_pad_i), .tms_pad_i(tms_pad_i), .tdi_pad_i(tdi_pad_i),
         .trstb_pad_i(trstb_pad_i), .tdo_pad_o(tdo_pad_o),
@@ -69,7 +70,7 @@ module fcapz_eio_polarfire #(
     // ---- Register interface ----
     jtag_reg_iface u_reg (
         .arst(1'b0),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo), .tdo_next(),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .reg_clk(jtag_clk), .reg_rst(jtag_rst),

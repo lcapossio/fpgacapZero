@@ -27,7 +27,7 @@ module fcapz_eio_ecp5 #(
 );
 
     // TAP signals
-    wire tap_tck, tap_tdi, tap_tdo;
+    wire tap_tck, tap_tdi, tap_tdo_next;
     wire tap_capture, tap_shift, tap_update, tap_sel;
 
     // Register bus
@@ -38,7 +38,7 @@ module fcapz_eio_ecp5 #(
 
     // ---- TAP wrapper ----
     jtag_tap_ecp5 #(.CHAIN(CHAIN)) u_tap (
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo_next(tap_tdo_next),
         .capture(tap_capture), .shift(tap_shift),
         .update(tap_update), .sel(tap_sel)
     );
@@ -46,7 +46,7 @@ module fcapz_eio_ecp5 #(
     // ---- Register interface ----
     jtag_reg_iface u_reg (
         .arst(1'b0),
-        .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo),
+        .tck(tap_tck), .tdi(tap_tdi), .tdo(), .tdo_next(tap_tdo_next),
         .capture(tap_capture), .shift_en(tap_shift),
         .update(tap_update), .sel(tap_sel),
         .reg_clk(jtag_clk), .reg_rst(jtag_rst),

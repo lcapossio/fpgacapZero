@@ -15,10 +15,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 # Vendor primitives are not RTL sources; their simulation stubs stand in.
+# Gowin's GW_JTAG declaration (rtl/gowin/gw_jtag.v) is in the manifest, and
+# the Efinix hub takes its TAP as ports.
 STUBS = {
     "xilinx7": ROOT / "sim" / "bscane2_stub.v",
     "xilinxus": ROOT / "sim" / "bscane2_stub.v",
     "intel": ROOT / "sim" / "sld_virtual_jtag_stub.v",
+    "ecp5": ROOT / "sim" / "jtagg_stub.v",
+    "polarfire": ROOT / "sim" / "ujtag_stub.v",
+    "gowin": None,
+    "efinix": None,
 }
 
 
@@ -47,7 +53,7 @@ class CoreManifestTests(unittest.TestCase):
                         ["iverilog", "-g2012", "-s", top,
                          "-o", str(Path(tmpdir) / f"{vendor}.vvp")]
                         + [arg for d in include_dirs for arg in ("-I", d)]
-                        + [str(stub)] + verilog,
+                        + ([str(stub)] if stub else []) + verilog,
                         capture_output=True,
                         text=True,
                     )

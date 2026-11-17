@@ -6,6 +6,12 @@
 Uses a 72-bit pipelined streaming DR — each scan shifts in a command and
 shifts out the previous result. One AXI transaction per scan.
 
+Bridges that report FEATURES[24] also have a streaming read
+(:meth:`EjtagAxiController.stream_read`): after CMD_STREAM_RSTART the DR
+turns into a chain of 33-bit slots, ``{data[31:0], valid}`` LSB first, so
+one long scan carries thousands of words.  Slot 0 of every stream scan is a
+header with ``valid=0`` and ``data`` = words not yet delivered.
+
 DR format (72 bits, LSB first):
   Shift-in:  [31:0]=addr, [63:32]=payload, [67:64]=wstrb, [71:68]=cmd
   Shift-out: [31:0]=rdata, [63:32]=info, [65:64]=resp, [67:66]=rsvd, [71:68]=status
@@ -29,10 +35,21 @@ CMD_BURST_SETUP  = 0x6
 CMD_BURST_WDATA  = 0x7
 CMD_BURST_RDATA  = 0x8
 CMD_BURST_RSTART = 0x9
+CMD_STREAM_RSTART = 0xA
 CMD_CONFIG       = 0xE
 CMD_RESET        = 0xF
 
 DR_WIDTH = 72
+STREAM_SLOT_W = 33  # streaming-read slot: {data[31:0], valid}, LSB first
+
+_CFG_AXI_STATUS = 0x0030
+# CFG_AXI_STATUS bits (bridges with FEATURES[25]).
+AXI_ST_WE_BUSY = 0x01      # write engine owns AW/W/B
+AXI_ST_WE_DETACHED = 0x02  # ...finishing a write nobody waits for
+AXI_ST_AR_HELD = 0x04      # ARVALID held after a timeout or RESET
+AXI_ST_R_DRAIN = 0x08      # discarding beats of an abandoned read
+AXI_ST_COLLECTING = 0x10   # burst write being collected (not on the bus yet)
+AXI_ST_OWED = 0x20         # anything on the bus: write engine, any read, held AR, drain
 
 _BRIDGE_CORE_ID = 0x4A58  # ASCII "JX"
 _BRIDGE_ID = _BRIDGE_CORE_ID  # compatibility alias for older tests/imports
@@ -42,6 +59,37 @@ _legacy_bridge_id_warned = False
 
 class AXIError(Exception):
     """Raised when an AXI transaction fails."""
+
+
+class _StreamLost(RuntimeError):
+    """A stream scan did not show what the host expected; restart the stream."""
+
+
+# Eight 33-bit slots are exactly 33 bytes.
+_STREAM_GROUP_BYTES = STREAM_SLOT_W
+_STREAM_GROUP_SHIFTS = tuple(range(0, 8 * STREAM_SLOT_W, STREAM_SLOT_W))
+
+
+def _stream_words(raw: int, nslots: int) -> list[int]:
+    """The data of every slot of a stream scan whose valid bit is set.
+
+    The scan is cut into 33-byte groups of eight slots and each group's slots
+    are taken by shift and mask on a small int: about twice as fast as
+    slicing a bit string, and on a fast cable parsing is most of the host's
+    time per scan.  Slot 0, the header, has its valid bit clear.
+    """
+    ngroups = -(-nslots // 8)
+    data = raw.to_bytes(ngroups * _STREAM_GROUP_BYTES, "little")
+    from_bytes = int.from_bytes
+    words: list[int] = []
+    extend = words.extend
+    for off in range(0, len(data), _STREAM_GROUP_BYTES):
+        group = from_bytes(data[off:off + _STREAM_GROUP_BYTES], "little")
+        extend([
+            (group >> (s + 1)) & 0xFFFFFFFF
+            for s in _STREAM_GROUP_SHIFTS if (group >> s) & 1
+        ])
+    return words
 
 
 class EjtagAxiController:
@@ -55,10 +103,21 @@ class EjtagAxiController:
 
     _MAX_BUSY_RETRIES = 16
 
+    # Streaming read: slots per DR scan (header included; 16384 slots = 540 kbit,
+    # about 18 ms of TCK at 30 MHz, the fastest size on the Arty A7), extra
+    # slots on the last scan for words the AXI side has not delivered yet,
+    # and how many scans in a row may come back empty before the stream
+    # counts as stalled.
+    _STREAM_SLOTS = 16384
+    _STREAM_SLACK = 64
+    _STREAM_MAX_EMPTY = 64
+
     def __init__(self, transport: Transport, chain: int = 4):
         self._transport = transport
         self._chain = chain
         self._fifo_depth: int = 0  # populated by connect() from FEATURES
+        self._stream: bool = False  # FEATURES[24], populated by connect()
+        self._safe_writes: bool = False  # FEATURES[25], populated by connect()
 
     def _encode(self, cmd: int, addr: int = 0, payload: int = 0,
                 wstrb: int = 0x0) -> int:
@@ -281,7 +340,63 @@ class EjtagAxiController:
             "addr_w": features & 0xFF,
             "data_w": (features >> 8) & 0xFF,
             "fifo_depth": ((features >> 16) & 0xFF) + 1,
+            "stream": bool((features >> 24) & 1),
+            "safe_writes": bool((features >> 25) & 1),
         }
+
+    @property
+    def has_stream(self) -> bool:
+        """True when the bridge reports the streaming read (FEATURES[24])."""
+        return self._stream
+
+    @property
+    def has_safe_writes(self) -> bool:
+        """True when the bridge reports the bus-safe write model (FEATURES[25]).
+
+        Such a bridge buffers a whole burst before AW, never drops a VALID
+        before its READY, always takes the B, refuses illegal bursts with
+        SLVERR before touching the bus, and has CFG_AXI_STATUS.
+        """
+        return self._safe_writes
+
+    def axi_status(self) -> dict:
+        """Read CFG_AXI_STATUS: what the bridge still owes the AXI slave.
+
+        After a timeout (SLVERR) the bridge keeps any VALID it raised until the
+        slave takes it and drains any read it started; this shows whether that
+        is still going on.  Needs FEATURES[25].
+        """
+        if not self._safe_writes:
+            raise RuntimeError(
+                "axi_status: bridge has no CFG_AXI_STATUS (FEATURES[25]=0)"
+            )
+        decoded = self._scan_batch(
+            [(CMD_CONFIG, _CFG_AXI_STATUS, 0, 0), (CMD_NOP, 0, 0, 0)]
+        )
+        raw = decoded[1][2] & 0x3F
+        return {
+            "raw": raw,
+            "write_busy": bool(raw & AXI_ST_WE_BUSY),
+            "write_detached": bool(raw & AXI_ST_WE_DETACHED),
+            "ar_held": bool(raw & AXI_ST_AR_HELD),
+            "r_drain": bool(raw & AXI_ST_R_DRAIN),
+            "collecting": bool(raw & AXI_ST_COLLECTING),
+            # Bit 5 is one flop on the AXI side: unlike [0], [2] and [3],
+            # which cross the clock domain independently, it cannot show a
+            # gap while an obligation passes from one flag to another.  It
+            # also covers a read still in flight, so idle means nothing at
+            # all is on the bus.
+            "idle": not (raw & AXI_ST_OWED),
+        }
+
+    @staticmethod
+    def _check_4k(name: str, base_addr: int, count: int) -> None:
+        """An INCR burst must not cross a 4 KiB boundary (AXI4)."""
+        if (base_addr & 0xFFC) + 4 * count > 0x1000:
+            raise ValueError(
+                f"{name}: {count} words from 0x{base_addr:X} cross a 4 KiB "
+                f"boundary (AXI4 forbids it); use {name}_range"
+            )
 
     def connect(self) -> dict:
         """Open transport, select chain, and probe bridge identity.
@@ -310,6 +425,7 @@ class EjtagAxiController:
             getattr(self._transport, "ready_probe_timeout", 2.0)
         )
         decoded = []
+        reread = False
         while True:
             decoded = self._scan_batch(
                 [
@@ -321,11 +437,23 @@ class EjtagAxiController:
             )
             _, _, identity_or_version, _ = decoded[1]
             core_id = identity_or_version & 0xFFFF
-            if (
-                core_id == _BRIDGE_CORE_ID
-                or identity_or_version == _LEGACY_BRIDGE_ID
-                or time.monotonic() >= deadline
-            ):
+            if core_id == _BRIDGE_CORE_ID or identity_or_version == _LEGACY_BRIDGE_ID:
+                break
+            if not reread:
+                # A session that dropped mid-command (a timeout, a cancel)
+                # could not send the RESET its close() would have: the
+                # bridge may still be in a streaming read, answering with
+                # stream slots.  The first CONFIG scan above carries TDI
+                # ones, which abort the stream like CMD_RESET, so asking
+                # again is enough -- even past the deadline, which the
+                # first read can use up waiting behind the dropped
+                # session's last scan.  No explicit RESET: if the chain
+                # holds another core (an EJTAG-UART answers CMD_RESET by
+                # flushing its FIFOs), the probe must stay harmless.
+                reread = True
+                time.sleep(0.02)
+                continue
+            if time.monotonic() >= deadline:
                 break
             time.sleep(0.02)
         _, _, identity_or_version, _ = decoded[1]
@@ -335,6 +463,8 @@ class EjtagAxiController:
         # FEATURES[23:16] = (FIFO_DEPTH - 1), AXI4 awlen convention.
         # Add 1 back to recover the true depth (max supported burst beats).
         self._fifo_depth = int(info["fifo_depth"])
+        self._stream = bool(info.get("stream", False))
+        self._safe_writes = bool(info.get("safe_writes", False))
         self._prime_cdc()
         return info
 
@@ -363,6 +493,8 @@ class EjtagAxiController:
                 _, _, features, _ = decoded[3]
                 info = self._decode_config(identity_or_version, legacy_version, features)
                 self._fifo_depth = int(info["fifo_depth"])
+                self._stream = bool(info.get("stream", False))
+                self._safe_writes = bool(info.get("safe_writes", False))
                 self._prime_cdc()
                 return info
             finally:
@@ -433,7 +565,8 @@ class EjtagAxiController:
 
         Raises:
             ValueError: If ``len(data)`` is 0, exceeds 256 (AXI4 max burst),
-                or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+                exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the
+                burst crosses a 4 KiB boundary (see :meth:`burst_write_range`).
         """
         n = len(data)
         if n == 0:
@@ -445,6 +578,7 @@ class EjtagAxiController:
                 f"burst_write: count {n} exceeds bridge FIFO_DEPTH "
                 f"({self._fifo_depth}); rebuild bitstream with larger FIFO_DEPTH"
             )
+        self._check_4k("burst_write", base_addr, n)
         burst_len = n - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
         scans = [(CMD_BURST_SETUP, base_addr, config, 0)]
@@ -483,7 +617,8 @@ class EjtagAxiController:
 
         Raises:
             ValueError: If ``count`` is <=0, exceeds 256 (AXI4 max burst),
-                or exceeds the bridge's FIFO_DEPTH reported in FEATURES.
+                exceeds the bridge's FIFO_DEPTH reported in FEATURES, or the
+                burst crosses a 4 KiB boundary (see :meth:`burst_read_range`).
                 The bridge cannot buffer more beats than its FIFO holds —
                 rebuild the bitstream with a larger FIFO_DEPTH parameter
                 if longer bursts are required.
@@ -497,6 +632,7 @@ class EjtagAxiController:
                 f"burst_read: count {count} exceeds bridge FIFO_DEPTH "
                 f"({self._fifo_depth}); rebuild bitstream with larger FIFO_DEPTH"
             )
+        self._check_4k("burst_read", base_addr, count)
         burst_len = count - 1
         config = (burst_len & 0xFF) | (0b010 << 8) | (0b01 << 12)
         scans = [
@@ -525,6 +661,187 @@ class EjtagAxiController:
         raise AXIError(
             f"Burst read still unresolved after {len(out)}/{count} beats"
         )
+
+    def _burst_chunks(self, base_addr: int, count: int) -> list[tuple[int, int, int]]:
+        """``(offset, addr, n)`` pieces of a *count*-word transfer from
+        *base_addr*: each at most 256 beats (AXI4) and ``FIFO_DEPTH``, and
+        none crossing a 4 KiB boundary (AXI4 forbids it for INCR bursts).
+        *base_addr* must be word-aligned and the range must end within the
+        32-bit address space."""
+        if base_addr % 4:
+            raise ValueError(f"burst range: base_addr 0x{base_addr:X} is not word-aligned")
+        if base_addr < 0 or base_addr + 4 * count > 1 << 32:
+            raise ValueError(
+                f"burst range: {count} words from 0x{base_addr:X} "
+                "run past the 32-bit address space"
+            )
+        limit = min(256, self._fifo_depth or 256)
+        chunks: list[tuple[int, int, int]] = []
+        done = 0
+        while done < count:
+            addr = base_addr + 4 * done
+            to_boundary = (0x1000 - (addr & 0xFFF)) // 4 or 1
+            n = min(limit, count - done, to_boundary)
+            chunks.append((done, addr, n))
+            done += n
+        return chunks
+
+    def burst_read_range(self, base_addr: int, count: int) -> list[int]:
+        """Read *count* consecutive words with as many :meth:`burst_read`
+        calls as it takes: bursts of at most 256 beats and ``FIFO_DEPTH``,
+        none crossing a 4 KiB boundary.  *base_addr* must be word-aligned
+        and the range must not wrap past 0xFFFFFFFF."""
+        if count <= 0:
+            raise ValueError(f"burst_read_range: count must be > 0, got {count}")
+        out: list[int] = []
+        for _, addr, n in self._burst_chunks(base_addr, count):
+            out.extend(self.burst_read(addr, n))
+        return out
+
+    def burst_write_range(self, base_addr: int, data: list[int],
+                          wstrb: int = 0xF) -> None:
+        """Write *data* to consecutive words with as many
+        :meth:`burst_write` calls as it takes (split as
+        :meth:`burst_read_range`)."""
+        if not data:
+            raise ValueError("burst_write_range: data must not be empty")
+        for offset, addr, n in self._burst_chunks(base_addr, len(data)):
+            self.burst_write(addr, data[offset:offset + n], wstrb=wstrb)
+
+    def stream_read(self, base_addr: int, count: int, *,
+                    slots_per_scan: int | None = None,
+                    retries: int = 2) -> list[int]:
+        """Read *count* consecutive words from *base_addr* with the streaming read.
+
+        CMD_RESET (the burst FIFO must start empty), CMD_STREAM_RSTART, then
+        long DR scans of 33-bit slots until every word is in; the AXI side
+        keeps the burst FIFO filled with bursts that never cross 4 KiB.  Each
+        scan's header must equal the words still owed, so a lost or repeated
+        word cannot go unnoticed: on a mismatch, a stall or a transport error
+        the stream is aborted (any TDI 1 in stream mode is a CMD_RESET) and
+        the whole range is read again, up to *retries* times.  The whole
+        range, because the AXI response of a stream (first non-OKAY resp) is
+        only reported once the stream completes: an aborted stream's words
+        were never checked.  Words are returned only after that response
+        reads OKAY.  A slot cut short by the end of a scan is re-sent by the
+        bridge.  Before an error is raised the stream is aborted, so the
+        bridge is back in normal mode for the next command.
+
+        Raises:
+            ValueError: unaligned address, ``count <= 0`` or a range past the
+                32-bit address space.
+            RuntimeError: the bridge has no streaming read (FEATURES[24]=0).
+            AXIError: an AXI read in the range returned a non-OKAY response,
+                or the stream failed more than *retries* times.
+        """
+        if count <= 0:
+            raise ValueError(f"stream_read: count must be > 0, got {count}")
+        if base_addr & 3:
+            raise ValueError(f"stream_read: address 0x{base_addr:X} is not word aligned")
+        if base_addr + 4 * count > 1 << 32:
+            raise ValueError("stream_read: range runs past the 32-bit address space")
+        if not self._stream:
+            raise RuntimeError(
+                "stream_read: bridge has no streaming read (FEATURES[24]=0); "
+                "rebuild the bitstream with STREAM_EN=1"
+            )
+        slots = slots_per_scan or self._STREAM_SLOTS
+        if slots < 2:
+            raise ValueError("stream_read: slots_per_scan must be >= 2")
+        failures = 0
+        # The stream's state lives in the bridge across many jtag sequences,
+        # and any other client's scan of this chain with a TDI 1 in it aborts
+        # it (on the bench: hw_server / debugger polls every few tens of ms).
+        # Transports that can lock the chain hold the lock for each attempt,
+        # including the abort after the last one.
+        lock = getattr(self._transport, "jtag_lock", None)
+        unlock = getattr(self._transport, "jtag_unlock", None)
+        while True:
+            if lock is not None:
+                lock()
+            try:
+                try:
+                    return self._stream_run(base_addr, count, slots)
+                except AXIError:
+                    # The range's own response: the stream has already ended.
+                    raise
+                except BaseException as exc:  # _StreamLost, transport I/O
+                    # Abort while the lock is still held: if the next lock()
+                    # or anything else fails, the bridge must not be left in
+                    # stream mode, where the next SET_ADDR would be an abort.
+                    self._abort_stream()
+                    if not isinstance(exc, Exception):
+                        raise
+                    failures += 1
+                    if failures > retries:
+                        raise AXIError(
+                            f"Stream read 0x{base_addr:08X}: {failures} "
+                            f"attempt(s) failed, last: {exc}"
+                        ) from exc
+            finally:
+                if unlock is not None:
+                    unlock()
+
+    def _abort_stream(self) -> None:
+        """Best effort: take the bridge out of stream mode (RESET's scan
+        carries TDI ones), so a later SET_ADDR is not read as an abort."""
+        try:
+            self._prime_cdc()
+        except Exception:  # noqa: BLE001 - the original error is what matters
+            pass
+
+    def _stream_run(self, addr: int, count: int, slots: int) -> list[int]:
+        """One stream of *count* words from *addr*.
+
+        A scan's words are only kept once the next scan's header confirms
+        how many the bridge delivered; the stream ends with a header-only
+        scan that must read 0, which is also what takes the bridge out of
+        stream mode.  The words are returned only after the range's AXI
+        response has been read and is OKAY.
+        """
+        context = f"Stream read 0x{addr:08X}"
+        # RESET also aborts a stream left running: its scan carries TDI ones.
+        self._prime_cdc()
+        self._scan(CMD_STREAM_RSTART, addr, count)
+        out: list[int] = []
+        left = count          # words the bridge still owes, once confirmed
+        pending: list[int] = []
+        empty = 0
+        while True:
+            owed = left - len(pending)
+            nslots = 1 if owed == 0 else min(slots, owed + 1 + self._STREAM_SLACK)
+            nbits = nslots * STREAM_SLOT_W
+            raw = self._transport.raw_dr_capture(nbits, chain=self._chain)
+            # Slot k is bit 33k (valid) and bits 33k+1 .. 33k+32 (data).
+            header = (raw >> 1) & 0xFFFFFFFF
+            if raw & 1 or header != owed:
+                raise _StreamLost(
+                    f"{context}: header valid={raw & 1} left={header}, "
+                    f"expected {owed} (word {count - owed} of {count})"
+                )
+            out.extend(pending)
+            left = owed
+            if left == 0:
+                break
+            pending = _stream_words(raw, nslots)
+            if len(pending) > left:
+                raise _StreamLost(
+                    f"{context}: {len(pending)} words in a scan, {left} owed"
+                )
+            if pending:
+                empty = 0
+            else:
+                empty += 1
+                if empty > self._STREAM_MAX_EMPTY:
+                    raise _StreamLost(
+                        f"{context}: no data for {empty} scans "
+                        f"(word {count - left} of {count})"
+                    )
+        # Stream mode ended at that header-only scan's UPDATE; the range's
+        # response (first non-OKAY resp) follows on a normal NOP, and
+        # _wait_valid raises AXIError on an error response.
+        self._wait_valid(context)
+        return out
 
     def close(self) -> None:
         """Wait for idle, send CMD_RESET to bridge, then close transport.

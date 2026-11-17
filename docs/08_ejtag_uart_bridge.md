@@ -115,9 +115,9 @@ print(info)
 #   "core_id": 0x4A55,
 #   "legacy_id": False,
 #   "legacy_raw_id": None,
-#   "version": 0x0004_4A55,
+#   "version": 0x0005_4A55,
 #   "version_major": 0,
-#   "version_minor": 4,
+#   "version_minor": 5,
 # }
 #  └─ ASCII "JU"  └─ major.minor + core_id packed
 ```

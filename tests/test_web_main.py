@@ -173,3 +173,59 @@ def test_launcher_dedupes_duplicate_stem(tmp_path, monkeypatch, capsys):
     )
     assert launcher.config_names == ["arty_a7"]  # first wins
     assert "duplicate OpenOCD config name" in capsys.readouterr().err
+
+
+def _run_main_without_server(monkeypatch, argv):
+    import sys
+    import types
+
+    ran = {}
+    monkeypatch.setitem(
+        sys.modules, "uvicorn",
+        types.SimpleNamespace(run=lambda app, host, port: ran.update(host=host)),
+    )
+    monkeypatch.setattr(web_main, "_build_openocd_launcher", lambda *a: None)
+    assert web_main.main(argv) == 0
+    return ran
+
+
+def test_prints_token_on_a_network_bind(monkeypatch, capsys):
+    monkeypatch.setattr(web_main.sys.stderr, "isatty", lambda: True, raising=False)
+    _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
+    err = capsys.readouterr().err
+    assert "API token: s3cret" in err
+    assert "WARNING" not in err
+
+
+def test_hides_token_when_stderr_is_not_a_terminal(monkeypatch, capsys):
+    monkeypatch.setattr(web_main.sys.stderr, "isatty", lambda: False, raising=False)
+    _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
+    err = capsys.readouterr().err
+    assert "s3cret" not in err
+    assert "API token set" in err
+
+
+def test_warns_without_token_and_keeps_loopback_quiet(monkeypatch, capsys):
+    monkeypatch.delenv("FCAPZ_WEB_TOKEN", raising=False)
+    _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", ""])
+    assert "WARNING" in capsys.readouterr().err
+    _run_main_without_server(monkeypatch, ["--token", "s3cret"])  # 127.0.0.1
+    assert "s3cret" not in capsys.readouterr().err
+
+
+def test_stderr_without_isatty_still_starts(monkeypatch, capsys):
+    class _Wrapper:  # a logging wrapper with write/flush only
+        def __init__(self):
+            self.out = []
+
+        def write(self, s):
+            self.out.append(s)
+
+        def flush(self):
+            pass
+
+    w = _Wrapper()
+    monkeypatch.setattr(web_main.sys, "stderr", w)
+    ran = _run_main_without_server(monkeypatch, ["--host", "0.0.0.0", "--token", "s3cret"])
+    assert ran["host"] == "0.0.0.0"
+    assert "s3cret" not in "".join(w.out)

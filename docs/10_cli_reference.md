@@ -6,9 +6,8 @@
 > usage lines and option tables are generated from the CLI itself
 > (`tools/gen_docs.py`), so they always match `fcapz --help`.
 >
-> **Audience**: anyone who wants to use fcapz from a shell instead
-> of writing Python.  Pre-read [chapter 03](03_first_capture.md) for
-> the guided walkthrough that uses many of these commands.
+> [Chapter 03](03_first_capture.md) is a guided walkthrough that uses
+> many of these commands.
 
 ## Invoking the CLI
 
@@ -37,7 +36,7 @@ subcommand follows:
 | `--host HOST` | `127.0.0.1` | Transport host (hw_server or OpenOCD) |
 | `--port PORT` | `6666` | Transport TCP port. Left at 6666, hw_server uses its own port 3121; usb_blaster ignores it |
 | `--tap TAP` | `xc7a100t.tap` | OpenOCD TAP name, hw_server FPGA target, or Quartus device name (usb_blaster: auto, empty, or this default selects the first device; ftdi: this default detects the family from the IDCODE) |
-| `--hardware NAME` | — | usb_blaster: Quartus hardware name (default: first USB-Blaster); ftdi: adapter channel description or serial (default: the one FlashPro/Digilent channel A found) |
+| `--hardware NAME` | — | usb_blaster: Quartus hardware name (default: first USB-Blaster); ftdi: adapter channel description or serial, or usb:DESCRIPTION / usb:SERIAL for a libusb channel (default: the one FlashPro/Digilent/KV260 channel A found) |
 | `--quartus-stp PATH` | — | usb_blaster only: path to quartus_stp executable (default: found on PATH) |
 | `--tck-mhz MHZ` | `6.0` | ftdi only: JTAG clock in MHz (30 MHz / integer divisor; default 6) |
 | `--serial-port PORT` | — | serial only: port of the TAP bridge, e.g. COM5 or /dev/ttyACM0 |
@@ -47,7 +46,7 @@ subcommand follows:
 | `--no-burst` | off | hw_server/usb_blaster/openocd/ftdi: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
 | `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: the first ELA slot behind a core manager) |
-| `--program BITFILE` | — | hw_server only: run fpga -file on this .bit before the command (slow). Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
+| `--program BITFILE` | — | hw_server: run fpga -file on this .bit before the command (slow); ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin over JTAG. Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
 
 <!-- END GENERATED cli:global -->
 
@@ -58,6 +57,9 @@ Examples:
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       --program my_design.bit \
       probe
+
+# direct FTDI cable: configure an AMD/Xilinx 7-series FPGA over JTAG, no Vivado
+fcapz --backend ftdi --tck-mhz 30 --program my_design.bit probe
 
 # openocd with default port and tap
 fcapz --backend openocd probe
@@ -154,7 +156,8 @@ OpenOCD's `ftdi` driver cannot open; replacing it with WinUSB (Zadig) breaks
 the vendor tools.  The bridge opens the adapter through D2XX instead and
 OpenOCD connects to it, so OpenOCD-based flows keep working next to Libero or
 Vivado (one program at a time on the cable).  `--hardware` names the adapter
-(D2XX description or serial); omit it when one is attached.  The bridge
+(description or serial, optionally prefixed with `usb:` for libusb); omit it
+only when exactly one recognised adapter is attached.  The bridge
 listens on `127.0.0.1` only, prints the OpenOCD adapter lines to use, and
 exits when OpenOCD shuts down (or on Ctrl-C).
 
@@ -174,10 +177,13 @@ transport select jtag
 TCK runs as fast as OpenOCD's bit stream crosses USB.  TRST drives the
 FlashPro5's nTRST pin, so a `reset_config trst_only` config works there; other
 adapters have no TRST here, and the bridge then prints `reset_config none`
-with the adapter lines.  SRST is never driven.  OpenOCD's
+with the adapter lines.  SRST is never driven.  An FT2232-compatible adapter
+whose MPSSE pin commands do nothing (the BRS-100's) is served with clocked
+commands instead; the bridge says so when it starts.  OpenOCD's
 `remote_bitbang use_remote_sleep on` delays are honoured in order.  The pin
-layouts are the ones `--backend ftdi` knows (FlashPro5, and Digilent cables
-wired like the Arty's: buffer enable on ADBUS7); a Digilent JTAG-HS2 needs a
+layouts are the ones `--backend ftdi` knows (FlashPro5, Digilent cables
+wired like the Arty's: buffer enable on ADBUS7, and the KV260 carrier,
+`ML Carrier Card`: ADBUS5 low); a Digilent JTAG-HS2 needs a
 layout that is not there yet.  See
 [OpenOCD on Windows](14_transports.md#openocd-on-windows-through-fcapz-openocd-bridge).
 
@@ -226,7 +232,7 @@ Output (formatted JSON to stdout):
 ```json
 {
   "version_major": 0,
-  "version_minor": 3,
+  "version_minor": 5,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
@@ -418,7 +424,9 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out decim.json
 
-# Storage qualification (only store samples where bit 0 is high)
+# Storage qualification (only store samples where bit 0 is high).
+# Needs a STOR_QUAL=1 build; the reference Arty bitstream is STOR_QUAL=0
+# and fails with "storage qualification not present in this bitstream".
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --pretrigger 4 --posttrigger 16 \
@@ -428,7 +436,10 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out sparse.json
 
-# Multi-stage trigger sequencer (inline JSON)
+# Multi-stage trigger sequencer (inline JSON).
+# Needs a build with TRIG_STAGES >= the number of stages (2 here); the
+# reference Arty bitstream is TRIG_STAGES=1 and fails with
+# "sequence has 2 stages but hw supports only 1".
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --pretrigger 4 --posttrigger 16 \
@@ -439,7 +450,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out sequenced.json
 
-# Same, but loaded from a JSON file
+# Same, but loaded from a JSON file (same TRIG_STAGES requirement)
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --trigger-sequence my_sequence.json \
@@ -677,7 +688,7 @@ Usage: `fcapz [global options] axi-dump --addr ADDR --count N [--chain N] [--bur
 | `--addr ADDR` | required | Start address (hex) |
 | `--count N` | required | Number of 32-bit words to read |
 | `--chain N` | `4` | BSCANE2 USER chain |
-| `--burst` | off | Use AXI4 burst transfers (count <= the bridge FIFO_DEPTH) |
+| `--burst` | off | Use AXI4 burst transfers (split into FIFO_DEPTH-sized bursts) |
 
 <!-- END GENERATED cli:axi-dump -->
 
@@ -690,8 +701,8 @@ $ fcapz --backend hw_server --port 3121 --tap xc7a100t \
 ```
 
 `--burst` switches from auto-increment block read to AXI4 burst
-read; the host refuses a count above the bridge's `FIFO_DEPTH` with a
-clear error.
+read. A count above the bridge's `FIFO_DEPTH` is split into several
+bursts, none longer than 256 beats or crossing a 4 KiB boundary.
 
 ### `axi-fill`
 

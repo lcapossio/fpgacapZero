@@ -2,19 +2,19 @@
 
 > [!NOTE]
 > **Goal**: by the end of this chapter you will have built the
-> reference Arty A7 bitstream, opened the desktop GUI, programmed
-> the FPGA, captured a waveform that triggers on a specific value,
-> and exported the same capture from the CLI for automation.
+> reference Arty A7 bitstream, programmed the FPGA, captured a
+> waveform that triggers on a specific value in the web interface,
+> and repeated the same capture from the CLI for automation.
 >
 > **What you need**: an Arty A7-100T (or any AMD/Xilinx 7-series board
 > if you adapt the build script), a USB cable to your PC, Vivado
 > 2025.2 (or 2022.2+) with `hw_server` and `xsdb` on PATH, a working
-> `fcapz` install with the GUI extra per [chapter 02](02_install.md),
+> `fcapz` install with the `web` extra per [chapter 02](02_install.md),
 > and optionally GTKWave / Surfer / WaveTrace on PATH for external
 > waveform viewing.
 
 This walkthrough uses the Arty A7 / AMD/Xilinx `hw_server` reference
-design.  For Intel/Altera boards, use the same GUI capture panels
+design.  For Intel/Altera boards, use the same web capture panels
 after choosing the `usb_blaster` backend and loading a bitstream that
 instantiates the Intel wrappers; see [chapter 02](02_install.md) and
 [chapter 14](14_transports.md).
@@ -24,26 +24,29 @@ instantiates the Intel wrappers; see [chapter 02](02_install.md) and
 
 The reference design is at [`../examples/arty_a7/`](../examples/arty_a7/).
 It instantiates a USER1 debug manager with two ELA slots and two EIO
-slots, plus one EJTAG-AXI bridge.  ELA0 captures a free-running 8-bit
-counter in a generated 150 MHz sample domain.  ELA1 captures a separate
-130 MHz counter xored with `0xA5`.  EIO0 drives the board LED/control
-test signals, and EIO1 gives a second managed I/O target for
-slot-selection checks.  The AXI bridge is wired to a small AXI test slave
-so you have something to look at from each host path.
+slots, an AXI monitor on USER2, and an EJTAG-AXI bridge on USER4.  ELA0
+captures a free-running 8-bit counter in a generated 150 MHz sample
+domain.  ELA1 captures a separate 130 MHz counter xored with `0xA5`.  EIO0
+drives the board LED/control test signals, and EIO1 gives a second
+managed I/O target for slot-selection checks.  An open-source VexRiscv CPU
+and the AXI bridge share a small AXI test slave, which the AXI monitor
+watches, so you have something to look at from each host path.
+
+The VexRiscv firmware needs a bare-metal RISC-V GCC.  Set `RISCV_PREFIX` to
+its prefix (the build also tries common prefixes on `PATH`):
 
 ```bash
 cd /path/to/fpgacapZero
-python examples/arty_a7/build.py
+RISCV_PREFIX=riscv64-unknown-elf- python examples/arty_a7/build.py
 ```
 
-This launches Vivado in batch mode via [`build.py`](../examples/arty_a7/build.py).
-Expect 10-15 minutes on a reasonable machine.  When it finishes you
-will have:
+This compiles the firmware and launches Vivado in batch mode via
+[`build.py`](../examples/arty_a7/build.py).  Expect 10-15 minutes on a
+reasonable machine.  When it finishes you will have:
 
 ```
-examples/arty_a7/arty_a7_top.bit         (the bitstream)
-vivado/logs/vivado_build.log             (the full Vivado log)
-vivado/logs/vivado_build.jou             (the journal)
+examples/arty_a7/arty_a7_vex_top.bit     (the bitstream)
+vivado/logs/                             (the Vivado logs)
 ```
 
 > If the build fails with `Project 1-161: Failed to remove the
@@ -76,45 +79,15 @@ You only need to do this once per session — `hw_server -d`
 backgrounds itself and stays alive until you reboot or
 `pkill hw_server`.
 
-## Step 3: open the GUI, program the FPGA, and probe the core
+## Step 3: program the FPGA and probe the core
 
-Start the desktop GUI:
-
-```bash
-fcapz-gui
-```
-
-In the **Connection** panel:
-
-- Set **Backend** to `hw_server`.
-- Set **Host** to `127.0.0.1` and **Port** to `3121`.
-- Set **FPGA target** to `xc7a100t`.
-- Set **Bitfile** to `examples/arty_a7/arty_a7_top.bit`.
-- Leave **Program on connect** enabled for this first run.
-- Click **Connect**.
-
-The screenshot below shows where those connection fields live; your exact
-bitfile path and checkbox state should match the steps above.
-
-<p align="center">
-  <img src="assets/fcapz-gui-connection.png" alt="fcapz-gui Connection panel with backend, host, port, target, bitfile, and timeout fields" width="760">
-</p>
-
-The GUI connects to `hw_server`, programs the FPGA, waits for the ELA
-registers to become readable, and probes the core.  You should see the ELA
-tab populate with the reference bitstream's hardware parameters:
-`sample_width=8`, `depth=1024`, timestamps enabled, and 4 capture segments.
-
-If the GUI reports that the FPGA did not become ready, the same readiness
-wait would fail from the CLI too.  Check the board cable, `hw_server`, the
-selected FPGA target, and the bitfile path.
-
-The command-line equivalent is:
+The web interface connects to a board that is already programmed, so load the
+bitstream from the CLI first.  The same command checks that the ELA answers:
 
 ```bash
 fcapz --backend hw_server --port 3121 \
       --tap xc7a100t \
-      --program examples/arty_a7/arty_a7_top.bit \
+      --program examples/arty_a7/arty_a7_vex_top.bit \
       probe
 ```
 
@@ -126,19 +99,22 @@ The `--program` flag tells fcapz to:
 
 1. Connect to `hw_server`.
 2. Bind the JTAG target named `xc7a100t`.
-3. Send `fpga -file examples/arty_a7/arty_a7_top.bit` to xsdb.
+3. Send `fpga -file examples/arty_a7/arty_a7_vex_top.bit` to xsdb.
 4. Wait for the FPGA to come up — this is the **readiness wait** I
    added in v0.2.0; it polls the ELA `VERSION` register up to 2 s
    until it returns a non-zero value.  If it stays zero, you get
    a clear `ConnectionError: FPGA did not become ready within 2.0s`.
 5. Run the actual subcommand (`probe`).
 
+If the readiness wait fails, check the board cable, `hw_server`, the FPGA
+target name, and the bitfile path.
+
 Expected output:
 
 ```json
 {
   "version_major": 0,
-  "version_minor": 3,
+  "version_minor": 5,
   "core_id": 19521,
   "sample_width": 8,
   "depth": 1024,
@@ -167,52 +143,77 @@ The interesting numbers:
   has decimation, ext-trigger, timestamps, and 4-segment memory all
   enabled.
 
-## Step 4: capture a waveform in the GUI
+## Step 4: capture a waveform in the web interface
+
+Start the web interface and open <http://127.0.0.1:7373> in a browser:
+
+```bash
+fcapz-web
+```
+
+In the **Connection** tab:
+
+- Set **Backend** to `hw_server`.
+- Set **Host** to `127.0.0.1` and **Port** to `3121`.
+- Set **Tap** to `xc7a100t`.  Left blank, it is detected from the board;
+  when `hw_server` sees several targets, Connect lists them to pick from.
+- Click **Connect**.
+
+<p align="center">
+  <img src="assets/fcapz-web-connection.png" alt="fcapz-web Connection tab with backend hw_server, host 127.0.0.1, port 3121 and tap xc7a100t" width="760">
+</p>
+
+The dock jumps to the **Cores** tab, which lists the cores behind the USER1
+debug manager: the two ELAs, the manager itself, and the two EIOs.  Each ELA
+shows its parameters: sample width 8, depth 1024, timestamps, and 4 segments.
+The session uses the first ELA, which captures the plain counter in the
+150 MHz domain.
 
 The reference design's probe is a free-running 8-bit counter
 (`probe_in[7:0]`) so we know it eventually hits any value 0–255.
 We will trigger on the counter reaching `0x42`, capture 8 samples before
 and 16 samples after the trigger, and inspect the result in the embedded
-waveform preview.
+waveform viewer.
 
 In the **ELA** tab:
 
-- Leave **ELA core** set to `core 0` for the plain counter.  On the
-  Arty reference bitstream, `core 1` is a second managed ELA in a 130 MHz
-  sample domain capturing `counter_130 ^ 0xA5`.
-- Set **Pretrigger** to `8`.
-- Set **Posttrigger** to `16`.
-- Set **Trigger mode** to `value_match`.
-- Set **Trigger value** to `0x42`.
-- Set **Trigger mask** to `0xFF`.
-- Set **Probes** to `counter:8:0`.
-- Click **Capture**.
+- Set **Samples (window)** to `25`.
+- Set **Trigger position** to `9`.  The line under the slider then starts
+  `8 pre · trigger @ 9 · 16 post — 25 samples`.
+- Under **Probe definitions**, type `counter:8:0` into **Named signals**.
 
-The ELA capture panel groups the trigger, pre/post-trigger window, probe
-profile, and sample-clock controls in one place:
+In the **Trigger** drawer (hover the ⚡ Trigger rail on the viewer's edge):
+
+- Pick `counter` from **+ Add probe…**.
+- Leave the operator at `==`, set the radix to **[H]**, and enter `42`.
+
+Then click **Arm** in the Run bar.  The status pulses **armed - waiting for
+trigger** until the counter reaches `0x42`, which is almost at once here, and
+the capture opens in the **Viewer: ELA** tab, the embedded Surfer waveform
+viewer.
 
 <p align="center">
-  <img src="assets/fcapz-gui-capture.png" alt="fcapz-gui ELA capture panel with trigger and pre/post-trigger controls" width="900">
+  <img src="assets/fcapz-web-capture.png" alt="fcapz-web after the capture: the ELA window set to 25 samples with the trigger at 9, the Trigger drawer with counter == 0x42, and the waveform with 0x42 at the trigger marker" width="900">
 </p>
 
 You should see 25 samples: 8 before the trigger, the trigger sample, and
-16 after it.  The value at index `8` should be `0x42`, and the surrounding
-samples should be the counter incrementing.  That pre-trigger context is
+16 after it.  The trigger sample, the 9th, is `0x42`, and the surrounding
+samples are the counter incrementing.  That pre-trigger context is
 the killer feature of an in-chip logic analyzer: you get to see what
 happened before the event, not only after it.
 
-From the GUI you can also save the capture as JSON / CSV / VCD, or open the
-VCD in an external viewer if GTKWave, Surfer, or WaveTrace is installed.
-To compare the two managed ELAs, capture once with **ELA core** `core 0`,
-capture again with `core 1`, Ctrl/Shift-select both rows in History, then
-click **Open selected in viewer**.  The GUI writes one merged VCD with
-`fcapz.ela0.*` and `fcapz.ela1.*` scopes aligned at the trigger sample;
-Surfer and GTKWave can show both ELAs in the same waveform window.
+**Download…** in the Run bar saves the capture as VCD, CSV or JSON.  The
+second ELA, which captures `counter_130 ^ 0xA5` at 130 MHz, sits in the same
+debug manager; capture it from the CLI with `--ela-instance 1` (and
+`--sample-clock-hz 130000000`).
+
+Click **Disconnect** in the **Connection** tab before the next step, so the CLI
+has the cable to itself.
 
 ## Step 5: repeat the same capture from the CLI
 
-The GUI is the friendliest way to confirm the hardware path is alive.  The
-CLI gives you the same capture flow in a form you can paste into scripts,
+The web interface is the friendliest way to confirm the hardware path is
+alive.  The CLI gives you the same capture flow in a form you can paste into scripts,
 CI jobs, or lab notebooks.
 
 ```bash
@@ -225,11 +226,15 @@ fcapz --backend hw_server --port 3121 \
         --trigger-value 0x42 \
         --trigger-mask 0xFF \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --out my_capture.json
 ```
 
+`--sample-clock-hz` records ELA0's 150 MHz sample clock in the export;
+without it the CLI assumes 100 MHz.
+
 Note we do **not** pass `--program` this time — the bitstream is
-already loaded from the GUI step.  Reprogramming on every command is wasteful;
+already loaded from step 3.  Reprogramming on every command is wasteful;
 once is enough.
 
 What just happened:
@@ -269,7 +274,7 @@ python -m json.tool my_capture.json | head -40
 ```json
 {
     "version": "1.0",
-    "sample_clock_hz": 100000000,
+    "sample_clock_hz": 150000000,
     "sample_width": 8,
     "depth": 1024,
     "pretrigger": 8,
@@ -316,6 +321,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-value 0x42 \
         --trigger-mask 0xFF \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format vcd \
         --out my_capture.vcd
 ```
@@ -343,8 +349,9 @@ showcase the features.  Each one is a deeper dive in a later chapter.
 
 ### a. Edge-detect trigger (chapter 05)
 
-Trigger when bit 0 of the counter rises (which it does every cycle —
-this is the highest-frequency signal you can pick):
+Trigger when bit 0 of the counter changes.  `edge_detect` fires on either
+edge, and bit 0 toggles every cycle, so this is the highest-frequency
+trigger you can pick:
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -355,6 +362,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-value 0 \
         --trigger-mask 0x01 \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format vcd --out edge.vcd
 ```
 
@@ -373,6 +381,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-mask 0xFF \
         --trigger-delay 4 \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format json --out delayed.json
 ```
 
@@ -395,18 +404,21 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --trigger-mask 0xFF \
         --decimation 3 \
         --probes counter:8:0 \
+        --sample-clock-hz 150000000 \
         --format json --out decim.json
 ```
 
-The captured samples will be `0x20, 0x24, 0x28, ...` — counter
-values 4 apart, because of `decimation=3` (store every N+1 = 4th).
+The trigger sample is `0x20`, and after the first post-trigger sample the
+values step by 4, because `decimation=3` stores every N+1 = 4th sample.
+The two intervals next to the trigger sample can be shorter: the trigger
+sample is always stored, and the decimation counter does not restart at the
+trigger.
 
 ### d. EIO read/write (chapter 06)
 
 The reference design wires two managed EIO slots behind the USER1 core
-manager.  Slot 2 is EIO0, the board-control EIO used by the GUI; slot 3
-is EIO1, an independent second EIO for selection/readback checks.  Pass
-`--chain 1 --instance N` to select one:
+manager.  Slot 2 is EIO0, the board-control EIO; slot 3 is EIO1, an
+independent second EIO for selection/readback checks.  Pass `--chain 1 --instance N` to select one:
 
 ```bash
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
@@ -441,7 +453,7 @@ or kill it from Task Manager (Windows).
 
 | Concept | Chapter |
 |---|---|
-| The desktop GUI (`fcapz-gui`) | [12 — Desktop GUI](12_gui.md) |
+| The web interface (`fcapz-web`) | [18 — Web interface](18_web_interface.md) |
 | `fcapz` CLI options and subcommands | [10 — CLI reference](10_cli_reference.md) |
 | `Analyzer.configure / arm / capture` Python API | [09 — Python API](09_python_api.md) |
 | `--probes name:width:lsb` syntax | [04 — RTL integration](04_rtl_integration.md), [09 — Python API](09_python_api.md) |
@@ -458,8 +470,8 @@ or kill it from Task Manager (Windows).
 In about 10 minutes you have:
 
 - Built a real bitstream with three fpgacapZero cores
-- Programmed it onto an Arty A7 from the GUI
-- Captured a waveform with pre/post-trigger context in the GUI
+- Programmed it onto an Arty A7 from the CLI
+- Captured a waveform with pre/post-trigger context in the web interface
 - Verified the trigger landed on the right sample
 - Exported to JSON and VCD
 - Opened the VCD in GTKWave

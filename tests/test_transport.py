@@ -173,6 +173,46 @@ class XsdbTargetParserTests(unittest.TestCase):
         handles[0].cancel()
         proc.kill.assert_called_once()
 
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_list_jtag_targets_reaps_xsdb_when_the_registration_is_refused(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        """A cancel that came first refuses the registration: the child is
+        killed and reaped, not leaked with its pipes."""
+        proc = self._xsdb_proc("* 1  xck26\n")
+        popen_mock.return_value = proc
+
+        def refuse(_handle):
+            raise RuntimeError("request cancelled")
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            list_xilinx_hw_server_targets(host="localhost", port=3121, register=refuse)
+        proc.kill.assert_called()
+        proc.communicate.assert_called()
+
+    @patch("shutil.which", return_value="xsdb")
+    def test_hw_server_cancel_while_xsdb_spawns_fails_the_connect(
+        self, _which_mock: MagicMock
+    ) -> None:
+        """cancel() before _proc points at the child cannot kill it; connect
+        notices the cancel and reaps the child instead of waiting it out."""
+        t = XilinxHwServerTransport()
+        proc = MagicMock()
+
+        def spawning(*_a, **_k):
+            t.cancel()  # lands while Popen runs: t._proc is still None
+            return proc
+
+        with patch("subprocess.Popen", side_effect=spawning):
+            with self.assertRaisesRegex(ConnectionError, "cancelled"):
+                t.connect()
+        proc.kill.assert_called()
+        proc.communicate.assert_called()
+        self.assertIsNone(t._proc)
+
 # ---------------------------------------------------------------------------
 # Transport ABC contract
 # ---------------------------------------------------------------------------
@@ -263,6 +303,13 @@ class TransportAbcTests(unittest.TestCase):
 # OpenOcdTransport failure modes
 # ---------------------------------------------------------------------------
 
+def _openocd_sock() -> MagicMock:
+    """A socket that sends no banner and answers connect()'s sync."""
+    sock = MagicMock()
+    sock.recv.side_effect = [b"", b"1"]
+    return sock
+
+
 class OpenOcdConnectFailureTests(unittest.TestCase):
     """OpenOCD transport failure modes — socket-level mocks."""
 
@@ -313,8 +360,7 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
 
     def test_connect_resolves_auto_tap_to_first(self):
         """tap='auto' is resolved to the first tap OpenOCD reports on connect."""
-        mock_sock = MagicMock()
-        mock_sock.recv.return_value = b""
+        mock_sock = _openocd_sock()
         with patch("socket.create_connection", return_value=mock_sock), patch.object(
             OpenOcdTransport, "list_taps", return_value=["GW1NR-9C.tap", "other.tap"]
         ):
@@ -323,8 +369,7 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             self.assertEqual(t.tap, "GW1NR-9C.tap")
 
     def test_connect_closes_a_live_socket_first(self):
-        old, new = MagicMock(), MagicMock()
-        new.recv.return_value = b""
+        old, new = MagicMock(), _openocd_sock()
         t = OpenOcdTransport(tap="GW1NR-9C.tap")
         t._sock = old
         with patch("socket.create_connection", return_value=new):
@@ -334,8 +379,7 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
 
     def test_connect_keeps_explicit_tap(self):
         """A concrete tap name is left untouched (no auto-resolution)."""
-        mock_sock = MagicMock()
-        mock_sock.recv.return_value = b""
+        mock_sock = _openocd_sock()
         with patch("socket.create_connection", return_value=mock_sock), patch.object(
             OpenOcdTransport, "list_taps"
         ) as list_taps:
@@ -343,6 +387,99 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             t.connect()
             self.assertEqual(t.tap, "GW1NR-9C.tap")
             list_taps.assert_not_called()
+
+    # BUG-293: a reply cut short ends the session; cancel() wakes the call.
+
+    def test_timeout_mid_reply_retires_the_session(self):
+        import socket
+
+        sock = MagicMock()
+        sock.recv.side_effect = [b"0x12", socket.timeout("timed out")]
+        t = OpenOcdTransport(tap="x.tap")
+        t._sock = sock
+        with self.assertRaises(TimeoutError):
+            t._cmd("drscan x.tap 49 0x0")
+        self.assertIsNone(t._sock)
+        sock.close.assert_called_once()
+        # The late tail is never read as the next reply.
+        with self.assertRaisesRegex(ConnectionError, "dropped.*reconnect"):
+            t._cmd("version")
+
+    def test_bytes_past_the_terminator_retire_the_session(self):
+        sock = MagicMock()
+        sock.recv.return_value = b"0x1\x1alate"
+        t = OpenOcdTransport(tap="x.tap")
+        t._sock = sock
+        with self.assertRaisesRegex(ConnectionError, "past the end"):
+            t._cmd("version")
+        self.assertIsNone(t._sock)
+
+    def test_cancel_wakes_a_blocked_reply(self):
+        import socket
+
+        ours, openocd = socket.socketpair()
+        self.addCleanup(openocd.close)
+        ours.settimeout(10)
+        t = OpenOcdTransport(tap="x.tap")
+        t._sock = ours
+        errors: list[BaseException] = []
+
+        def call():
+            try:
+                t._cmd("version")  # OpenOCD never answers
+            except BaseException as exc:  # noqa: BLE001 - recorded for the check
+                errors.append(exc)
+
+        worker = threading.Thread(target=call)
+        worker.start()
+        time.sleep(0.2)
+        t0 = time.monotonic()
+        t.cancel()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ConnectionError)
+        self.assertIn("cancelled", str(errors[0]))
+
+    def test_cancel_during_connect_publishes_no_socket(self):
+        sock = MagicMock()
+        sock.recv.return_value = b""
+        t = OpenOcdTransport(tap="x.tap")
+
+        def connect_cancelled(*args, **kwargs):
+            t.cancel()  # arrives while the TCP connect is in progress
+            return sock
+
+        with patch("socket.create_connection", side_effect=connect_cancelled):
+            with self.assertRaisesRegex(ConnectionError, "cancelled"):
+                t.connect()
+        self.assertIsNone(t._sock)
+        sock.close.assert_called()
+
+    def test_connect_after_a_cancel_starts_a_new_session(self):
+        t = OpenOcdTransport(tap="x.tap")
+        t._sock = MagicMock()
+        t.cancel()
+        new = _openocd_sock()
+        with patch("socket.create_connection", return_value=new):
+            t.connect()
+        self.assertIs(t._sock, new)
+
+    def test_connect_waits_for_a_dropped_sessions_last_line(self):
+        """OpenOCD finishes a dropped session's line (a stream read's long
+        scan) before it serves the next client: connect waits for that with
+        a long timeout, then restores the base one."""
+        sock = _openocd_sock()
+        t = OpenOcdTransport(tap="x.tap")
+        with patch("socket.create_connection", return_value=sock):
+            t.connect()
+        sync = sock.sendall.call_args_list[0].args[0]
+        self.assertEqual(sync, b"set __fcapz_sync 1")
+        timeouts = [c.args[0] for c in sock.settimeout.call_args_list]
+        self.assertEqual(
+            timeouts, [0.2, 5, OpenOcdTransport._CONNECT_SYNC_TIMEOUT_SEC, 5.0]
+        )
 
     def test_resolve_auto_tap_raises_when_no_taps(self):
         """tap='auto' against an OpenOCD with no taps gives a clear error."""

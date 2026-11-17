@@ -243,12 +243,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .app import _is_loopback, create_app
 
     static_dir = args.static_dir or _default_static_dir()
-    if not _is_loopback(args.host) and not args.token:
-        print(
-            f"WARNING: binding {args.host} without --token — the connected board is "
-            "reachable by anyone who can reach this port.",
-            file=sys.stderr,
-        )
+    if not _is_loopback(args.host):
+        isatty = getattr(sys.stderr, "isatty", None)
+        if args.token and callable(isatty) and isatty():
+            # A token generated inline (`$(openssl rand ...)`) is otherwise
+            # nowhere to be read back, and the browser needs it.  Only to a
+            # terminal: redirected stderr usually lands in a log file.
+            print(
+                f"fcapz-web: API token: {args.token} (paste it into the UI's "
+                "API token field)",
+                file=sys.stderr,
+            )
+        elif args.token:
+            print(
+                "fcapz-web: API token set (not shown: stderr is not a terminal)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"WARNING: binding {args.host} without --token — the connected board is "
+                "reachable by anyone who can reach this port.",
+                file=sys.stderr,
+            )
     launcher = _build_openocd_launcher(args.openocd, args.openocd_cfg, args.openocd_cfg_dir)
     app = create_app(
         token=args.token,

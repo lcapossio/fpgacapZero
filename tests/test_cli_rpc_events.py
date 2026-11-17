@@ -782,6 +782,14 @@ class RpcBooleanValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RpcServer._build_config({"post_clocks": -1})
 
+    def test_probe_sel(self):
+        self.assertEqual(RpcServer._build_config({}).probe_sel, 0)
+        self.assertEqual(RpcServer._build_config({"probe_sel": 5}).probe_sel, 5)
+        self.assertEqual(RpcServer._build_config({"probe_sel": 255}).probe_sel, 255)
+        for bad in (-1, 256):
+            with self.assertRaises(ValueError):
+                RpcServer._build_config({"probe_sel": bad})
+
 
 class CliSerialTests(unittest.TestCase):
     def test_serial_backend_builds_the_bridge_transport(self):
@@ -904,7 +912,7 @@ class RpcTests(unittest.TestCase):
 
         connect_resp = server.handle({"cmd": "connect"})
         self.assertTrue(connect_resp["ok"])
-        self.assertEqual(connect_resp["schema_version"], "1.1")
+        self.assertEqual(connect_resp["schema_version"], "1.2")
 
         csv_resp = server.handle(
             {
@@ -992,6 +1000,22 @@ class ChainShapeKwargsTests(unittest.TestCase):
         self.assertEqual(t.dr_extra_bits, 0)
 
 
+class RpcFtdiProgramTests(unittest.TestCase):
+    def test_connect_program_reaches_the_ftdi_transport(self):
+        t = RpcServer()._build_transport({"backend": "ftdi", "program": "top.bit"})
+        self.assertEqual(t.bitfile, "top.bit")
+        self.assertIsNone(RpcServer()._build_transport({"backend": "ftdi"}).bitfile)
+
+    def test_side_connects_never_program(self):
+        # An EIO/AXI/UART controller's own transport must not reprogram the
+        # FPGA under the session, even if the client sends `program`.
+        for backend in ("ftdi", "hw_server"):
+            with self.subTest(backend=backend):
+                req = {"backend": backend, "program": "top.bit"}
+                self.assertIsNone(RpcServer()._new_transport(req, side=True).bitfile)
+                self.assertEqual(req["program"], "top.bit")  # caller's dict untouched
+
+
 class RpcChainShapeTests(unittest.TestCase):
     """The RPC server (web UI, MCP) builds hw_server transports like the CLI."""
 
@@ -1072,6 +1096,15 @@ class MakeTransportTests(unittest.TestCase):
         t = _make_transport(args)
         self.assertIsInstance(t, OpenOcdTransport)
         self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_EFINIX)
+
+    def test_openocd_ecp5_tap_uses_ecp5_ir_table(self):
+        for tap in ("ecp5.tap", "lfe5u25.tap", "LFE5UM5G-85F.tap"):
+            args = argparse.Namespace(
+                backend="openocd", host="127.0.0.1", port=6666, tap=tap,
+            )
+            t = _make_transport(args)
+            self.assertEqual(t.ir_table, OpenOcdTransport.IR_TABLE_ECP5, tap)
+            self.assertEqual(t.ir_table, {1: 0x32, 2: 0x38})
 
     def test_openocd_xilinx_tap_keeps_default_ir_table(self):
         args = argparse.Namespace(
@@ -1159,6 +1192,9 @@ class MakeTransportTests(unittest.TestCase):
         self.assertIs(_make_transport(args)._burst_arg, True)
         args = parser.parse_args(["--backend", "ftdi", "--tap", "xcku040", "probe"])
         self.assertEqual(_make_transport(args).ir_table, OpenOcdTransport.IR_TABLE_US)
+        self.assertIsNone(_make_transport(args).bitfile)
+        args = parser.parse_args(["--backend", "ftdi", "--program", "top.bit", "probe"])
+        self.assertEqual(_make_transport(args).bitfile, "top.bit")
 
     def test_no_burst_flag_declares_a_build_without_burst(self):
         parser = build_parser()
@@ -1169,6 +1205,38 @@ class MakeTransportTests(unittest.TestCase):
                         ["--backend", backend, "--tap", tap, *flags, "probe"]
                     )
                     self.assertEqual(_make_transport(args).burst, burst)
+
+
+
+class RpcMainErrorEnvelopeTests(unittest.TestCase):
+    def test_error_reply_carries_no_traceback(self):
+        # BUG-298: the stdin server's error reply has no source path (trace
+        # is just "Type: message"); the traceback is logged at DEBUG on
+        # fcapz.rpc instead.
+        from unittest import mock
+
+        from fcapz import rpc
+
+        lines = iter(["{not json", '{"cmd": "bogus"}'])
+
+        def fake_input():
+            try:
+                return next(lines)
+            except StopIteration:
+                raise EOFError from None
+
+        out = io.StringIO()
+        with mock.patch("builtins.input", fake_input), contextlib.redirect_stdout(out):
+            with self.assertLogs("fcapz.rpc", level="DEBUG") as logs:
+                self.assertEqual(rpc.main(), 0)
+        replies = [json.loads(x) for x in out.getvalue().splitlines()]
+        self.assertEqual(len(replies), 2)
+        for reply in replies:
+            self.assertIs(reply["ok"], False)
+            self.assertEqual(reply["trace"], f"{reply['type']}: {reply['error']}")
+            self.assertNotIn("File", reply["trace"])
+        self.assertEqual(replies[0]["type"], "JSONDecodeError")
+        self.assertTrue(any("Traceback" in line for line in logs.output))
 
 
 if __name__ == "__main__":

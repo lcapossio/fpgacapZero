@@ -11,6 +11,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.handle import Force, Release
 from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly, RisingEdge, Timer
 from cocotbext.axi import AxiBus, AxiRam
 
@@ -122,6 +123,7 @@ ASYNC_FIFO_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "read_drain_data_match",
         "mixed_read_write_match",
         "post_idle_stable",
+        "stopped_wr_clk_reset_blocks_reads",
     ),
 )
 
@@ -144,6 +146,28 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "reset_read_increment",
         "reset_debug_outputs_idle",
         "reset_axi_trace",
+        "r_timeout_drain",
+        "burst_timeout_drain",
+        "reset_inflight_drain",
+        "drain_bounded",
+        "burst_beat_acks",
+        "aw_stall_detached",
+        "write_quarantine",
+        "late_b_absorbed",
+        "collect_reset_discard",
+        "collect_cmd_discard",
+        "collect_setup_restart",
+        "w_stall_reset_completes",
+        "w_before_aw",
+        "burst_refused",
+        "burst_legal_edges",
+        "ar_stall_held",
+        "ar_reset_held",
+        "read_room_refused",
+        "status_owed_read",
+        "burst_word_once",
+        "reset_coalesced",
+        "axi_valid_stable",
     ),
 )
 
@@ -1146,6 +1170,64 @@ async def fcapz_core_manager_resets(dut):
 
 
 @cocotb.test()
+async def fcapz_core_manager_epoch_parity(dut):
+    """An epoch's parity is the reset level whatever its counters hold.
+
+    PolarFire ignores initial values, so the release counters and the
+    registered reset levels power up random; an odd epoch with no reset held
+    would make the host refuse the slot for good.
+    """
+    cocotb.start_soon(Clock(dut.jtag_clk, 10, unit="ns").start())
+    manager_reset(dut, 0)
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.burst_rd_active.value = 0
+    await FallingEdge(dut.jtag_clk)
+    if hasattr(dut, "u_dut"):
+        # GHDL keeps a forced or deposited signal after Release, so the VHDL
+        # twin cannot start from garbage here; formal parity covers it.
+        cocotb.pass_test("Verilog only: GHDL cannot release a forced signal")
+    # Force for half a cycle, then release.
+    core = dut
+    garbage = {
+        "mgr_releases": 0x2AAB,
+        "mgr_rst_d": 1,
+        "slot_releases": (0x7FFF << 30) | (0x1235 << 15) | 0x0001,
+        "slot_rst_d": 0b101,
+    }
+    for name, value in garbage.items():
+        getattr(core, name).value = Force(value)
+    await RisingEdge(dut.jtag_clk)
+    await Timer(1, unit="ns")
+    for name in garbage:
+        getattr(core, name).value = Release()
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+
+    async def slot_epoch(slot: int) -> int:
+        await manager_write(dut, 0xF014, slot)
+        return await manager_read(dut, 0xF02C)
+
+    epoch = await manager_read(dut, 0xF020)
+    assert epoch % 2 == 0, epoch
+    base = [await slot_epoch(s) for s in range(3)]
+    assert [e % 2 for e in base] == [0, 0, 0], base
+
+    dut.slot_rst.value = 0b001
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert await slot_epoch(0) == (base[0] + 1) & 0xFFFF
+    dut.slot_rst.value = 0
+    await FallingEdge(dut.jtag_clk)
+    assert [await slot_epoch(s) for s in range(3)] == [
+        (base[0] + 2) & 0xFFFF, base[1], base[2]]
+    await manager_write(dut, 0xF028, 0x1)
+    await FallingEdge(dut.jtag_clk)
+    await FallingEdge(dut.jtag_clk)
+    assert await manager_read(dut, 0xF020) == (epoch + 2) & 0xFFFF
+
+
+@cocotb.test()
 async def fcapz_ela_channel_mux(dut):
     cocotb.start_soon(Clock(dut.sample_clk, 10, unit="ns").start())
     cocotb.start_soon(Clock(dut.jtag_clk, 14, unit="ns").start())
@@ -1352,6 +1434,9 @@ async def fcapz_ela_xilinx7_single_chain(dut):
 # sim/run_cocotb.py build them: default slots (two 8-bit ELAs, DEPTH 1024,
 # one 1-bit EIO) on a nondefault chain; the *_tlr targets add TLR_RESET_EN.
 _DEBUG_MULTI_CHAIN = 3
+# ECP5 and Gowin have two user chains; PolarFire selects by UJTAG IR opcode.
+_DEBUG_MULTI_ER_CHAIN = 2
+_DEBUG_MULTI_POLARFIRE_IR = 0x24
 _DEBUG_MULTI_SAMPLE_W = 8
 _DEBUG_MULTI_DEPTH = 1024
 _DEBUG_MULTI_BURST_W = 256
@@ -1361,19 +1446,33 @@ _MGR_CAPS_TLR_RESET = 0x40
 
 
 def _debug_multi_primitive(dut):
-    """Return (primitive, pin names, chain parameter name) for the shell's TAP stub."""
+    """Return (primitive, pin names, chain parameter name or None, select level)
+    for the shell's TAP stub.  A pin named None does not exist on that TAP."""
     target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
-    vendor = next(v for v in ("xilinx7", "xilinxus", "intel") if f"_{v}" in target)
+    vendor = next(v for v in ("xilinx7", "xilinxus", "intel", "polarfire", "efinix")
+                  if f"_{v}" in target)
     if vendor == "intel":
         # sld_virtual_jtag has no sel; jtag_tap_intel ties it high.
         pins = dict(tck="tck", tdi="tdi", capture="virtual_state_cdr",
                     shift="virtual_state_sdr", update="virtual_state_udr", sel=None,
                     tlr="jtag_state_tlr")
-        return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index"
+        return dut.u_tap_ctrl.u_vjtag, pins, "sld_instance_index", 1
+    if vendor == "polarfire":
+        # UJTAG selects the chain by the user instruction in UIREG.
+        pins = dict(tck="UDRCK", tdi="UTDI", capture="UDRCAP", shift="UDRSH",
+                    update="UDRUPD", sel="UIREG", tlr=None)
+        # The VHDL shell keeps the default IR_USER1 (run_cocotb.py).
+        ir = _DEBUG_MULTI_POLARFIRE_IR if os.environ.get("FCAPZ_COCOTB_HDL") == "verilog" else 0x20
+        return dut.u_tap_ctrl.u_ujtag, pins, None, ir
+    if vendor == "efinix":
+        # The Interface Designer User TAP block's signals are shell ports.
+        pins = dict(tck="jtag1_tck", tdi="jtag1_tdi", capture="jtag1_capture",
+                    shift="jtag1_shift", update="jtag1_update", sel="jtag1_sel", tlr=None)
+        return dut, pins, None, 1
     pins = dict(tck="TCK", tdi="TDI", capture="CAPTURE", shift="SHIFT",
                 update="UPDATE", sel="SEL", tlr="RESET")
     ctrl = dut.u_tap_ctrl.u_tap if vendor == "xilinxus" else dut.u_tap_ctrl
-    return ctrl.u_bscan, pins, "JTAG_CHAIN"
+    return ctrl.u_bscan, pins, "JTAG_CHAIN", 1
 
 
 def _check_burst_header(header: int, *, slot: int, mgr_epoch: int, slot_epoch: int,
@@ -1396,20 +1495,30 @@ class _DebugMultiBench:
 
     def __init__(self, dut) -> None:
         self.dut = dut
-        self.prim, pins, self.chain_param = _debug_multi_primitive(dut)
+        self.prim, pins, self.chain_param, self.sel_on = _debug_multi_primitive(dut)
         self.pin = {role: getattr(self.prim, name) for role, name in pins.items() if name}
         self.intel = pins["sel"] is None
+        # Whether scan(ours=False) scans another instruction's register.
+        self.foreign_scans = False
         self.rng = random.Random(0x5EED)
         # A probe value per ELA that replaces its count while not None.
         self.hold: list[int | None] = [None, None]
 
-    async def start(self) -> None:
-        dut = self.dut
-        if os.environ.get("FCAPZ_COCOTB_HDL") == "verilog":
+    def _tap_init(self) -> None:
+        if self.chain_param and os.environ.get("FCAPZ_COCOTB_HDL") == "verilog":
             assert int(getattr(self.prim, self.chain_param).value) == _DEBUG_MULTI_CHAIN
         for role in ("tck", "tdi", "capture", "shift", "update", "sel", "tlr"):
             if role in self.pin:
                 self.pin[role].value = 0
+
+    async def start(self) -> None:
+        dut = self.dut
+        self._tap_init()
+        # Shell inputs the bench does not use (JTAG pads, Efinix's DR clock).
+        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i",
+                     "hub_por"):
+            if hasattr(dut, name):
+                getattr(dut, name).value = 0
         dut.ela_sample_clk.value = 0
         dut.ela_sample_rst.value = 0b11
         dut.ela_probe_in.value = 0
@@ -1460,17 +1569,20 @@ class _DebugMultiBench:
         pin["tdi"].value = 0
 
     async def scan(self, bits: int, frame: int = 0) -> int:
+        """One DR scan of this shell's register."""
         pin = self.pin
         captured = 0
         if "sel" in pin:
-            pin["sel"].value = 1
-        pin["capture"].value = 1
+            pin["sel"].value = self.sel_on
+        if "capture" in pin:
+            pin["capture"].value = 1
         await self.tck_tick()
-        pin["capture"].value = 0
+        if "capture" in pin:
+            pin["capture"].value = 0
         pin["shift"].value = 1
         for i in range(bits):
             pin["tdi"].value = (frame >> i) & 1
-            if int(self.dut.tap_tdo.value):
+            if self._tdo():
                 captured |= 1 << i
             await self.tck_tick()
         pin["shift"].value = 0
@@ -1481,6 +1593,9 @@ class _DebugMultiBench:
         if "sel" in pin:
             pin["sel"].value = 0
         return captured
+
+    def _tdo(self) -> int:
+        return int(self.dut.tap_tdo.value)
 
     async def read(self, addr: int) -> int:
         await self.scan(49, make_frame(addr, 0, False))
@@ -1544,10 +1659,93 @@ class _DebugMultiBench:
         assert 0x80 in samples, f"slot {slot} trigger sample missing"
         return header
 
+    async def check_capture(self, slot: int, capture_len: int, step: int) -> None:
+        """Read ELA *slot*'s capture back the fastest way the shell offers."""
+        await self.burst(slot, capture_len, step)
+
+
+class _Ecp5DebugMultiBench(_DebugMultiBench):
+    """Drives fcapz_debug_multi_ecp5 through the JTAG pins of its JTAGG model.
+
+    sim/jtagg_stub.v models JTAGG's timing (TDI registered on the rising edge,
+    TDO on the falling edge), so a full TAP walk is the only way in: each scan
+    selects ER<CTRL_CHAIN> with an instruction scan first.
+    """
+
+    _IR_ER = {1: 0x32, 2: 0x38}
+    _IR_BYPASS = 0xFF
+
+    def __init__(self, dut) -> None:
+        self.dut = dut
+        self.prim = dut.u_tap_ctrl.u_jtagg
+        self.pin = {}
+        self.chain_param = None
+        self.intel = False
+        self.foreign_scans = True
+        self.ir: int | None = None
+        self.rng = random.Random(0x5EED)
+        self.hold = [None, None]
+
+    def _tap_init(self) -> None:
+        self.prim.tck_pin.value = 0
+        self.prim.tms_pin.value = 1
+        self.prim.tdi_pin.value = 0
+
+    async def tck_tick(self, tms: int = 0, tdi: int = 0) -> int:
+        """One TCK period; returns TDO as sampled before the rising edge."""
+        prim = self.prim
+        prim.tms_pin.value = tms
+        prim.tdi_pin.value = tdi
+        await Timer(5, unit="ns")
+        tdo = int(prim.tdo_pin.value)
+        prim.tck_pin.value = 1
+        await Timer(5, unit="ns")
+        prim.tck_pin.value = 0
+        return tdo
+
+    async def idle(self, n: int) -> None:
+        # Run-Test/Idle (the first tick leaves Test-Logic-Reset).
+        for _ in range(n):
+            await self.tck_tick()
+
+    async def _load_ir(self, ir: int) -> None:
+        for tms in (1, 1, 0, 0):  # Select-DR, Select-IR, Capture-IR, Shift-IR
+            await self.tck_tick(tms)
+        for i in range(8):
+            await self.tck_tick(int(i == 7), (ir >> i) & 1)
+        await self.tck_tick(1)  # Update-IR
+        await self.tck_tick(0)  # Run-Test/Idle
+        self.ir = ir
+
+    async def scan(self, bits: int, frame: int = 0, ours: bool = True) -> int:
+        """One DR scan; *ours* False scans BYPASS instead, whose Update-DR
+        JTAGG still flags on JUPDATE."""
+        ir = self._IR_ER[_DEBUG_MULTI_ER_CHAIN] if ours else self._IR_BYPASS
+        if self.ir != ir:
+            await self._load_ir(ir)
+        for tms in (1, 0, 0):  # Select-DR, Capture-DR, Shift-DR
+            await self.tck_tick(tms)
+        captured = 0
+        for i in range(bits):
+            if await self.tck_tick(int(i == bits - 1), (frame >> i) & 1):
+                captured |= 1 << i
+        await self.tck_tick(1)  # Exit1-DR -> Update-DR
+        await self.tck_tick(0)  # Run-Test/Idle
+        return captured
+
+
+def _debug_multi_bench(dut) -> _DebugMultiBench:
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    if "_gowin" in target:
+        return _GowinDebugMultiBench(dut)
+    if "_ecp5" in target:
+        return _Ecp5DebugMultiBench(dut)
+    return _DebugMultiBench(dut)
+
 
 @cocotb.test()
 async def fcapz_debug_multi_wrapper(dut):
-    tb = _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
 
     # Manager identity and slot descriptors
@@ -1558,6 +1756,18 @@ async def fcapz_debug_multi_wrapper(dut):
         await tb.write(0xF014, slot)
         assert await tb.read(0xF018) == core, f"slot {slot} core id"
         assert await tb.read(0xF01C) == burst, f"slot {slot} burst capability"
+
+    if tb.foreign_scans:
+        # BUG-275: a write commits at Update-DR with JCE already low, and the
+        # Update-DR of another instruction's scan does not repeat it
+        # (MGR_SELECT_COUNT counts every MGR_ACTIVE write).
+        count = await tb.read(0xF034)
+        await tb.write(0xF008, 1)
+        await tb.scan(49, make_frame(0xF008, 1, True), ours=False)
+        await tb.idle(8)
+        assert await tb.read(0xF008) == 1
+        assert await tb.read(0xF034) == (count + 1) & 0xFFFF
+        await tb.write(0xF008, 0)
 
     # Each ELA: capture, then two burst packets, then straight back to the
     # register path by switching ACTIVE.
@@ -1590,7 +1800,7 @@ async def fcapz_debug_multi_wrapper(dut):
 @cocotb.test()
 async def fcapz_debug_multi_resets(dut):
     """Each slot resets alone; MGR_CTRL resets the hub or slots (BUG-229)."""
-    tb = _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
 
     # The hub resets only at power-up, and the counters never: tests that ran
@@ -1625,7 +1835,7 @@ async def fcapz_debug_multi_resets(dut):
     tb.hold[1] = None
     # ELA 0 captures again after its reset.
     capture_len = await tb.capture(0)
-    await tb.burst(0, capture_len, 1)
+    await tb.check_capture(0, capture_len, 1)
 
     # MGR_CTRL bit 1 resets the DESC_INDEX slot only.
     await tb.write(0xF008, 1)
@@ -1661,9 +1871,52 @@ async def fcapz_debug_multi_resets(dut):
 
 
 @cocotb.test()
+async def fcapz_debug_multi_hub_por(dut):
+    """hub_por resets the hub and every slot after hub_started is set.
+
+    On PolarFire hub_started powers up random, so a hub that came up with it
+    set never saw its power-up reset; hub_por, held while TCK is still
+    idle, must give it one anyway.
+    """
+    tb = _debug_multi_bench(dut)
+    await tb.start()
+    mgr_epoch = await tb.read(0xF020)
+    e0, e1, e2 = await tb.slot_epochs()
+    capture_len = await tb.capture(1)
+    assert capture_len > 0
+    await tb.write(0xF008, 2)
+    await tb.write(0x0100, 1)
+    await tb.write(0xF024, 0xC0FFEE)
+    await tb.write(0xF008, 1)
+    assert int(dut.eio_probe_out.value) == 1
+
+    # Power-on reset with no TCK, as at power-up.
+    dut.hub_por.value = 1
+    await Timer(200, unit="ns")
+    assert int(dut.eio_probe_out.value) == 0, "hub_por did not reset the EIO outputs"
+    dut.hub_por.value = 0
+    await tb.idle(40)
+    assert await tb.read(0xF024) == 0, "MGR_OWNER survived hub_por"
+    assert await tb.read(0xF008) == 0, "ACTIVE survived hub_por"
+    assert await tb.read(0xF020) == (mgr_epoch + 2) & 0xFFFF
+    assert await tb.slot_epochs() == [e0 + 2, e1 + 2, e2 + 2]
+    await tb.write(0xF008, 1)
+    assert await tb.read(0x0008) & 0x7 == 0, "ELA 1 not reset by hub_por"
+
+    # The hub runs as usual afterwards; a later slot reset stays local.
+    dut.ela_sample_rst.value = 0b01
+    await tb.idle(20)
+    dut.ela_sample_rst.value = 0
+    await tb.idle(40)
+    assert await tb.read(0xF020) == (mgr_epoch + 2) & 0xFFFF
+    capture_len = await tb.capture(0)
+    await tb.check_capture(0, capture_len, 1)
+
+
+@cocotb.test()
 async def fcapz_debug_multi_tlr(dut):
     """Test-Logic-Reset is counted; with TLR_RESET_EN it also cancels a burst."""
-    tb = _DebugMultiBench(dut)
+    tb = _debug_multi_bench(dut)
     await tb.start()
     tlr_reset = os.environ.get("FCAPZ_COCOTB_TARGET", "").endswith("_tlr")
     caps = await tb.read(0xF010)
@@ -1698,8 +1951,307 @@ async def fcapz_debug_multi_tlr(dut):
 
 
 @cocotb.test()
+async def fcapz_debug_multi_tlr_powerup(dut):
+    """MGR_TLR_COUNT starts at 0 and counts only entries seen happen.
+
+    Run alone on a fresh simulation (the *_powerup targets): the count has no
+    reset, so it carries the power-up state.  The *_powerup_tlrhigh target
+    holds the TAP in Test-Logic-Reset from time 0, as after configuration;
+    that residency is not an entry.
+    """
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    tb = _debug_multi_bench(dut)
+    has_tlr = "tlr" in getattr(tb, "pin", {})
+    start_high = target.endswith("_tlrhigh")
+    assert has_tlr or not start_high
+    if start_high:
+        tap_init = tb._tap_init
+
+        def _tap_init_in_tlr() -> None:
+            tap_init()
+            tb.pin["tlr"].value = 1
+
+        tb._tap_init = _tap_init_in_tlr
+    await tb.start()
+    assert await tb.read(0xF030) == 0, "power-up counted as a Test-Logic-Reset"
+    if not has_tlr:
+        await tb.idle(16)
+        assert await tb.read(0xF030) == 0
+        return
+    if start_high:
+        tb.pin["tlr"].value = 0
+        await tb.idle(4)
+        assert await tb.read(0xF030) == 0, "Test-Logic-Reset at power-up counted"
+    await tb.test_logic_reset()
+    assert await tb.read(0xF030) == 1
+    await tb.test_logic_reset()
+    assert await tb.read(0xF030) == 2
+
+
+class _GowinDebugMultiBench(_DebugMultiBench):
+    """Drives fcapz_debug_multi_gowin at its GW_JTAG primitive's outputs.
+
+    jtag_tap_gowin oversamples GW_JTAG on clk and acts once per TCK falling
+    edge, so each tick holds TCK high and low for several clk periods.  The
+    TAP state outputs change with TCK's rising edge.  The instruction (ER1 or
+    ER2) stays loaded throughout, so enable_er<n>_o stays high; the TAP then
+    raises capture on every falling edge outside a scan, from the
+    shift_dr_capture_dr_o rise until the falling edge after Update-DR.
+    """
+
+    def __init__(self, dut) -> None:
+        self.dut = dut
+        self.prim = dut.u_tap_ctrl.u_jtag
+        self.chain_idx = _DEBUG_MULTI_ER_CHAIN - 1
+        self.intel = False
+        self.rng = random.Random(0x5EED)
+        self.hold: list[int | None] = [None, None]
+
+    def _tap_init(self) -> None:
+        prim = self.prim
+        cocotb.start_soon(Clock(self.dut.clk, 10, unit="ns").start())
+        for name in ("tck_o", "tdi_o", "shift_dr_capture_dr_o", "update_dr_o"):
+            getattr(prim, name).value = 0
+        prim.enable_er1_o.value = int(self.chain_idx == 0)
+        prim.enable_er2_o.value = int(self.chain_idx == 1)
+
+    async def start(self) -> None:
+        await super().start()
+        # jtag_tap_gowin's hold and chain flags have no reset; the first
+        # scan sets them.  It reads address 0, which changes nothing.
+        await self.scan(49)
+        await self.idle(4)
+
+    async def gw_tick(self, sc: int = 0, update: int = 0, tdi: int = 0) -> int:
+        """One TCK period; return the chain's TDO as it stood before TCK fell."""
+        prim = self.prim
+        prim.tck_o.value = 1
+        prim.shift_dr_capture_dr_o.value = sc
+        prim.update_dr_o.value = update
+        prim.tdi_o.value = tdi
+        await Timer(50, unit="ns")
+        tdo = self._tdo()
+        prim.tck_o.value = 0
+        await Timer(50, unit="ns")
+        return tdo
+
+    def _tdo(self) -> int:
+        return (int(self.dut.tap_tdo.value) >> self.chain_idx) & 1
+
+    async def idle(self, n: int) -> None:
+        for _ in range(n):
+            await self.gw_tick()
+
+    async def check_capture(self, slot: int, capture_len: int, step: int) -> None:
+        # No burst path: the capture comes through the register window.
+        samples = [await self.read(0x0100 + 4 * i) & 0xFF for i in range(capture_len)]
+        for i in range(1, capture_len):
+            assert samples[i] == (samples[i - 1] + step) & 0xFF, (
+                f"slot {slot} sample {i}: {samples[i - 1]:#x} -> {samples[i]:#x}"
+            )
+        assert 0x80 in samples, f"slot {slot} trigger sample missing"
+
+    async def scan(self, bits: int, frame: int = 0) -> int:
+        # Capture-DR, bits Shift-DR states, then Exit1-DR: the TAP shifts in
+        # on the falling edge after each shift_dr_capture_dr_o one, so TDI
+        # lags a tick behind TDO.
+        captured = 0
+        for k in range(bits + 1):
+            tdi = (frame >> (k - 1)) & 1 if k else 0
+            tdo = await self.gw_tick(sc=int(k < bits), tdi=tdi)
+            if k < bits:
+                captured |= tdo << k
+        await self.gw_tick(update=1)
+        await self.gw_tick()
+        return captured
+
+
+@cocotb.test()
+async def fcapz_debug_multi_gowin(dut):
+    """The register-only Gowin hub: no slot bursts, captures read back
+    through the register window."""
+    tb = _GowinDebugMultiBench(dut)
+    await tb.start()
+
+    assert await tb.read(0xF000) & 0xFFFF == 0x434D
+    assert await tb.read(0xF004) == 3
+    # No burst header and no Test-Logic-Reset reset.
+    assert await tb.read(0xF010) == _DEBUG_MULTI_CAPS & ~0x50
+    for slot, core in enumerate((0x4C41, 0x4C41, 0x494F)):
+        await tb.write(0xF014, slot)
+        assert await tb.read(0xF018) == core, f"slot {slot} core id"
+        assert await tb.read(0xF01C) == 0, f"slot {slot} burst capability"
+
+    for slot, step in ((0, 1), (1, -1)):
+        await tb.check_capture(slot, await tb.capture(slot), step)
+
+    await tb.write(0xF008, 2)
+    assert await tb.read(0x0004) == 1
+    for level in (1, 0):
+        await tb.write(0x0100, level)
+        await tb.idle(8)
+        assert int(dut.eio_probe_out.value) == level
+        dut.eio_probe_in.value = level
+        await tb.idle(8)
+        assert await tb.read(0x0010) == level
+
+
+# fcapz_axi_mon_<vendor> wrappers as the fcapz_axi_mon_* targets in
+# sim/run_cocotb.py build them: AXI4-Lite 32/32 (152-bit samples), DEPTH 64,
+# one trigger stage (so TRIG_VALUE/TRIG_MASK trigger), on the chain or IR the
+# debug-multi benches drive.
+# The flattened sample, LSB first: (port, width) as fcapz_axi_mon packs it.
+_AXI_MON_FIELDS = (
+    ("AWADDR", 32), ("AWPROT", 3), ("AWVALID", 1), ("AWREADY", 1),
+    ("WDATA", 32), ("WSTRB", 4), ("WVALID", 1), ("WREADY", 1),
+    ("BRESP", 2), ("BVALID", 1), ("BREADY", 1),
+    ("ARADDR", 32), ("ARPROT", 3), ("ARVALID", 1), ("ARREADY", 1),
+    ("RDATA", 32), ("RRESP", 2), ("RVALID", 1), ("RREADY", 1),
+)
+_AXI_MON_SAMPLE_W = sum(width for _, width in _AXI_MON_FIELDS)
+_AXI_MON_WORDS = (_AXI_MON_SAMPLE_W + 31) // 32
+
+
+def _axi_mon_flatten(beat: dict[str, int]) -> int:
+    sample, pos = 0, 0
+    for name, width in _AXI_MON_FIELDS:
+        sample |= beat[name] << pos
+        pos += width
+    return sample
+
+
+class _AxiMonBench:
+    """Starts an fcapz_axi_mon_<vendor> wrapper in place of a debug-multi
+    shell; the vendor bench it is mixed into drives the TAP."""
+
+    async def start(self) -> None:
+        dut = self.dut
+        self._tap_init()
+        for name in ("jtag1_drck", "tck_pad_i", "tms_pad_i", "tdi_pad_i", "trstb_pad_i"):
+            if hasattr(dut, name):
+                getattr(dut, name).value = 0
+        for name, _ in _AXI_MON_FIELDS:
+            getattr(dut, name).value = 0
+        dut.trigger_in.value = 0
+        dut.ARESETN.value = 0
+        cocotb.start_soon(Clock(dut.ACLK, 8, unit="ns").start())
+        await self.idle(8)
+        dut.ARESETN.value = 1
+        await self.idle(12)
+        if isinstance(self, _GowinDebugMultiBench):
+            await self.scan(49)  # sets jtag_tap_gowin's hold and chain flags
+            await self.idle(4)
+
+    def _tdo(self) -> int:
+        """TDO where the TAP primitive takes it (Efinix: the exported port),
+        so a broken return path fails the test."""
+        if isinstance(self, _GowinDebugMultiBench):
+            pin = getattr(self.prim, f"tdo_er{self.chain_idx + 1}_i")
+        elif hasattr(self.dut, "jtag1_tdo"):
+            pin = self.dut.jtag1_tdo
+        else:
+            pin = next(getattr(self.prim, name) for name in ("UTDO", "TDO", "tdo")
+                       if hasattr(self.prim, name))
+        return int(pin.value)
+
+    async def axi_stream(self, beats: list[dict[str, int]]) -> None:
+        """Drive one beat per ACLK on every monitored input, then idle."""
+        dut = self.dut
+        for beat in beats:
+            await RisingEdge(dut.ACLK)
+            for name, value in beat.items():
+                getattr(dut, name).value = value
+        await RisingEdge(dut.ACLK)
+        for name, _ in _AXI_MON_FIELDS:
+            getattr(dut, name).value = 0
+
+
+class _AxiMonDefaultBench(_AxiMonBench, _DebugMultiBench):
+    pass
+
+
+class _AxiMonEcp5Bench(_AxiMonBench, _Ecp5DebugMultiBench):
+    pass
+
+
+class _AxiMonGowinBench(_AxiMonBench, _GowinDebugMultiBench):
+    pass
+
+
+@cocotb.test()
+async def fcapz_axi_mon_vendor(dut):
+    """An fcapz_axi_mon_<vendor> wrapper through its vendor TAP: identity, a
+    capture triggered on an AXI write address, read back through the register
+    window and, except on register-only Gowin, the burst path."""
+    target = os.environ.get("FCAPZ_COCOTB_TARGET", "")
+    gowin = "_gowin" in target
+    tb = (_AxiMonGowinBench if gowin else
+          _AxiMonEcp5Bench if "_ecp5" in target else _AxiMonDefaultBench)(dut)
+    await tb.start()
+
+    assert await tb.read(0x0000) & 0xFFFF == 0x4C41
+    assert await tb.read(0x000C) == _AXI_MON_SAMPLE_W
+    amid = await tb.read(0x00E8)
+    assert amid >> 16 == 0x414D, f"AXI_MON_ID {amid:#x}"
+    assert (amid >> 8) & 0xFF == 1, f"AXI_MON_ID protocol {amid:#x}"
+
+    # Every field of every beat random, except AWADDR, which steps so the
+    # trigger matches only the third beat: the pretrigger samples are beats
+    # too, and a dropped or crossed field changes the sample.
+    pretrig, posttrig, base, step = 2, 5, 0x4000_0000, 4
+    rng = random.Random(0xA11)
+    beats = [{name: rng.getrandbits(width) for name, width in _AXI_MON_FIELDS}
+             for _ in range(pretrig + posttrig + 8)]
+    for i, beat in enumerate(beats):
+        beat["AWADDR"] = base + i * step
+    await tb.write(0x0014, pretrig)
+    await tb.write(0x0018, posttrig)
+    await tb.write(0x0020, 1)
+    await tb.write(0x0024, base + pretrig * step)  # awaddr is sample[31:0]
+    await tb.write(0x0028, 0xFFFF_FFFF)
+    await tb.write(0x0004, 1)
+    for _ in range(100):
+        if int(dut.armed_out.value):
+            break
+        await tb.idle(4)
+    assert int(dut.armed_out.value), "arm never reached the AXI clock domain"
+
+    await tb.axi_stream(beats)
+    status = 0
+    for _ in range(200):
+        status = await tb.read(0x0008)
+        if status & 0x4:
+            break
+        await tb.idle(8)
+    assert status & 0x4, f"capture never reached DONE (STATUS {status:#x})"
+    capture_len = pretrig + posttrig + 1
+    assert await tb.read(0x001C) == capture_len
+
+    samples = []
+    for i in range(capture_len):
+        sample = 0
+        for w in range(_AXI_MON_WORDS):
+            sample |= await tb.read(0x0100 + 4 * (i * _AXI_MON_WORDS + w)) << (32 * w)
+        samples.append(sample)
+    for i, sample in enumerate(samples):
+        expected = _axi_mon_flatten(beats[i])
+        assert sample == expected, f"sample {i}: {sample:#x}, expected {expected:#x}"
+
+    if gowin:
+        return
+    # One 152-bit sample per 256-bit burst scan, after the priming scan.
+    await tb.write(0x002C, 0)
+    await tb.idle(160)
+    await tb.scan(_DEBUG_MULTI_BURST_W)
+    for i in range(capture_len):
+        packet = await tb.scan(_DEBUG_MULTI_BURST_W)
+        expected = _axi_mon_flatten(beats[i])
+        assert packet & width_mask(_AXI_MON_SAMPLE_W) == expected, f"burst sample {i}"
+
+
+@cocotb.test()
 async def fcapz_async_fifo_equiv(dut):
-    cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
+    wr_clk_task = cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
     cocotb.start_soon(Clock(dut.rd_clk, 14, unit="ns").start())
     dut.rst.value = 1
     dut.wr_en.value = 0
@@ -1718,7 +2270,11 @@ async def fcapz_async_fifo_equiv(dut):
     for _ in range(3):
         await RisingEdge(dut.wr_clk)
     dut.rst.value = 0
+    # The XPM branch holds its reset a few wr_clk cycles after rst falls,
+    # reading full and empty until then; compare once it is out of reset.
     await RisingEdge(dut.wr_clk)
+    while int(dut.wr_rst_busy_b.value) or int(dut.rd_rst_busy_b.value):
+        await RisingEdge(dut.wr_clk)
     await check_stable()
     ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("reset_empty_flags_match")
 
@@ -1758,6 +2314,38 @@ async def fcapz_async_fifo_equiv(dut):
     for _ in range(8):
         await check_stable()
     ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("post_idle_stable")
+
+    # Reset with wr_clk stopped (TCK between scans) and a word queued: the
+    # XPM branch must stop reads at once and never hand out that word.
+    await RisingEdge(dut.wr_clk)
+    dut.wr_data.value = 0x5A
+    dut.wr_en.value = 1
+    await RisingEdge(dut.wr_clk)
+    dut.wr_en.value = 0
+    while int(dut.rd_empty_b.value):
+        await RisingEdge(dut.rd_clk)
+    await FallingEdge(dut.wr_clk)
+    wr_clk_task.cancel()
+    dut.wr_clk.value = 0
+    await RisingEdge(dut.rd_clk)
+    dut.rst.value = 1
+    await RisingEdge(dut.rd_clk)
+    dut.rst.value = 0
+    dut.rd_en.value = 1
+    for _ in range(10):
+        await RisingEdge(dut.rd_clk)
+        await ReadOnly()
+        assert int(dut.rd_empty_b.value) and int(dut.rd_rst_busy_b.value), (
+            "XPM read side open after reset with wr_clk stopped")
+    await FallingEdge(dut.rd_clk)
+    cocotb.start_soon(Clock(dut.wr_clk, 10, unit="ns").start())
+    while int(dut.wr_rst_busy_b.value) or int(dut.rd_rst_busy_b.value):
+        await RisingEdge(dut.rd_clk)
+    for _ in range(4):
+        await RisingEdge(dut.rd_clk)
+    assert int(dut.rd_empty_b.value), "stale word survived the reset"
+    dut.rd_en.value = 0
+    ASYNC_FIFO_FUNCTIONAL_COVERAGE.hit("stopped_wr_clk_reset_blocks_reads")
 
 
 CMD_NOP = 0x0
@@ -1909,45 +2497,70 @@ def _signal_is_one(signal) -> bool:
 
 
 class AxiTrace:
+    """Records AW/W/AR handshakes and checks the master side of AXI4: once a
+    VALID is up it stays up, with its payload unchanged, until READY."""
+
     def __init__(self, dut) -> None:
         self.dut = dut
+        self.cycle = 0
         self.aw: list[dict[str, int]] = []
         self.w: list[dict[str, int]] = []
         self.ar: list[dict[str, int]] = []
+        self.violations: list[str] = []
+        self._pending: dict[str, dict[str, int] | None] = {"aw": None, "w": None, "ar": None}
+
+    def _payload(self, channel: str) -> dict[str, int]:
+        d = self.dut
+        if channel == "aw":
+            return {"addr": _signal_int(d.m_axi_awaddr), "len": _signal_int(d.m_axi_awlen),
+                    "size": _signal_int(d.m_axi_awsize), "burst": _signal_int(d.m_axi_awburst)}
+        if channel == "w":
+            return {"data": _signal_int(d.m_axi_wdata), "strb": _signal_int(d.m_axi_wstrb),
+                    "last": _signal_int(d.m_axi_wlast)}
+        return {"addr": _signal_int(d.m_axi_araddr), "len": _signal_int(d.m_axi_arlen),
+                "size": _signal_int(d.m_axi_arsize), "burst": _signal_int(d.m_axi_arburst)}
+
+    def _check(self, channel: str, valid, ready, log: list[dict[str, int]]) -> None:
+        is_valid = _signal_is_one(valid)
+        payload = self._payload(channel) if is_valid else None
+        held = self._pending[channel]
+        if held is not None:
+            if not is_valid:
+                self.violations.append(f"cycle {self.cycle}: {channel}valid dropped before ready")
+            elif payload != held:
+                self.violations.append(
+                    f"cycle {self.cycle}: {channel} payload changed while stalled: "
+                    f"{held} -> {payload}")
+        if is_valid and _signal_is_one(ready):
+            log.append({**payload, "cycle": self.cycle})
+            self._pending[channel] = None
+        else:
+            self._pending[channel] = payload
 
     async def monitor(self) -> None:
+        d = self.dut
         while True:
-            await RisingEdge(self.dut.axi_clk)
-            if _signal_is_one(self.dut.axi_rst):
+            await RisingEdge(d.axi_clk)
+            self.cycle += 1
+            if _signal_is_one(d.axi_rst):
+                self._pending = {"aw": None, "w": None, "ar": None}
                 continue
-            if _signal_is_one(self.dut.m_axi_awvalid) and _signal_is_one(self.dut.m_axi_awready):
-                self.aw.append({
-                    "addr": _signal_int(self.dut.m_axi_awaddr),
-                    "len": _signal_int(self.dut.m_axi_awlen),
-                    "size": _signal_int(self.dut.m_axi_awsize),
-                    "burst": _signal_int(self.dut.m_axi_awburst),
-                })
-            if _signal_is_one(self.dut.m_axi_wvalid) and _signal_is_one(self.dut.m_axi_wready):
-                self.w.append({
-                    "data": _signal_int(self.dut.m_axi_wdata),
-                    "strb": _signal_int(self.dut.m_axi_wstrb),
-                    "last": _signal_int(self.dut.m_axi_wlast),
-                })
-            if _signal_is_one(self.dut.m_axi_arvalid) and _signal_is_one(self.dut.m_axi_arready):
-                self.ar.append({
-                    "addr": _signal_int(self.dut.m_axi_araddr),
-                    "len": _signal_int(self.dut.m_axi_arlen),
-                    "size": _signal_int(self.dut.m_axi_arsize),
-                    "burst": _signal_int(self.dut.m_axi_arburst),
-                })
+            self._check("aw", d.m_axi_awvalid, d.m_axi_awready, self.aw)
+            self._check("w", d.m_axi_wvalid, d.m_axi_wready, self.w)
+            self._check("ar", d.m_axi_arvalid, d.m_axi_arready, self.ar)
 
 
-async def init_ejtagaxi(dut) -> tuple[AxiRam, AxiTrace]:
+async def init_ejtagaxi(dut, axi_clock=None) -> tuple[AxiRam, AxiTrace]:
+    """*axi_clock*, if given, is a coroutine that drives axi_clk instead of
+    the free-running 30 ns clock (a test that must stop the AXI side)."""
     axi_ram = AxiRam(axi_no_id_bus(dut), dut.axi_clk, dut.axi_rst, size=4096)
     axi_trace = AxiTrace(dut)
     cocotb.start_soon(axi_trace.monitor())
     cocotb.start_soon(Clock(dut.tck, 100, unit="ns").start())
-    cocotb.start_soon(Clock(dut.axi_clk, 30, unit="ns").start())
+    if axi_clock is None:
+        cocotb.start_soon(Clock(dut.axi_clk, 30, unit="ns").start())
+    else:
+        cocotb.start_soon(axi_clock)
     dut.tdi.value = 0
     dut.capture.value = 0
     dut.shift_en.value = 0
@@ -2155,7 +2768,7 @@ async def fcapz_ejtagaxi_protocol(dut):
     await axi_cdc_wait(dut)
 
     out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000_002C, 0, 0), "S9 features")
-    assert axi_rdata(out) == 0x000F_2020
+    assert axi_rdata(out) == 0x020F_2020
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_features")
     await axi_cdc_wait(dut)
 
@@ -2166,22 +2779,25 @@ async def fcapz_ejtagaxi_protocol(dut):
     assert not (axi_status(out) & 0x2)
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("soft_reset")
     assert_axi_protocol_trace(axi_trace)
+    assert not axi_trace.violations, axi_trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("axi_protocol_trace")
 
 
 @cocotb.test()
 async def fcapz_ejtagaxi_burst_fill(dut):
-    """A burst read longer than the burst FIFO fills it, stalls, and resumes.
+    """A burst read goes out only if all its beats fit in the burst FIFO.
 
-    The host drains nothing until the FIFO is full, so the R channel is held
-    off by back-pressure.  Every beat the slave hands over must be written
-    exactly once: a registered rready used to accept a beat in the cycle the
-    FIFO filled and drop it.
+    The R channel then never waits on a full FIFO, so a host that stops
+    draining cannot hold the read channel of a shared bus.  A burst that
+    exactly fills the FIFO, with the host draining nothing, must have every
+    beat written exactly once: a registered rready used to accept a beat in
+    the cycle the FIFO filled and drop it.  A burst that does not fit the
+    room left gets SLVERR without an AR.
     """
-    axi_ram, _ = await init_ejtagaxi(dut)
-    beats = 24  # more than FIFO_DEPTH (16)
+    axi_ram, trace = await init_ejtagaxi(dut)
+    depth = 16  # FIFO_DEPTH of this target
     base = 0x0000_0100
-    values = [0xC000_0000 + i for i in range(beats)]
+    values = [0xC000_0000 + i for i in range(24)]
     for i, value in enumerate(values):
         axi_ram.write_dword(base + 4 * i, value)
 
@@ -2195,34 +2811,159 @@ async def fcapz_ejtagaxi_burst_fill(dut):
 
     cocotb.start_soon(watch_r())
 
-    setup = (0b01 << 12) | (0b010 << 8) | (beats - 1)
-    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, base, setup, 0))
+    def setup(addr: int, beats: int) -> int:
+        return axi_cmd(CMD_BURST_SETUP, addr, burst_cfg(beats - 1), 0)
+
+    # Longer than the FIFO: refused, nothing on the bus.
+    ar0 = len(trace.ar)
+    resps = await scan_seq(dut, [setup(base, 24), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                           "24-beat read")
+    assert resps == [2], resps
+    assert len(trace.ar) == ar0 and accepted == []
+    await clear_after_error(dut)
+
+    # Exactly FIFO_DEPTH beats, the host drains nothing: R never stalls.
+    await dr_scan_72(dut, setup(base, depth))
     await axi_cdc_wait(dut)
     await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
     await axi_cdc_wait(dut, 60)
-    assert 0 < len(accepted) < beats, (
-        f"R channel did not stall on a full FIFO ({len(accepted)} beats accepted)")
+    assert accepted == values[:depth], (
+        f"{len(accepted)} of {depth} beats accepted with the FIFO undrained")
 
     await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming scan
     await axi_cdc_wait(dut)
     got = []
-    for _ in range(beats):
+    for _ in range(depth):
         out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
         assert not (axi_status(out) & 0x4), "error_sticky set during burst read"
         got.append(axi_rdata(out))
         await axi_cdc_wait(dut)
-
-    def first_mismatch(seen: list[int]) -> str:
-        for index, (have, want) in enumerate(zip(seen, values)):
-            if have != want:
-                return f"beat {index}: 0x{have:08X} != 0x{want:08X}"
-        return f"{len(seen)} beats, expected {len(values)}"
-
-    assert got == values, f"bridge returned wrong data, {first_mismatch(got)}"
-    assert accepted == values, f"R-channel handshakes wrong, {first_mismatch(accepted)}"
-
+    assert got == values[:depth], [hex(v) for v in got]
     out = await drain_until_idle(dut)
     assert not (axi_status(out) & 0x4)
+
+    # The room left counts: 10 words left undrained, then 6 more fit exactly
+    # and one more does not.
+    accepted.clear()
+    assert await scan_seq(dut, [setup(base, 10), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                          "10 beats") == [0]
+    assert await scan_seq(dut, [setup(base + 0x40, 6), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                          "6 beats fill the FIFO") == [0]
+    ar1 = len(trace.ar)
+    resps = await scan_seq(dut, [setup(base, 1), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                           "1 beat into a full FIFO")
+    assert resps == [2], resps
+    assert len(trace.ar) == ar1, "a burst that does not fit reached the bus"
+    assert accepted == values[:10] + values[16:22]
+    await clear_after_error(dut)  # CMD_RESET empties the burst FIFO
+    assert await scan_seq(dut, [setup(base, depth), axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                          "full burst after RESET") == [0]
+    await clear_after_error(dut)
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("read_room_refused")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_tck_order(dut):
+    """TCK-side ordering (BUG-310, BUG-311).
+
+    A burst word shown by a scan's CAPTURE is popped on that scan's UPDATE
+    whatever the new command is, so it is never shown twice.  A second
+    CMD_RESET sent before the first is acknowledged (AXI clock stopped) must
+    not cancel the first: the AXI side must still drop the queued read.  A
+    command sent while a RESET is in flight is refused, so none can run
+    between the two RESETs.
+    """
+    axi_run = [True]
+
+    async def gated_axi_clk() -> None:
+        dut.axi_clk.value = 0
+        while True:
+            await Timer(15, unit="ns")
+            if axi_run[0]:
+                dut.axi_clk.value = 1
+            await Timer(15, unit="ns")
+            dut.axi_clk.value = 0
+
+    axi_ram, trace = await init_ejtagaxi(dut, gated_axi_clk())
+    base = 0x0000_0100
+    values = [0xD000_0000 + i for i in range(4)]
+    for i, value in enumerate(values):
+        axi_ram.write_dword(base + 4 * i, value)
+
+    # BUG-310: drain two words, then a NOP scan shows (and must pop) the third.
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, base, burst_cfg(3), 0))
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut, 40)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming scan
+    await axi_cdc_wait(dut)
+    for i in range(2):
+        out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+        assert axi_rdata(out) == values[i], hex(axi_rdata(out))
+        await axi_cdc_wait(dut)
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    assert axi_status(out) & 0x1 and axi_rdata(out) == values[2], (
+        f"NOP after RDATA: status 0x{axi_status(out):x} data 0x{axi_rdata(out):08X}")
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))  # priming again
+    await axi_cdc_wait(dut)
+    out = await dr_scan_72(dut, axi_cmd(CMD_BURST_RDATA, 0, 0, 0))
+    assert axi_rdata(out) == values[3], (
+        f"word shown twice: got 0x{axi_rdata(out):08X}, expected 0x{values[3]:08X}")
+    await axi_cdc_wait(dut)
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    assert not (axi_status(out) & 0x8), "burst FIFO not empty after the last word"
+    await clear_after_error(dut)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_word_once")
+
+    # BUG-311: a read waits on ARREADY; the AXI clock stops; RESET twice.
+    # The AXI side must still run the reset (hold the AR, drain the read), so
+    # no response of that read may reach the host afterwards.
+    rif = axi_ram.read_if
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, base, 0, 0))
+    await axi_cdc_wait(dut, 6)
+    assert _signal_is_one(dut.m_axi_arvalid), "read not on the bus yet"
+    axi_run[0] = False
+    await Timer(100, unit="ns")
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    rif.ar_channel.pause = False
+    axi_run[0] = True
+    await axi_cdc_wait(dut, 40)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x1), "the read's response survived the RESETs"
+    for _ in range(4):
+        out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        assert not (axi_status(out) & 0x1), "the read's response survived the RESETs"
+        await axi_cdc_wait(dut)
+    await axi_wait_bus_idle(dut, "after two RESETs")
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, base + 4, 0, 0), "read after RESETs")
+    assert axi_resp(out) == 0 and axi_rdata(out) == values[1], hex(axi_rdata(out))
+
+    # No command is queued while a RESET is in flight: otherwise the AXI side
+    # runs it after that reset, and a second RESET folded into the first
+    # could not cancel it.  AXI clock stopped: RESET, then READ (refused).
+    await axi_wait_bus_idle(dut, "before RESET + READ")
+    ar0 = len(trace.ar)
+    axi_run[0] = False
+    await Timer(100, unit="ns")
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    out = await dr_scan_72(dut, axi_cmd(CMD_READ, base, 0, 0))
+    out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+    assert axi_status(out) & 0x2, "RESET in flight not reported busy"
+    axi_run[0] = True
+    await axi_cdc_wait(dut, 40)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x1), "a READ sent during RESET was answered"
+    await axi_cdc_wait(dut, 20)
+    assert len(trace.ar) == ar0, "a READ sent while RESET was in flight reached the bus"
+    await clear_after_error(dut)  # Verilog flags the refused READ (error_sticky)
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, base + 8, 0, 0), "read after RESET")
+    assert axi_resp(out) == 0 and axi_rdata(out) == values[2], hex(axi_rdata(out))
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_coalesced")
 
 
 @cocotb.test()
@@ -2277,6 +3018,461 @@ async def fcapz_ejtagaxi_reset_regression(dut):
     _assert_axi_addr(axi_trace.ar[0], 0x0000_0000)
     _assert_axi_addr(axi_trace.ar[1], 0x0000_0004)
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_axi_trace")
+
+
+async def wait_resp(dut, label: str) -> int:
+    """Poll NOPs until prev_valid; unlike issue_and_wait_valid, an error is fine."""
+    last = 0
+    for _ in range(64):
+        last = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        if axi_status(last) & 0x1:
+            return last
+        await axi_cdc_wait(dut)
+    raise AssertionError(
+        f"{label}: timed out waiting for prev_valid; last status=0x{axi_status(last):x}")
+
+
+async def clear_after_error(dut) -> None:
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    await axi_cdc_wait(dut)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x4)
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_r_drain(dut):
+    """A read the slave answers too late (R timeout) or that RESET cuts off is
+    drained: its late beats must not become the data of the next read, and a
+    slave that never answers must not wedge the bridge.
+
+    Runs with TIMEOUT=64; the slave holds its R channel back past it.
+    """
+    axi_ram, axi_trace = await init_ejtagaxi(dut)
+    r_channel = axi_ram.read_if.r_channel
+    for i in range(8):
+        axi_ram.write_dword(0x100 + 4 * i, 0x1111_0000 + i)
+        axi_ram.write_dword(0x200 + 4 * i, 0x2222_0000 + i)
+
+    async def read_ok(addr: int, want: int, label: str) -> None:
+        out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, addr, 0, 0), label)
+        assert axi_resp(out) == 0, f"{label}: resp {axi_resp(out)}"
+        assert axi_rdata(out) == want, (
+            f"{label}: read 0x{axi_rdata(out):08X}, expected 0x{want:08X}")
+
+    # Single read past the R timeout.
+    r_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x100, 0, 0))
+    out = await wait_resp(dut, "timed-out read")
+    assert axi_resp(out) == 2, "R timeout must answer SLVERR"
+    r_channel.pause = False
+    await axi_cdc_wait(dut, 20)
+    await clear_after_error(dut)
+    await read_ok(0x200, 0x2222_0000, "read after R timeout")
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("r_timeout_drain")
+
+    # Burst read past the R timeout: every late beat is drained.
+    r_channel.pause = True
+    setup = (0b01 << 12) | (0b010 << 8) | 3
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x100, setup, 0))
+    await axi_cdc_wait(dut)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut, 60)
+    r_channel.pause = False
+    await axi_cdc_wait(dut, 20)
+    await clear_after_error(dut)
+    await read_ok(0x204, 0x2222_0001, "read after burst R timeout")
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_timeout_drain")
+
+    # RESET while the slave owes the R beat.
+    r_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x108, 0, 0))
+    await axi_cdc_wait(dut, 4)
+    await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+    await axi_cdc_wait(dut)
+    r_channel.pause = False
+    await axi_cdc_wait(dut, 20)
+    out = await drain_until_idle(dut)
+    assert not (axi_status(out) & 0x4)
+    await read_ok(0x208, 0x2222_0002, "read after RESET with a read in flight")
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_inflight_drain")
+
+    # A slave that keeps the beat: after TIMEOUT cycles commands run again,
+    # but a read answers SLVERR without an AR while the beat is owed, and a
+    # write goes through.  Once the beat arrives it is drained and reads work.
+    r_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x10C, 0, 0))
+    out = await wait_resp(dut, "read to a silent slave")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    ars = len(axi_trace.ar)
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x20C, 0, 0))
+    out = await wait_resp(dut, "read while a beat is owed")
+    assert axi_resp(out) == 2
+    assert len(axi_trace.ar) == ars, "a read issued an AR while a beat was owed"
+    await clear_after_error(dut)
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x300, 0x3333_0000, 0xF), "write while a beat is owed")
+    assert axi_resp(out) == 0
+    assert axi_mem_read32(axi_ram, 0x300) == 0x3333_0000
+    r_channel.pause = False
+    await axi_cdc_wait(dut, 20)
+    await read_ok(0x210, 0x2222_0004, "read once the owed beat is drained")
+    assert not axi_trace.violations, axi_trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("drain_bounded")
+
+
+CFG_AXI_STATUS = 0x0030
+AXI_ST_WE_BUSY = 0x01
+AXI_ST_WE_DETACHED = 0x02
+AXI_ST_AR_ORPHAN = 0x04
+AXI_ST_R_DRAIN = 0x08
+AXI_ST_COLLECTING = 0x10
+AXI_ST_OWED = 0x20  # anything on the bus: write engine, any read, held AR, drain
+
+
+def burst_cfg(length: int, size: int = 2, burst: int = 1) -> int:
+    return ((burst & 0x3) << 12) | ((size & 0x7) << 8) | (length & 0xFF)
+
+
+async def axi_bus_status(dut) -> int:
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_CONFIG, CFG_AXI_STATUS, 0, 0), "AXI_STATUS")
+    return axi_rdata(out)
+
+
+async def axi_wait_bus_idle(dut, label: str) -> None:
+    for _ in range(16):
+        if await axi_bus_status(dut) == 0:
+            return
+        await axi_cdc_wait(dut, 10)
+    raise AssertionError(f"{label}: AXI_STATUS never went idle")
+
+
+async def collect_responses(dut, label: str) -> list[int]:
+    """NOP-poll until the bridge goes idle; return every response's resp code."""
+    resps: list[int] = []
+    for _ in range(96):
+        out = await dr_scan_72(dut, axi_cmd(CMD_NOP, 0, 0, 0))
+        status = axi_status(out)
+        if status & 0x1:
+            resps.append(axi_resp(out))
+        elif not (status & 0x2):
+            return resps
+        await axi_cdc_wait(dut, 4)
+    raise AssertionError(f"{label}: bridge never went idle ({resps})")
+
+
+async def scan_seq(dut, cmds: list[int], label: str) -> list[int]:
+    """Run *cmds* back to back, then NOP-poll until idle, like the host's
+    batched transfers; return the resp code of every response seen."""
+    resps: list[int] = []
+    for i, cmd in enumerate(cmds):
+        out = await dr_scan_72(dut, cmd)
+        if i and axi_status(out) & 0x1:
+            resps.append(axi_resp(out))
+    return resps + await collect_responses(dut, label)
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_w_safety(dut):
+    """Bus safety of the write path and of held ARs (BUG-280/289/296/299).
+
+    Runs with TIMEOUT=64.  The slave stalls single channels; the bridge must
+    never drop a VALID before READY (AxiTrace checks every cycle), must finish
+    every write it started with exactly the beats it announced, must take every
+    B itself, and must never put a burst on the bus before all of its beats are
+    in, or one that breaks an AXI burst rule.
+    """
+    axi_ram, trace = await init_ejtagaxi(dut)
+    wif = axi_ram.write_if
+    rif = axi_ram.read_if
+    mem = axi_ram.read_dword
+
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x002C, 0, 0), "FEATURES")
+    assert axi_rdata(out) & (1 << 25), "FEATURES[25] (bus-safe writes) not set"
+    assert await axi_bus_status(dut) == 0
+
+    # ---- A burst answers one response per beat (Verilog and VHDL alike).
+    resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, 0x080, burst_cfg(3), 0)] + [
+        axi_cmd(CMD_BURST_WDATA, 0, 0x0800_0000 + i, 0xF) for i in range(4)], "burst acks")
+    assert resps == [0, 0, 0, 0], f"burst responses {resps}"
+    assert [mem(0x080 + 4 * i) for i in range(4)] == [0x0800_0000 + i for i in range(4)]
+    assert trace.aw[-1]["len"] == 3 and len(trace.w) == 4
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_beat_acks")
+
+    # ---- AW stalled past TIMEOUT: SLVERR, but AWVALID stays up and the write
+    # completes once the slave takes it; its B produces no second response.
+    aw0, w0 = len(trace.aw), len(trace.w)
+    wif.aw_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x100, 0x1111_1111, 0xF))
+    out = await wait_resp(dut, "write with AW stalled")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    st = await axi_bus_status(dut)
+    assert st & (AXI_ST_WE_BUSY | AXI_ST_WE_DETACHED | AXI_ST_OWED) == (
+        AXI_ST_WE_BUSY | AXI_ST_WE_DETACHED | AXI_ST_OWED), hex(st)
+    assert len(trace.aw) == aw0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("aw_stall_detached")
+
+    # A write while the engine still owes the slave: SLVERR, no AW of its own.
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x104, 0x2222_2222, 0xF))
+    out = await wait_resp(dut, "write while the engine is busy")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("write_quarantine")
+
+    wif.aw_channel.pause = False
+    await axi_wait_bus_idle(dut, "AW stall")
+    assert mem(0x100) == 0x1111_1111
+    assert mem(0x104) == 0, "a quarantined write reached the bus"
+    assert len(trace.aw) == aw0 + 1 and len(trace.w) == w0 + 1
+    assert trace.w[-1]["cycle"] <= trace.aw[-1]["cycle"], "expected W before AW here"
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x108, 0x3333_3333, 0xF), "write after the stall")
+    assert axi_resp(out) == 0 and mem(0x108) == 0x3333_3333
+    assert await collect_responses(dut, "no stray B response") == []
+
+    # ---- B held back past TIMEOUT: absorbed by the engine, never handed to a
+    # later write.
+    wif.b_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x200, 0x4444_4444, 0xF))
+    out = await wait_resp(dut, "write with B stalled")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & AXI_ST_WE_DETACHED
+    aw1 = len(trace.aw)
+    await dr_scan_72(dut, axi_cmd(CMD_WRITE, 0x204, 0x5555_5555, 0xF))
+    out = await wait_resp(dut, "write while B is owed")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert len(trace.aw) == aw1
+    wif.b_channel.pause = False
+    await axi_wait_bus_idle(dut, "late B")
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x208, 0x6666_6666, 0xF), "write after late B")
+    assert axi_resp(out) == 0
+    assert await collect_responses(dut, "late B gave no response") == []
+    assert mem(0x200) == 0x4444_4444 and mem(0x204) == 0 and mem(0x208) == 0x6666_6666
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("late_b_absorbed")
+
+    # ---- Incomplete bursts never reach the bus.
+    aw2 = len(trace.aw)
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x300, burst_cfg(3), 0))
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, 0x7000_0000, 0xF))
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, 0x7000_0001, 0xF))
+    await axi_cdc_wait(dut, 10)
+    # Collecting alone owes the slave nothing.
+    assert await axi_bus_status(dut) & (AXI_ST_COLLECTING | AXI_ST_OWED) == AXI_ST_COLLECTING
+    await clear_after_error(dut)  # CMD_RESET mid-collection
+    assert await axi_bus_status(dut) == 0
+    assert len(trace.aw) == aw2 and mem(0x300) == 0 and mem(0x304) == 0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("collect_reset_discard")
+
+    resps = await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0x340, burst_cfg(3), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7100_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7100_0001, 0xF),
+        axi_cmd(CMD_WRITE, 0x380, 0x7200_0000, 0xF)], "write ends a collection")
+    assert resps == [0, 0, 0], resps
+    assert len(trace.aw) == aw2 + 1 and trace.aw[-1]["addr"] == 0x380
+    assert mem(0x340) == 0 and mem(0x380) == 0x7200_0000
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("collect_cmd_discard")
+
+    resps = await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0x400, burst_cfg(3), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7300_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7300_0001, 0xF),
+        axi_cmd(CMD_BURST_SETUP, 0x440, burst_cfg(1), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7400_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7400_0001, 0xF)], "SETUP restarts a collection")
+    assert resps == [0, 0, 0, 0], resps
+    assert len(trace.aw) == aw2 + 2
+    assert trace.aw[-1]["addr"] == 0x440 and trace.aw[-1]["len"] == 1
+    assert mem(0x400) == 0 and mem(0x440) == 0x7400_0000 and mem(0x444) == 0x7400_0001
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("collect_setup_restart")
+
+    # ---- W stalled mid-burst, then CMD_RESET: the burst still completes with
+    # exactly its four beats, WLAST on the fourth, and the original data.
+    w2 = len(trace.w)
+    values = [0x7500_0000 + i for i in range(4)]
+    wif.w_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x500, burst_cfg(3), 0))
+    for v in values:
+        await dr_scan_72(dut, axi_cmd(CMD_BURST_WDATA, 0, v, 0xF))
+    await axi_cdc_wait(dut, 6)
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & AXI_ST_WE_DETACHED
+    wif.w_channel.pause = False
+    await axi_wait_bus_idle(dut, "W stall + RESET")
+    beats = trace.w[w2:]
+    assert [b["data"] for b in beats] == values, beats
+    assert [b["last"] for b in beats] == [0, 0, 0, 1]
+    assert [mem(0x500 + 4 * i) for i in range(4)] == values
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("w_stall_reset_completes")
+
+    # ---- Single-beat burst whose W is taken before its AW.
+    wif.aw_channel.pause = True
+
+    async def release_aw_after_w() -> None:
+        w_now = len(trace.w)
+        while len(trace.w) == w_now:
+            await RisingEdge(dut.axi_clk)
+        for _ in range(4):
+            await RisingEdge(dut.axi_clk)
+        wif.aw_channel.pause = False
+
+    release = cocotb.start_soon(release_aw_after_w())
+    resps = await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0x600, burst_cfg(0), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7600_0000, 0xF)], "W-before-AW single-beat burst")
+    await release
+    assert resps == [0], resps
+    assert trace.w[-1]["cycle"] < trace.aw[-1]["cycle"]
+    assert mem(0x600) == 0x7600_0000
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("w_before_aw")
+
+    # ---- Bursts that break an AXI rule or exceed the buffer: SLVERR for every
+    # beat, nothing on the bus.
+    refused = [
+        (0xFFC, burst_cfg(1)),            # INCR crossing 4 KB
+        (0x700, burst_cfg(0, size=3)),    # 8-byte beats on a 4-byte bus
+        (0x700, burst_cfg(0, burst=3)),   # reserved burst type
+        (0x700, burst_cfg(16, burst=0)),  # FIXED longer than 16 beats
+        (0x700, burst_cfg(2, burst=2)),   # WRAP of 3 beats
+        (0x702, burst_cfg(1, burst=2)),   # WRAP from an unaligned address
+        (0x700, burst_cfg(16)),           # 17 beats > FIFO_DEPTH (16)
+    ]
+    for addr, cfg in refused:
+        aw_n, ar_n = len(trace.aw), len(trace.ar)
+        beats_n = (cfg & 0xFF) + 1
+        resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr, cfg, 0)] + [
+            axi_cmd(CMD_BURST_WDATA, 0, 0xBAD0_0000 + i, 0xF) for i in range(beats_n)],
+            f"refused burst 0x{addr:X}/0x{cfg:X}")
+        assert resps == [2] * beats_n, (hex(addr), hex(cfg), resps)
+        await clear_after_error(dut)
+        assert len(trace.aw) == aw_n, f"refused burst 0x{addr:X}/0x{cfg:X} reached the bus"
+        resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr, cfg, 0),
+                                     axi_cmd(CMD_BURST_RSTART, 0, 0, 0)],
+                               f"refused read 0x{addr:X}/0x{cfg:X}")
+        assert resps == [2], (hex(addr), hex(cfg), resps)
+        assert len(trace.ar) == ar_n, f"refused read 0x{addr:X}/0x{cfg:X} reached the bus"
+        await clear_after_error(dut)
+    assert mem(0x700) == 0 and mem(0x704) == 0
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_refused")
+
+    # Legal edge cases go through.
+    assert await scan_seq(dut, [
+        axi_cmd(CMD_BURST_SETUP, 0xFF8, burst_cfg(1), 0),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7700_0000, 0xF),
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7700_0001, 0xF)], "INCR to the 4 KB edge") == [0, 0]
+    assert mem(0xFF8) == 0x7700_0000 and mem(0xFFC) == 0x7700_0001
+    assert await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, 0x780, burst_cfg(3, burst=0), 0)] + [
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7800_0000 + i, 0xF) for i in range(4)],
+        "FIXED burst") == [0, 0, 0, 0]
+    assert mem(0x780) == 0x7800_0003 and mem(0x784) == 0
+    assert await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, 0x7C8, burst_cfg(3, burst=2), 0)] + [
+        axi_cmd(CMD_BURST_WDATA, 0, 0x7900_0000 + i, 0xF) for i in range(4)],
+        "WRAP burst") == [0, 0, 0, 0]
+    assert [mem(0x7C0 + 4 * i) for i in range(4)] == [
+        0x7900_0002, 0x7900_0003, 0x7900_0000, 0x7900_0001]
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_legal_edges")
+
+    # ---- AR stalled past TIMEOUT: SLVERR, ARVALID stays up, reads are refused
+    # without an AR until the slave takes it, then its beat is drained.
+    axi_ram.write_dword(0x900, 0x9000_0000)
+    axi_ram.write_dword(0x904, 0x9000_0001)
+    ar0 = len(trace.ar)
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x900, 0, 0))
+    out = await wait_resp(dut, "read with AR stalled")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & (AXI_ST_AR_ORPHAN | AXI_ST_OWED) == (
+        AXI_ST_AR_ORPHAN | AXI_ST_OWED)
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0x904, 0, 0))
+    out = await wait_resp(dut, "read while the AR is held")
+    assert axi_resp(out) == 2
+    await clear_after_error(dut)
+    assert len(trace.ar) == ar0
+    rif.ar_channel.pause = False
+    await axi_wait_bus_idle(dut, "AR stall")
+    assert len(trace.ar) == ar0 + 1 and trace.ar[-1]["addr"] == 0x900
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x904, 0, 0), "read after AR stall")
+    assert axi_rdata(out) == 0x9000_0001
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("ar_stall_held")
+
+    # CMD_RESET while a burst AR waits: the AR stays up, then is drained.
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_SETUP, 0x900, burst_cfg(1), 0))
+    await dr_scan_72(dut, axi_cmd(CMD_BURST_RSTART, 0, 0, 0))
+    await axi_cdc_wait(dut, 8)
+    await clear_after_error(dut)
+    assert await axi_bus_status(dut) & (AXI_ST_AR_ORPHAN | AXI_ST_OWED) == (
+        AXI_ST_AR_ORPHAN | AXI_ST_OWED)
+    rif.ar_channel.pause = False
+    await axi_wait_bus_idle(dut, "AR held over RESET")
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_READ, 0x900, 0, 0), "read after held AR")
+    assert axi_rdata(out) == 0x9000_0000
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("ar_reset_held")
+
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("axi_valid_stable")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_ar_reset_race(dut):
+    """CMD_RESET recognized in the very cycle the slave takes a pending AR.
+
+    Runs with TIMEOUT=1024, so the AR is still the FSM's own (not yet held
+    after a timeout) when the RESET arrives.  The slave's ARREADY is released
+    at every AXI cycle offset around the RESET; in each case the bridge must
+    issue that AR exactly once (a VALID left up after its handshake is a
+    second read nobody drains) and the next read must return its own data.
+    """
+    axi_ram, trace = await init_ejtagaxi(dut)
+    rif = axi_ram.read_if
+    axi_ram.write_dword(0xA00, 0xA000_0000)
+    axi_ram.write_dword(0xA04, 0xA000_0004)
+
+    # An ordinary read the host still waits for is on the bus too: the
+    # "anything owed" bit is set before any timeout, with no AR held yet.
+    rif.ar_channel.pause = True
+    await dr_scan_72(dut, axi_cmd(CMD_READ, 0xA04, 0, 0))
+    await axi_cdc_wait(dut, 2)
+    st = await axi_bus_status(dut)
+    rif.ar_channel.pause = False
+    assert st & (AXI_ST_OWED | AXI_ST_AR_ORPHAN) == AXI_ST_OWED, hex(st)
+    out = await wait_resp(dut, "read under a status poll")
+    assert axi_resp(out) == 0 and axi_rdata(out) == 0xA000_0004, hex(axi_rdata(out))
+    await axi_wait_bus_idle(dut, "read under a status poll")
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("status_owed_read")
+
+    async def release_ar(k: int) -> None:
+        await RisingEdge(dut.update)
+        for _ in range(k):
+            await RisingEdge(dut.axi_clk)
+        rif.ar_channel.pause = False
+
+    for d, k in [(d, k) for d in range(3) for k in range(12)]:
+        ar0 = len(trace.ar)
+        rif.ar_channel.pause = True
+        await dr_scan_72(dut, axi_cmd(CMD_READ, 0xA00, 0, 0))
+        # d shifts the TCK/axi_clk phase of the RESET by a third of a cycle.
+        await axi_cdc_wait(dut, 2 + d)
+        rel = cocotb.start_soon(release_ar(k))
+        await dr_scan_72(dut, axi_cmd(CMD_RESET, 0, 0, 0))
+        await rel
+        await axi_cdc_wait(dut)
+        await drain_until_idle(dut)
+        await axi_wait_bus_idle(dut, f"AR/RESET race d={d} k={k}")
+        await axi_cdc_wait(dut, 20)
+        assert len(trace.ar) == ar0 + 1, (
+            f"d={d} k={k}: {len(trace.ar) - ar0} AR handshakes for one READ")
+        out = await issue_and_wait_valid(
+            dut, axi_cmd(CMD_READ, 0xA04, 0, 0), f"read after race d={d} k={k}")
+        assert axi_rdata(out) == 0xA000_0004, f"d={d} k={k}: {axi_rdata(out):#x}"
+
+    assert not trace.violations, trace.violations
 
 
 UART_CMD_NOP = 0x0

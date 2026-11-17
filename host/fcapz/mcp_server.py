@@ -82,7 +82,7 @@ JsonDict = dict[str, Any]
 # server's guarantee.
 Backend = Literal["hw_server", "openocd", "usb_blaster", "ftdi", "serial"]
 # JTAG IR-code presets; omitted, RPC infers one from the tap name.
-IrTable = Literal["xilinx7", "ultrascale", "gowin", "polarfire", "efinix"]
+IrTable = Literal["xilinx7", "ultrascale", "gowin", "polarfire", "efinix", "ecp5"]
 # The debug cores one fcapz_connect can open. RPC `close` tears the whole
 # board session down, so the ELA has no close of its own: "all" is it.
 Core = Literal["ela", "eio", "axi", "uart"]
@@ -285,6 +285,8 @@ class CaptureConfigDict(TypedDict, total=False):
     probes: list[ProbeEntry] | str
     probe_file: str
     channel: int
+    # Runtime probe-mux slice (cores with probe_mux_w > 0 in fcapz_probe).
+    probe_sel: int
     decimation: int
     ext_trigger_mode: ExtTriggerMode
     stor_qual_mode: StorQualMode
@@ -1682,9 +1684,10 @@ class FcapzMcpSession:
             raise PermissionError(
                 "FPGA programming is disabled; restart with --allow-program to enable it"
             )
-        if backend != "hw_server":
+        if backend not in ("hw_server", "ftdi"):
             raise ValueError(
-                "program= is only supported for backend 'hw_server' in this MCP server"
+                "program= is only supported for backends 'hw_server' and 'ftdi' "
+                "in this MCP server"
             )
         path = Path(program).expanduser().resolve()
         if path.suffix.lower() != ".bit":
@@ -3499,8 +3502,9 @@ def build_mcp_server(
         quartus_stp executable — the latter spawns a host process, so it is
         rejected unless fcapz-mcp was started with --allow-program (omit it to
         use the server's configured toolchain). For ftdi, `hardware` names
-        the adapter by D2XX description or serial (omit it only when a
-        single FlashPro or Digilent adapter is attached; any other FTDI
+        the adapter by description or serial, optionally prefixed with
+        `usb:` for libusb (omit it only when exactly one recognised
+        FlashPro, Digilent or KV260 adapter is attached; any other FTDI
         adapter must be named) and `tck_mhz` sets TCK (default 6). For serial,
         `serial_port` (required) names a port this machine lists, e.g. "COM5"
         or "/dev/ttyACM0", and `baudrate` defaults to 1000000. The ELA
@@ -3510,8 +3514,9 @@ def build_mcp_server(
         to the backend is rejected. `ir_table` picks the JTAG IR codes for
         hw_server/openocd/ftdi; omit it to infer them from the tap name (gw*
         is Gowin, xcku/xcvu/xcau UltraScale, else 7-series) or, on ftdi, from
-        the IDCODE. `program` (ELA only, hw_server only) is disabled unless
-        started with --allow-program and must be an existing .bit file;
+        the IDCODE. `program` (ELA only; hw_server, or ftdi for AMD/Xilinx
+        7-series) is disabled unless started with --allow-program and must
+        be an existing .bit file;
         `single_chain_burst` is ELA only.
         """
 

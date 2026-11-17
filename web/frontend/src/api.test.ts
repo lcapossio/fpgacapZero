@@ -104,7 +104,9 @@ describe("rpc", () => {
     const r = await rpc("axi_read", { addr: "0x0" });
     expect(r.value).toBe("0x42");
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toEqual({ cmd: "axi_read", addr: "0x0" });
+    const body = JSON.parse(init.body as string);
+    expect(body).toEqual({ cmd: "axi_read", addr: "0x0", request_id: body.request_id });
+    expect(typeof body.request_id).toBe("string");
   });
 
   it("throws RpcError carrying the server exception type on in-band failure", async () => {
@@ -139,5 +141,47 @@ describe("rpc", () => {
     const pending = rpc("connect", {}, 60000, ac.signal).catch((e: unknown) => e);
     ac.abort();
     expect(await pending).toBeInstanceOf(RpcCancelled);
+  });
+
+  function stubHangingFetch() {
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      if (body.cmd === "cancel") {
+        return Promise.resolve({ status: 200, json: async () => ({ ok: true }) });
+      }
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError")),
+        );
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("with serverCancel, an abort also cancels the request on the server", async () => {
+    const fetchMock = stubHangingFetch();
+    const ac = new AbortController();
+    const pending = rpc("connect", {}, 60000, ac.signal, { serverCancel: true }).catch(
+      (e: unknown) => e,
+    );
+    ac.abort();
+    expect(await pending).toBeInstanceOf(RpcCancelled);
+    const bodies = fetchMock.mock.calls.map((c) =>
+      JSON.parse((c as unknown as [string, RequestInit])[1].body as string),
+    );
+    expect(bodies[1]).toEqual({ cmd: "cancel", target: bodies[0].request_id });
+    // The cancel is a fresh request, not aborted with the one it cancels.
+    const cancelInit = (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1];
+    expect(cancelInit.signal).toBeUndefined();
+  });
+
+  it("without serverCancel, an abort only stops waiting", async () => {
+    const fetchMock = stubHangingFetch();
+    const ac = new AbortController();
+    const pending = rpc("capture_wait", {}, 60000, ac.signal).catch((e: unknown) => e);
+    ac.abort();
+    expect(await pending).toBeInstanceOf(RpcCancelled);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

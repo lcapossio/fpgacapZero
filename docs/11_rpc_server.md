@@ -6,10 +6,6 @@
 > JSON commands over its stdin, parse the JSON responses on its
 > stdout, and integrate fcapz into a non-Python test harness or
 > CI pipeline.
->
-> **Audience**: anyone integrating fcapz with a Tcl test bench, a
-> Rust test runner, a Node.js dashboard, or any environment that
-> can read/write a child process's stdio.
 
 ## Why RPC and not the Python API directly
 
@@ -31,9 +27,14 @@ controllers directly — there is no benefit to going through RPC.
 ## Protocol
 
 **Transport**: line-delimited JSON over the server process's
-stdin and stdout.  One JSON object per line on each side.  No
-framing, no length prefix, no message ID — the protocol is
-strictly request/response, in order.
+stdin and stdout.  One JSON object per line on each side, with no
+framing or length prefix.  Requests run one at a time, in order,
+and each gets one reply.  The exception is [`cancel`](#cancel): it
+is answered at once, while the request it interrupts is still
+running, so its reply can come first.  A request may carry a
+`request_id` (a string or a number, unique per request); its reply
+echoes it, which is how a client matches replies when a cancel is in
+play.
 
 **Request**:
 ```json
@@ -42,17 +43,21 @@ strictly request/response, in order.
 
 **Response on success**:
 ```json
-{"ok":true,"schema_version":"1.1"}
+{"ok":true,"schema_version":"1.2"}
 ```
 
 **Response on failure**:
 ```json
-{"ok":false,"schema_version":"1.1","error":"...","type":"RuntimeError","trace":"..."}
+{"ok":false,"schema_version":"1.2","error":"...","type":"RuntimeError","trace":"RuntimeError: ..."}
 ```
 
 Every response carries `"schema_version"` so a stale client can
 detect when it's talking to a newer server and update its
-parser.  The current schema version is `"1.1"`.
+parser.  The current schema version is `"1.2"`.  Every response
+also carries `"session_epoch"`, a number that goes up when a command
+that starts or ends a session finishes (`connect`, `close`, and the
+`eio_`/`axi_`/`uart_` connect and close commands), and when a cancel
+ends a session; see [`cancel`](#cancel).
 
 ## Spawning the server
 
@@ -149,7 +154,7 @@ readiness wait.
   "host": "127.0.0.1",
   "port": 3121,
   "tap": "xc7a100t",          // hw_server target, openocd TAP, or Quartus device/auto
-  "program": "my_design.bit"  // optional, hw_server only
+  "program": "my_design.bit"  // optional: hw_server, or ftdi (AMD/Xilinx 7-series)
 }
 ```
 
@@ -186,7 +191,7 @@ or on the analyzer's chain — shares that transport and works.
 The chain carrying the burst reader's data DR is also excluded from every core
 sweep: it is a streaming interface, not a register one.
 
-Response: `{"ok": true, "schema_version": "1.1", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1}`
+Response: `{"ok": true, "schema_version": "1.2", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1, "instance": null}`
 
 `transport_kind` is `"jtag"` for a link that reaches the fabric through a real
 TAP, or `"bytestream"` for one that addresses chains directly by index. IR-table
@@ -198,9 +203,14 @@ something to report: `{"kind", "channel", "proto_version", "num_chains",
 "max_dr_bits"}` for the byte-stream bridge (plus `baudrate` over serial), and
 `null` for a JTAG probe, which negotiates nothing.
 
-For a direct FTDI cable (FlashPro5, Digilent), use `"backend": "ftdi"`.
-`hardware` optionally names the channel and `tck_mhz` sets the clock
-(default 6). The IR table comes from the device IDCODE, and `ir_table` in
+For a direct FTDI cable (FlashPro5, Digilent, the KV260 carrier), use
+`"backend": "ftdi"`. `hardware` optionally names the channel, by D2XX
+description or serial, or as `usb:<description>` / `usb:<serial>` for a
+libusb channel, and `tck_mhz` sets the clock
+(default 6). `program` configures an AMD/Xilinx 7-series FPGA with a `.bit`
+or `.bin` over JTAG first. On every backend, EIO, AXI and UART side
+connects ignore `program`, so they never reprogram the FPGA under the session.
+The IR table comes from the device IDCODE, and `ir_table` in
 the response echoes the detected family:
 
 ```json
@@ -230,7 +240,9 @@ session, e.g. to reach an AXI monitor directly.
 `"instance"` binds the session to a core-manager slot: the analyzer selects
 it before every access, so an EIO in another slot of the same hub cannot move
 it.  Without it the session is bound to the chain's first ELA slot, never to
-whichever slot the hub has active.
+whichever slot the hub has active.  The response's `instance` is the slot the
+session bound, or `null` for a core reached directly (a slot named for a chain
+without a manager is ignored).
 
 #### `list_serial_ports`
 
@@ -275,7 +287,7 @@ Response (empty `boards` means nothing compatible was reachable):
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "backend": "openocd",
   "boards": [
     {
@@ -306,12 +318,21 @@ are left untouched.
 {"cmd": "rebind", "chain": 2}
 ```
 
-`"instance"` selects a core-manager slot (`null` for none).  Left out, a
-rebind to the same chain keeps the session's slot and one to another chain
-selects none.
+`"instance"` selects a core-manager slot; `null` binds the chain's first ELA
+slot when it has a manager.  Left out, a rebind to the same chain keeps the
+session's slot and one to another chain binds that chain's first ELA slot when
+it has a manager.  With `instance` and no `chain`, the session switches slots
+on its current chain.  A target that does not probe as an ELA (an EIO slot, an
+empty chain) is refused and the session stays where it was:
 
-Response: `{"ok": true, "schema_version": "1.1", "chain": 2, "probe": { ... }}`
-— `probe` is the newly-bound core's identity (same shape as [`probe`](#probe)).
+```json
+{"cmd": "rebind", "instance": 1}
+```
+
+Response: `{"ok": true, "schema_version": "1.2", "chain": 2, "instance": null, "probe": { ... }}`
+— `instance` is the slot the session bound (`null` for a core reached
+directly, even if the request named a slot), and `probe` is the newly-bound
+core's identity (same shape as [`probe`](#probe)).
 
 #### `close`
 
@@ -321,12 +342,52 @@ Releases the transport.
 {"cmd": "close"}
 ```
 
+In the web interface, a `close` sent while another command holds the
+session (a hung connect, a long capture) interrupts that command as
+[`cancel`](#cancel) does, then closes.
+
+#### `cancel`
+
+Interrupts the command in flight, without waiting for it.  Sent while
+another request is running, it is answered at once (on stdin, on a
+WebSocket and over HTTP alike).
+
+```json
+{"cmd": "cancel", "target": "c1"}
+```
+
+- `target` (optional): the `request_id` of the request to interrupt.
+  Running, it is interrupted; not started yet (queued behind another),
+  it is refused with `RequestCancelled` when its turn comes; finished,
+  nothing happens.  A request that finishes after the cancel arrived
+  still fails with `RequestCancelled`: the session ends either way.
+- `session_epoch` (optional): only act if this is still the session's
+  epoch, so a late cancel cannot end a newer session.  The epoch moves
+  when a `connect` finishes, so the epoch a client last saw still names
+  a `connect` in flight.
+- With neither, it interrupts every command running (a target scan
+  included), and does nothing when the server is idle.
+
+Response: `{"ok": true, "schema_version": "1.2", "cancelled": true}`,
+or `"cancelled": false` with a `reason` (`"idle"`, `"request not
+running"`, `"request finished"`, `"session ended"`).
+
+Interrupting a session command cancels the session's transports, which
+is what makes a blocked read return: the interrupted request fails
+(often with `ConnectionError`), the server then closes the session, and
+the client reconnects.  Interrupting a stateless command (`scan_targets`,
+`openocd_start`, `openocd_status`, `list_serial_ports`) stops only what
+that command opened, and leaves the session alone.  The cancel itself
+scans nothing on the JTAG chain, so a core-manager `MGR_OWNER` claim the
+session held stays set.
+
 #### `scan_targets`
 
 List JTAG targets before connecting (no active session needed). For
 `backend: "hw_server"` it returns the XSDB `jtag targets` names; for
 `backend: "openocd"` it returns the tap names (`jtag names`); for
-`backend: "ftdi"` it returns the FTDI channel descriptions. `discover_boards`
+`backend: "ftdi"` it returns the FTDI selectors: D2XX channel descriptions
+and `usb:`-prefixed libusb ones. `discover_boards`
 is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
 
 ```json
@@ -407,10 +468,10 @@ Response:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "probe": {
     "version_major": 0,
-    "version_minor": 3,
+    "version_minor": 5,
     "core_id": 19521,
     "sample_width": 8,
     "depth": 1024,
@@ -432,8 +493,10 @@ connected ELA, adds the EIO if one is discoverable, and scans the other BSCAN
 USER chains (1, 2 and 5) for further cores — a plain ELA or an AXI monitor — so
 clients can list everything and offer a switch. When the connected chain is a
 core manager, the manager (`type` `manager`) and its other slots are listed
-too, each with its slot in `instance`. Each entry has `type`, `name`,
-`core_id`, `chain`, `base_addr`, `version_major`/`version_minor`, and a
+too, each with its slot in `instance`. A core manager on another chain is
+listed once, by the ELA slot a `rebind` to that chain binds. Each entry has
+`type`, `name`, `core_id`, `chain`, `base_addr`, `instance` (the manager slot,
+`null` for a core reached directly), `version_major`/`version_minor`, and a
 type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, the
 manager's probe dict, or the monitor geometry `{proto, addr_w, data_w, decode,
 sample_width}` for `axi_mon`).
@@ -448,10 +511,12 @@ Response:
   "ok": true,
   "cores": [
     {"type": "ela", "name": "Embedded Logic Analyzer", "core_id": 19521,
-     "chain": 1, "base_addr": 0, "version_major": 0, "version_minor": 4,
+     "chain": 1, "base_addr": 0, "instance": null, "version_major": 0,
+     "version_minor": 5,
      "info": {"sample_width": 8, "depth": 64, "num_channels": 6}},
     {"type": "eio", "name": "Embedded I/O", "core_id": 18767,
-     "chain": 1, "base_addr": 32768, "version_major": 0, "version_minor": 4,
+     "chain": 1, "base_addr": 32768, "instance": null, "version_major": 0,
+     "version_minor": 5,
      "info": {"in_w": 2, "out_w": 6}}
   ]
 }
@@ -491,6 +556,7 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
   "depth": 1024,
   "sample_clock_hz": 100000000,
   "channel": 0,
+  "probe_sel": 0,
   "decimation": 0,
   "ext_trigger_mode": 0,
   "stor_qual_mode": 0,
@@ -507,6 +573,10 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 `depth` and `sample_width` must match the synthesized core; omit them to
 read them from the connected core (a `probe_file`'s `sample_width` takes
 precedence). An explicit value that disagrees is rejected.
+
+`probe_sel` (int 0..255, default 0) picks the runtime probe mux slice on a
+core that reports `probe_mux_w > 0` in `probe`. A slice the core does not
+have reads as slice 0.
 
 `rle` (bool, default `false`) turns on run-length capture on cores that
 report `rle_width > 0` in `probe`. Capture replies then carry a
@@ -573,7 +643,7 @@ Response (format = "json"):
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "format": "json",
   "overflow": false,
   "sample_count": 25,
@@ -610,7 +680,7 @@ unbounded timeouts could starve all clients.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "in_w": 8, "out_w": 8, "chain": 3}`
+Response: `{"ok": true, "schema_version": "1.2", "in_w": 8, "out_w": 8, "chain": 3}`
 
 With `"instance"` (an EIO in a core-manager slot) the EIO shares the ELA
 session's transport, so the two keep one lock and one cache of the hub's
@@ -653,7 +723,7 @@ Response: as `eio_connect`, plus `"discovered": true` and the `base_addr` found.
 {"cmd": "eio_read"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "value": 167, "value_hex": "0xa7"}`.
+Response: `{"ok": true, "schema_version": "1.2", "value": 167, "value_hex": "0xa7"}`.
 `value_hex` carries the full width losslessly for EIO wider than a JS-safe
 integer (53 bits); `value` is the same value as a JSON number.
 
@@ -685,11 +755,11 @@ Present → the bridge identity plus the `chain` it was found on; absent →
 `{"present": false}`:
 ```json
 {
-  "ok": true, "schema_version": "1.1",
+  "ok": true, "schema_version": "1.2",
   "present": true, "chain": 4,
   "bridge_id": 19032, "core_id": 19032,
   "legacy_id": false, "legacy_raw_id": null,
-  "version_major": 0, "version_minor": 4,
+  "version_major": 0, "version_minor": 5,
   "addr_w": 32, "data_w": 32, "fifo_depth": 16
 }
 ```
@@ -713,14 +783,14 @@ Response includes the cached `fifo_depth`:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "bridge_id": 19032,
   "core_id": 19032,
   "legacy_id": false,
   "legacy_raw_id": null,
-  "version": 281176,
+  "version": 346712,
   "version_major": 0,
-  "version_minor": 4,
+  "version_minor": 5,
   "addr_w": 32,
   "data_w": 32,
   "fifo_depth": 16
@@ -741,7 +811,7 @@ Response includes the cached `fifo_depth`:
 
 `addr` accepts a hex string (`"0x..."`) or a decimal int.
 
-Response: `{"ok": true, "schema_version": "1.1", "value": "0xDEADBEEF"}`
+Response: `{"ok": true, "schema_version": "1.2", "value": "0xDEADBEEF"}`
 
 #### `axi_write`
 
@@ -754,7 +824,7 @@ Response: `{"ok": true, "schema_version": "1.1", "value": "0xDEADBEEF"}`
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "resp": 0}`
+Response: `{"ok": true, "schema_version": "1.2", "resp": 0}`
 
 `resp` is the AXI response code: 0 = OKAY, 2 = SLVERR, 3 = DECERR.
 A non-OKAY response raises `AXIError` server-side, which becomes
@@ -775,7 +845,7 @@ Response:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "words": ["0x12345678", "0x00000001", "0x00000002", ...]
 }
 ```
@@ -791,7 +861,7 @@ Response:
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "count": 4}`
+Response: `{"ok": true, "schema_version": "1.2", "count": 4}`
 
 ### EJTAG-UART
 
@@ -828,7 +898,7 @@ print(base64.b64encode(b"Hello\n").decode())
 {"cmd": "uart_send", "data": "SGVsbG8K"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.1", "bytes_sent": 6}`
+Response: `{"ok": true, "schema_version": "1.2", "bytes_sent": 6}`
 
 #### `uart_recv`
 
@@ -840,7 +910,7 @@ Response (`data` is base64-encoded):
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "data": "SGVsbG8gd29ybGQK",
   "bytes_received": 12
 }
@@ -856,7 +926,7 @@ Response: returns the same dict as `EjtagUartController.status()`:
 ```json
 {
   "ok": true,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "rx_ready": true,
   "tx_full": false,
   "rx_overflow": false,
@@ -868,7 +938,8 @@ Response: returns the same dict as `EjtagUartController.status()`:
 ## Schema versioning
 
 Every response carries `"schema_version"`.  The current version is
-`"1.1"`.  When the schema changes in a backwards-incompatible way
+`"1.2"` (1.2 added `cancel`, `request_id` and `session_epoch`).  When
+the schema changes in a backwards-incompatible way
 (adding required fields, removing keys, changing semantics) the
 major number bumps; backwards-compatible additions bump the minor.
 
@@ -885,16 +956,21 @@ On any exception, the response shape is:
 ```json
 {
   "ok": false,
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "error": "burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH",
   "type": "ValueError",
-  "trace": "Traceback (most recent call last):\n  File ..."
+  "trace": "ValueError: burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH"
 }
 ```
 
-`type` is the Python exception class name; `trace` is the last
-frame of the traceback.  Both are useful for surfacing meaningful
-errors back to the calling language.
+`type` is the Python exception class name, useful for surfacing
+meaningful errors back to the calling language.  `trace` is just
+`Type: message`; the reply carries no traceback, so no source path
+reaches a client.  The server logs the traceback at DEBUG on the
+`fcapz.rpc` logger (the web interface logs it with its warning on
+`fcapz.web`).  A request that carried a `request_id` gets it back in
+its error reply too, and error replies carry `session_epoch` like
+successful ones.
 
 Common error types you should expect:
 
@@ -967,9 +1043,10 @@ close $rpc
 - **No streaming**.  `uart_recv` returns a complete buffer; for
   continuous monitoring use `uart_recv` in a loop.  A future
   schema version may add streaming subscriptions.
-- **No cancellation mid-call**.  If you send `capture` and the
-  trigger never fires, the only way to recover is to wait for the
-  timeout or kill the child process.
+- **Cancelling ends the session**.  [`cancel`](#cancel) interrupts a
+  call that never returns (a `capture` whose trigger never fires, a
+  connect to a hung probe), but it closes the transports to do it, so
+  the client reconnects afterwards.
 - **stderr is not parsed**.  Anything the server writes to stderr
   (Python warnings, traceback context) is informational only —
   the client should not depend on it.

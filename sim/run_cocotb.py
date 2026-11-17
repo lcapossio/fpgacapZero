@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from _runner_utils import check_results, relaunch_in_wsl, running_in_wsl
@@ -60,18 +60,65 @@ _DEBUG_MULTI_TAP_SRC = {
     "intel": ((SIM / "sld_virtual_jtag_stub.v", RTL / "jtag_tap" / "jtag_tap_intel.v"),
               (SIM / "sld_virtual_jtag_stub.vhd",
                RTL / "vhdl" / "jtag_tap" / "jtag_tap_intel.vhd")),
+    "ecp5": ((SIM / "jtagg_stub.v", RTL / "jtag_tap" / "jtag_tap_ecp5.v"),
+             (SIM / "jtagg_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_ecp5.vhd")),
+    "polarfire": ((SIM / "ujtag_stub.v", RTL / "jtag_tap" / "jtag_tap_polarfire.v"),
+                  (SIM / "ujtag_stub.vhd", RTL / "vhdl" / "jtag_tap" / "jtag_tap_polarfire.vhd")),
+    "efinix": ((RTL / "jtag_tap" / "jtag_tap_efinix.v",),
+               (RTL / "vhdl" / "jtag_tap" / "jtag_tap_efinix.vhd",)),
 }
 
+# Shell parameters per vendor: a nondefault chain (tb/cocotb/core_test.py
+# drives the matching select).  ECP5 has two chains; PolarFire selects by
+# IR opcode; Efinix's chain is whichever User TAP block is wired.
+_DEBUG_MULTI_PARAMS = {
+    "xilinx7": {"CTRL_CHAIN": 3},
+    "xilinxus": {"CTRL_CHAIN": 3},
+    "intel": {"CTRL_CHAIN": 3},
+    "ecp5": {"CTRL_CHAIN": 2},
+    "polarfire": {"IR_USER1": 0x24},
+    "efinix": {},
+}
+# GHDL cannot override vector generics, so the VHDL PolarFire shell keeps
+# its default IR_USER1 (0x20).
+_DEBUG_MULTI_VHDL_PARAMS = {"polarfire": {}}
+# Vendors whose TAP has a Test-Logic-Reset output (TLR_RESET_EN offered).
+_DEBUG_MULTI_TLR = ("xilinx7", "xilinxus", "intel")
+# Vendors whose shell has a hub_por port (flows that drop initial values).
+_DEBUG_MULTI_HUB_POR = ("polarfire",)
 
-def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
+
+def _debug_multi_target(vendor: str, *, tlr_reset: bool = False, powerup: str = "") -> Target:
     """One fcapz_debug_multi_<vendor> shell driven at its TAP primitive's pins.
 
     With *tlr_reset* the shell is built with TLR_RESET_EN and runs only the
-    test that depends on it.
+    test that depends on it.  A *powerup* suffix ("_powerup", or
+    "_powerup_tlrhigh" for a TAP in Test-Logic-Reset from time 0) runs only
+    the power-up count test, alone on a fresh simulation.
     """
     tap_v, tap_vhdl = _DEBUG_MULTI_TAP_SRC[vendor]
+    tests = ("fcapz_debug_multi_tlr_powerup",) if powerup else (
+        ("fcapz_debug_multi_tlr",) if tlr_reset else (
+            ("fcapz_debug_multi_wrapper", "fcapz_debug_multi_resets")
+            + (("fcapz_debug_multi_tlr",) if vendor in _DEBUG_MULTI_TLR else ())
+            + (("fcapz_debug_multi_hub_por",) if vendor in _DEBUG_MULTI_HUB_POR else ())))
+    params = {**_DEBUG_MULTI_PARAMS[vendor], **({"TLR_RESET_EN": 1} if tlr_reset else {})}
+    vhdl = () if tap_vhdl is None else (
+        *_VHDL_CORE_PKGS,
+        *tap_vhdl,
+        RTL / "vhdl" / "core" / "reset_sync.vhd",
+        RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+        RTL / "vhdl" / "core" / "trig_compare.vhd",
+        RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+        RTL / "vhdl" / "core" / "fcapz_eio.vhd",
+        RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd",
+        RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
+        RTL / "vhdl" / "core" / "fcapz_debug_multi_core.vhd",
+        RTL / "vhdl" / "core" / "fcapz_hub_reset.vhd",
+        RTL / "vhdl" / "core" / "fcapz_debug_multi.vhd",
+        RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd")
     return Target(
-        f"fcapz_debug_multi_{vendor}" + ("_tlr" if tlr_reset else ""),
+        f"fcapz_debug_multi_{vendor}" + ("_tlr" if tlr_reset else "") + powerup,
         f"fcapz_debug_multi_{vendor}",
         (*tap_v,
          RTL / "reset_sync.v",
@@ -85,27 +132,69 @@ def _debug_multi_target(vendor: str, *, tlr_reset: bool = False) -> Target:
          RTL / "fcapz_hub_reset.v",
          RTL / "fcapz_debug_multi.v",
          RTL / f"fcapz_debug_multi_{vendor}.v"),
-        ("fcapz_debug_multi_tlr",) if tlr_reset
-        else ("fcapz_debug_multi_wrapper", "fcapz_debug_multi_resets", "fcapz_debug_multi_tlr"),
+        tests,
         # Default slot shape (tb/cocotb/core_test.py's _DEBUG_MULTI_* constants)
         # with a nondefault chain. GHDL's top-level overrides do not
         # re-evaluate dependent generic defaults (ELA_DEPTHS from DEPTH, ...)
-        # and cannot set vector generics, so only CTRL_CHAIN and TLR_RESET_EN,
-        # which nothing depends on, are overridden.
-        {"CTRL_CHAIN": 3, **({"TLR_RESET_EN": 1} if tlr_reset else {})},
+        # and cannot set vector generics, so only the chain selection and
+        # TLR_RESET_EN, which nothing depends on, are overridden.
+        params,
+        vhdl,
+        vhdl_parameters=_DEBUG_MULTI_VHDL_PARAMS.get(vendor),
+    )
+
+
+# fcapz_axi_mon_<vendor> on the chain or IR the debug-multi benches drive.
+_AXI_MON_SHAPE = {"DEPTH": 64, "TRIG_STAGES": 1}
+_AXI_MON_PARAMS = {
+    **_DEBUG_MULTI_PARAMS,
+    "gowin": {"CTRL_CHAIN": 2},
+}
+_AXI_MON_TAP_SRC = {
+    **_DEBUG_MULTI_TAP_SRC,
+    "gowin": ((SIM / "gw_jtag_stub.v", RTL / "jtag_tap" / "jtag_tap_gowin.v",
+               RTL / "dff_sync.v", RTL / "dff_reg_sync.v"),
+              (RTL / "vhdl" / "gowin" / "gw_jtag.vhd",
+               RTL / "vhdl" / "core" / "dff_sync.vhd",
+               RTL / "vhdl" / "core" / "dff_reg_sync.vhd",
+               RTL / "vhdl" / "jtag_tap" / "jtag_tap_gowin.vhd")),
+}
+
+
+def _axi_mon_target(vendor: str) -> Target:
+    """One fcapz_axi_mon_<vendor> wrapper driven at its TAP primitive's pins.
+
+    Gowin is register-only (jtag_reg_iface_gowin); the others share the
+    single-chain register/burst pipe.
+    """
+    tap_v, tap_vhdl = _AXI_MON_TAP_SRC[vendor]
+    iface = "jtag_reg_iface_gowin" if vendor == "gowin" else "jtag_pipe_iface"
+    return Target(
+        f"fcapz_axi_mon_{vendor}",
+        f"fcapz_axi_mon_{vendor}",
+        (*tap_v,
+         RTL / "reset_sync.v",
+         RTL / "dpram.v",
+         RTL / "trig_compare.v",
+         RTL / "fcapz_ela.v",
+         RTL / f"{iface}.v",
+         RTL / "fcapz_axi_mon.v",
+         RTL / f"fcapz_axi_mon_{vendor}.v"),
+        "fcapz_axi_mon_vendor",
+        # One trigger stage, so TRIG_VALUE/TRIG_MASK trigger.  Neither
+        # generic has dependents, so GHDL can override them too.
+        {**_AXI_MON_PARAMS[vendor], **_AXI_MON_SHAPE},
         (*_VHDL_CORE_PKGS,
          *tap_vhdl,
          RTL / "vhdl" / "core" / "reset_sync.vhd",
          RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
          RTL / "vhdl" / "core" / "trig_compare.vhd",
          RTL / "vhdl" / "core" / "fcapz_ela.vhd",
-         RTL / "vhdl" / "core" / "fcapz_eio.vhd",
-         RTL / "vhdl" / "core" / "jtag_pipe_iface.vhd",
-         RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
-         RTL / "vhdl" / "core" / "fcapz_debug_multi_core.vhd",
-         RTL / "vhdl" / "core" / "fcapz_hub_reset.vhd",
-         RTL / "vhdl" / "core" / "fcapz_debug_multi.vhd",
-         RTL / "vhdl" / f"fcapz_debug_multi_{vendor}.vhd"),
+         RTL / "vhdl" / "core" / f"{iface}.vhd",
+         RTL / "vhdl" / "core" / "fcapz_axi_mon.vhd",
+         RTL / "vhdl" / f"fcapz_axi_mon_{vendor}.vhd"),
+        # The VHDL PolarFire wrapper keeps its default IR_USER1, as the hub does.
+        vhdl_parameters=_AXI_MON_SHAPE if vendor == "polarfire" else None,
     )
 
 
@@ -185,7 +274,7 @@ TARGETS: tuple[Target, ...] = (
         "fcapz_core_manager",
         (RTL / "fcapz_core_manager.v",),
         ("fcapz_core_manager_mux", "fcapz_core_manager_burst_start_per_write",
-         "fcapz_core_manager_resets"),
+         "fcapz_core_manager_resets", "fcapz_core_manager_epoch_parity"),
         {
             "NUM_SLOTS": 3,
             "SAMPLE_W": 8,
@@ -273,9 +362,58 @@ TARGETS: tuple[Target, ...] = (
     _debug_multi_target("xilinx7"),
     _debug_multi_target("xilinxus"),
     _debug_multi_target("intel"),
+    _debug_multi_target("ecp5"),
+    _debug_multi_target("polarfire"),
+    _debug_multi_target("efinix"),
+    Target(
+        "fcapz_debug_multi_gowin",
+        "fcapz_debug_multi_gowin",
+        (SIM / "gw_jtag_stub.v",
+         RTL / "jtag_tap" / "jtag_tap_gowin.v",
+         RTL / "dff_sync.v",
+         RTL / "dff_reg_sync.v",
+         RTL / "reset_sync.v",
+         RTL / "dpram.v",
+         RTL / "trig_compare.v",
+         RTL / "fcapz_ela.v",
+         RTL / "fcapz_eio.v",
+         RTL / "jtag_reg_iface_gowin.v",
+         RTL / "fcapz_core_manager.v",
+         RTL / "fcapz_debug_multi_core.v",
+         RTL / "fcapz_hub_reset.v",
+         RTL / "fcapz_debug_multi_gowin.v"),
+        ("fcapz_debug_multi_gowin", "fcapz_debug_multi_resets"),
+        {"CTRL_CHAIN": 2},
+        (*_VHDL_CORE_PKGS,
+         RTL / "vhdl" / "gowin" / "gw_jtag.vhd",
+         RTL / "vhdl" / "core" / "dff_sync.vhd",
+         RTL / "vhdl" / "core" / "dff_reg_sync.vhd",
+         RTL / "vhdl" / "jtag_tap" / "jtag_tap_gowin.vhd",
+         RTL / "vhdl" / "core" / "reset_sync.vhd",
+         RTL / "vhdl" / "core" / "fcapz_dpram.vhd",
+         RTL / "vhdl" / "core" / "trig_compare.vhd",
+         RTL / "vhdl" / "core" / "fcapz_ela.vhd",
+         RTL / "vhdl" / "core" / "fcapz_eio.vhd",
+         RTL / "vhdl" / "core" / "jtag_reg_iface_gowin.vhd",
+         RTL / "vhdl" / "core" / "fcapz_core_manager.vhd",
+         RTL / "vhdl" / "core" / "fcapz_debug_multi_core.vhd",
+         RTL / "vhdl" / "core" / "fcapz_hub_reset.vhd",
+         RTL / "vhdl" / "fcapz_debug_multi_gowin.vhd"),
+    ),
+    _axi_mon_target("xilinx7"),
+    _axi_mon_target("intel"),
+    _axi_mon_target("ecp5"),
+    _axi_mon_target("polarfire"),
+    _axi_mon_target("efinix"),
+    _axi_mon_target("gowin"),
     _debug_multi_target("xilinx7", tlr_reset=True),
     _debug_multi_target("xilinxus", tlr_reset=True),
     _debug_multi_target("intel", tlr_reset=True),
+    # MGR_TLR_COUNT from power-up: a TAP with a Test-Logic-Reset output, low
+    # and then high from time 0, and a shell that ties it low.
+    _debug_multi_target("xilinx7", powerup="_powerup"),
+    _debug_multi_target("xilinx7", powerup="_powerup_tlrhigh"),
+    _debug_multi_target("ecp5", powerup="_powerup"),
     Target(
         "fcapz_async_fifo_equiv",
         "fcapz_async_fifo_equiv_wrap",
@@ -339,6 +477,70 @@ TARGETS: tuple[Target, ...] = (
         ),
     ),
     Target(
+        "fcapz_ejtagaxi_r_drain",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        "fcapz_ejtagaxi_r_drain",
+        {"FIFO_DEPTH": 16, "TIMEOUT": 64},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
+        "fcapz_ejtagaxi_w_safety",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        "fcapz_ejtagaxi_w_safety",
+        {"FIFO_DEPTH": 16, "TIMEOUT": 64},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
+        "fcapz_ejtagaxi_ar_reset_race",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        "fcapz_ejtagaxi_ar_reset_race",
+        {"FIFO_DEPTH": 16, "TIMEOUT": 1024},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
+        "fcapz_ejtagaxi_tck_order",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        "fcapz_ejtagaxi_tck_order",
+        {"FIFO_DEPTH": 16, "TIMEOUT": 1024},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
         "fcapz_ejtaguart",
         "fcapz_ejtaguart",
         (RTL / "fcapz_async_fifo.v", RTL / "fcapz_ejtaguart.v"),
@@ -352,6 +554,11 @@ TARGETS: tuple[Target, ...] = (
             RTL / "vhdl" / "core" / "fcapz_ejtaguart.vhd",
         ),
     ),
+)
+TARGETS += tuple(
+    replace(target, name=target.name + "_powerup", testcase="fcapz_debug_multi_tlr_powerup")
+    for target in TARGETS
+    if target.name == "fcapz_debug_multi_gowin"
 )
 
 TARGET_BY_NAME = {target.name: target for target in TARGETS}
@@ -394,7 +601,32 @@ COVERAGE_TARGETS = {
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",
     ),
+    "fcapz_ejtagaxi_burst_fill": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
     "fcapz_ejtagaxi_reset_regression": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_r_drain": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_w_safety": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_ar_reset_race": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_tck_order": (
         "fcapz_ejtagaxi",
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",

@@ -17,6 +17,374 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `examples/arty_a7_insert/` captures correctly on an Arty A7. It inserts one
   ELA, sampling one clock domain.
 
+- **RPC and web: a `cancel` command.** `{"cmd": "cancel", "target":
+  <request_id>}` interrupts a command in flight without waiting for it:
+  the stdin server and each WebSocket now keep reading while a request
+  runs, and the web gateway answers `cancel` without its command lock. A
+  request cancelled before it starts is refused when its turn comes, and a
+  cancel for an ended session (`session_epoch`) or an idle server does
+  nothing. Interrupting ends the session; the client reconnects. In the web
+  interface, Cancel during a connect now interrupts it on the server, and
+  Disconnect while a command runs interrupts that command first. Replies
+  echo the request's `request_id` and carry `session_epoch`; the RPC
+  schema is now 1.2.
+
+- **Arty A7: an open-source build with openXC7.**
+  `examples/arty_a7/openxc7/build_openxc7.py` builds the VexRiscv reference
+  design with yosys, nextpnr-xilinx and prjxray instead of Vivado. Its
+  bitstream passes the full Arty hardware suite. The 130 MHz MMCM now uses
+  an integer multiplier (×13, ÷2), because nextpnr-xilinx truncated the
+  fractional 6.5 and that MMCM never locked.
+
+- **Core-manager hubs for ECP5, PolarFire, Efinix and Gowin.**
+  `fcapz_debug_multi_ecp5` (`JTAGG`, `CTRL_CHAIN` 1 = ER1 / 2 = ER2),
+  `fcapz_debug_multi_polarfire` (`UJTAG`, `IR_USER1`),
+  `fcapz_debug_multi_efinix` (`jtag1_*` ports to an Interface Designer User
+  TAP block) and `fcapz_debug_multi_gowin` (`GW_JTAG`) put several ELAs and
+  EIOs behind one chain on every supported vendor, with VHDL twins. The ECP5,
+  PolarFire and Efinix hubs burst on that chain as the Xilinx ones do. The
+  Gowin hub is register-only: its slots report no burst and the host reads
+  captures through the register window. None offers `TLR_RESET_EN`. The
+  PolarFire hub has a `hub_por` power-on reset input: Libero drops register
+  initial values, so the hub needs it to see its power-up reset (the
+  Discovery Kit example drives it from `FABRIC_POR_N`). Efinix
+  had no EIO before; this hub gives it one. All four pass the cocotb hub
+  tests in Verilog and VHDL. The PolarFire hub passes on the Discovery Kit
+  (`mpfs_disco_kit_manager_top.v`, `test_hw_manager.py`: two ELAs with
+  timestamps and burst readout, two EIOs). The Gowin hub passes on the
+  BRS-100 (`test_hw_manager.py`: two ELAs, two EIOs, over `--backend ftdi`
+  and over OpenOCD through `fcapz openocd-bridge`); ECP5 and Efinix have no
+  board build.
+
+- **RPC — the bound core-manager slot is reported.** `connect` and `rebind`
+  responses carry `instance`, the slot the session bound (`null` for a core
+  reached directly), so a client that let the server pick the first ELA slot
+  knows which one it got. `rebind` with only `instance` switches slots on the
+  current chain, and every `list_cores` entry has `instance`, including cores
+  on other chains and the AXI monitor.
+
+- **AXI monitor wrappers for ECP5, PolarFire, Efinix and Gowin.**
+  `fcapz_axi_mon_ecp5` (`JTAGG`, `CTRL_CHAIN` 1 = ER1 / 2 = ER2),
+  `fcapz_axi_mon_polarfire` (`UJTAG`, `IR_USER1`), `fcapz_axi_mon_efinix`
+  (`jtag1_*` ports to an Interface Designer User TAP block) and
+  `fcapz_axi_mon_gowin` (`GW_JTAG`) join the Xilinx and Intel wrappers, with
+  VHDL twins. ECP5, PolarFire and Efinix burst on the monitor's chain;
+  Gowin is register-only. ECP5, PolarFire and Gowin have one TAP primitive per
+  device and the hubs have no AXI monitor slot, so there the monitor is the
+  only fcapz core. A new cocotb test drives all six wrappers through their
+  TAP models in Verilog and VHDL: identity, a capture triggered on a write
+  address, and readback through the register window and the burst path. No
+  hardware build yet.
+- **FTDI: JTAG chains of several devices.** `FtdiMpsseTransport` scans
+  one device of the chain and keeps the others in BYPASS, so a Zynq's PL
+  is reached past its ARM DAP. `tap=` picks the device (numbered from the
+  TDO end); by default it is the one of a known family. IR lengths come
+  from the IDCODEs (AMD/Xilinx 7-series and Zynq UltraScale+, ARM DAP),
+  one unknown device's from the measured total, or from `ir_lengths=`.
+  `program()` pads its bitstream shift for the devices in BYPASS. New
+  Zynq UltraScale+ family (12-bit IR, USER codes `0x902`/`0x903`/`0x922`/
+  `0x923`) and the Kria KV260 carrier card's pin layout (ADBUS5 low);
+  the KV260 suite runs over FTDI with `FPGACAP_BACKEND=ftdi` and passes
+  (33 tests at 15 and 30 MHz).
+- **FTDI adapters through libusb.** `FtdiMpsseTransport` also drives a
+  channel through libusb (pyusb), for adapters bound to WinUSB or libusbK
+  on Windows and for Linux or macOS without FTDI's D2XX library. Install
+  `fpgacapzero[usb]` and name the channel `usb:` (the one known adapter),
+  `usb:<description>` or `usb:<serial>`. A transfer whose reply could fill
+  the chip's buffer reads on a second thread while it writes, so wide scans
+  do not stall. `list_ftdi_targets()` (and RPC/GUI discovery) lists both
+  backends' channels. Validated on an FT2232H bound to WinUSB (channel B, an
+  Efinix Trion T8 chain), through both libusb-1.0 and libusb-0.1: 307,200
+  random bytes shifted through BYPASS come back bit-exact at 1, 6, 15 and
+  30 MHz, 3.3 MB/s at 30 MHz. A full `connect()` session over libusb is not
+  yet hardware-tested.
+
+### Changed
+
+- **FTDI: a failed USB transfer closes the channel for every transport on
+  it.** Each refuses I/O until it connects again, which opens the channel
+  afresh; before, only the transport that saw the failure (and only during
+  programming) dropped it. Open channels are matched by USB VID/PID, serial
+  and channel letter, so a D2XX name and a `usb:` name share one channel. A
+  channel opened with `open_pins()` (`fcapz openocd-bridge`) now refuses
+  other transports in the process with a clear error.
+
+- **RPC and web: error replies no longer carry a traceback.** The `trace`
+  field held one frame with a local source path, sent to every client
+  (including remote ones with `fcapz-web --host 0.0.0.0`). It now holds
+  only `Type: message`; the traceback is logged instead (DEBUG on
+  `fcapz.rpc`, with the warning on `fcapz.web`).
+
+### Fixed
+
+- **FTDI: a cancel could be lost across a reconnect.** `cancel()` bumped
+  the cancel counter without a lock, so racing the detach of a reconnect
+  it could store a stale count and erase a later cancel. Each bump is now
+  one locked step.
+
+- **Serial TAP bridge: `cancel()` no longer scans.** It was `close()`, whose
+  `MGR_OWNER` release could run between two transactions of the call being
+  cancelled. It now only closes the port, and a call in flight that finds
+  the port gone fails with `ConnectionError` instead of an
+  `AttributeError` on `None`.
+
+- **OpenOCD: cancel and timeouts.** A socket timeout partway through a reply
+  left its tail to be read as the next command's reply; a reply cut short,
+  or followed by stray bytes, now ends the session, and the next command
+  says to reconnect. `cancel()` shuts the socket down, so a call blocked
+  waiting for a reply ends at once on Linux too, with `ConnectionError`
+  rather than an `AttributeError`, and a `connect()` it interrupts does not
+  publish its socket.
+
+- **FTDI: scans longer than the USB timeout.** One batch of scans that took
+  longer to clock than `timeout_ms` (2 s) failed partway with "FTDI write
+  short" (D2XX) or "write timed out" (libusb), for example a 2.4 Mbit
+  `raw_dr_scan` at 1 MHz.  Such a batch now goes in pieces of about a
+  quarter second of TCK, each waited for; a cancel between pieces returns
+  the TAP to Run-Test/Idle so other transports on the channel carry on.
+  Bit-exact on hardware at 1-30 MHz over D2XX (KV260) and libusb (FT2232H).
+
+- **EJTAG-AXI: a second RESET could cancel the first.** RESET crosses to
+  the AXI clock as a toggle; a second RESET before the first was
+  acknowledged flipped it back, so the AXI side never reset: a read or
+  write in flight finished and its response reached the host as the
+  answer to a later command. A RESET while one is in flight is now
+  folded into it, and while a RESET is in flight (status `busy`) the
+  bridge queues no command and captures no response or burst word: the
+  AXI sides of its FIFOs are not reset yet (Verilog and VHDL). A command
+  sent then is dropped (Verilog also sets the error bit). Needs the AXI
+  clock stopped, held in reset or much slower than TCK.
+
+- **EJTAG-AXI: a burst word could be shown twice.** A scan that captured
+  a burst FIFO word (any scan after a BURST_RDATA) popped it only if the
+  new command was BURST_RDATA too, so after any other command the same
+  word came back on the next BURST_RDATA. The word a scan shows is now
+  popped on that scan's UPDATE, whatever the new command (Verilog and
+  VHDL). The host's `burst_read` drains the FIFO, so it was not affected.
+
+- **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
+  dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
+  the next write's response; an aborted burst write never sent WLAST and
+  stalled the write channel for every master; and host bursts crossing
+  4 KB, or with a bad FIXED/WRAP length, size or type, went on the bus
+  as given. The bridge (Verilog and VHDL) now buffers a whole burst
+  before AW, and a write engine owns AW/W/B: VALIDs and payload are held
+  to READY, exactly AWLEN+1 beats go out with WLAST on the last, and the
+  B is always taken, even after the host has had its SLVERR. A timed-out
+  AR stays up and its read is drained. Illegal bursts and write bursts
+  longer than `FIFO_DEPTH` answer SLVERR without touching the bus. New
+  `CFG_AXI_STATUS` (`0x0030`, `EjtagAxiController.axi_status()`) shows
+  what is still owed; `FEATURES[25]` (`has_safe_writes`) announces all
+  this. A burst read goes out only if all its beats fit in the room
+  left in the burst FIFO, so a host that stops draining can no longer
+  hold the read channel. `burst_read()` / `burst_write()` refuse a 4 KB
+  crossing. The
+  reset handshake synchronizers now carry `ASYNC_REG`. The cocotb tests
+  check VALID/payload stability on every EJTAG-AXI run and cover stalls,
+  late B, RESET mid-burst, RESET in the cycle the slave takes an AR,
+  W before AW and every refused descriptor.
+- **The VHDL EJTAG-AXI bridge repeated a CONFIG answer.** Every NOP poll
+  after a CONFIG captured the CONFIG data again and hid the AXI
+  completions queued behind it, so reading `axi_status()` while a read
+  was in flight lost that read's answer. A NOP now ends the CONFIG
+  capture, as in Verilog.
+
+- **PolarFire took any `IR_USER1` / `IR_USER2` opcode.** An opcode outside
+  the UJTAG user range (`0x10..0x7F`), such as `0xFF` (BYPASS), built a core
+  the host could never reach. `jtag_tap_polarfire` now flags one, or two equal
+  opcodes, with the same check the wrappers use for `CTRL_CHAIN` (Verilog
+  `$error`, VHDL `assert ... severity failure`). This covers the ELA, EIO, hub
+  and AXI monitor wrappers. `IR_USER2` is checked only where USER2 is used
+  (ELA with `SINGLE_CHAIN_BURST=0`, `BURST_EN=1`); elsewhere the TAP's new
+  `CH2_EN=0` leaves it undecoded, so a single-chain core may still set
+  `IR_USER1` to `0x21` next to the default `IR_USER2`.
+- **The VHDL ELA core failed Libero synthesis with `TRIG_STAGES` > 1.**
+  Synplify maps the sequencer comparator arrays to RAM with a global reset and
+  rejects their initial values (MF682). The arrays no longer have initial
+  values, as in the Verilog core; the reset loads them. This hit the PolarFire
+  VHDL ELA built with more than one stage and the PolarFire VHDL AXI monitor
+  at its default `TRIG_STAGES=4`.
+
+- **RPC — a failed `rebind` dropped the working session.** A `rebind` to a
+  target that is not an ELA (an EIO slot, an empty chain) raised, but the
+  session already pointed there, so the next `probe` failed and the old
+  capture configuration was gone. The new core now replaces the session only
+  once it probes as an ELA.
+
+- **EJTAG-AXI could issue a stale command after reset.** The bridge's TCK
+  logic had no reset: the command staging register was cleared only by its
+  initial value or by the host's `CMD_RESET`, and it enqueues whether or not
+  the chain is selected. On flows that drop initial values (PolarFire, which
+  also keeps register contents across a reprogram), a command left there was
+  executed on the AXI bus on the first TCK edges after `axi_rst` ended,
+  before the host could reset the bridge. `axi_rst` is now synchronized to
+  TCK inside `fcapz_ejtagaxi` (asserted at once, released on TCK); it clears
+  the same TCK state as `CMD_RESET` and holds the TCK sides of the command,
+  response and burst FIFOs, whose reset release was previously asynchronous
+  to TCK. No port changes. Verilog and VHDL; regression in
+  `tests/test_ejtagaxi_stale_stage_rtl.py`.
+
+- **XPM async FIFO reset crossed clock domains.** With
+  `ASYNC_FIFO_IMPL=1` (the default in the Xilinx EJTAG-AXI and EJTAG-UART
+  wrappers), `fcapz_async_fifo` drove XPM's single `rst`, which must be
+  synchronous to `wr_clk`, with `wr_rst | rd_rst`, so a reset from the read
+  domain (the bridges' `CMD_RESET`, or `axi_rst` on a TCK-written FIFO)
+  reached it asynchronously. The two resets are now caught by a preset
+  synchronizer and retimed on `wr_clk`. A request that arrives while XPM is
+  still busy with the previous reset (which XPM would ignore) waits for it.
+  The read side keeps its own view of the pending reset: `rd_rst` stops
+  reads at once, even if `wr_clk` is stopped (TCK between scans), and they
+  resume only after XPM's reset sequence is over, so a word queued before
+  the reset is never read. `wr_rst_busy` / `rd_rst_busy` report all of
+  this, and the FIFO reads full / empty on a busy side, so callers that
+  check only `wr_full` / `rd_empty` (the burst FIFO, EJTAG-UART) stay safe;
+  an EJTAG-UART RX byte arriving during a reset now sets the overflow flag
+  instead of vanishing. The behavioral FIFO is unchanged. Verilog and VHDL;
+  regression in `tests/test_async_fifo_xpm_rst_rtl.py` (also run against
+  the real Vivado XPM) and the async FIFO cocotb test.
+
+- **`MGR_TLR_COUNT` counted a Test-Logic-Reset at power-up.** The hub's
+  Test-Logic-Reset synchroniser powered up asserted, so on flows that keep
+  initial values the count read 1 after configuration with no
+  Test-Logic-Reset at all. `reset_sync` takes an `INIT` parameter and that
+  synchroniser now powers up low, and the manager counts only entries into
+  Test-Logic-Reset it sees happen, not a TAP already there at configuration.
+
+- **`fcapz openocd-bridge` on FT2232-compatible adapters without pin I/O.**
+  Some clones (the BRS-100's) implement only MPSSE's clocked commands: pin
+  writes do nothing and pin reads return a constant, so OpenOCD read every
+  TDO bit as 0. The bridge checks for that when it opens the adapter and then
+  sends each rising TCK edge as a one-bit clocked command, which also reads
+  TDO where OpenOCD samples it. TRST is not driven there.
+
+- **`--backend ftdi` setup on full-speed FT2232C/D chips.** They reject the
+  H-series clock opcodes setup sends, and those rejections were left in the
+  reply queue; TCK was also computed from the H-series 30 MHz base instead
+  of 6 MHz. Setup now reads the rejections and picks the base from them.
+  Untested on a real FT2232D.
+
+- **Core-manager epochs on flows that drop initial values.** `MGR_EPOCH` and
+  `MGR_SLOT_EPOCH` counted both reset edges from a power-up 0. Libero
+  (Synplify) on PolarFire ignores initial values, so they came up random,
+  and an odd one made the host refuse that slot as held in reset, for good,
+  since each reset adds 2. An epoch is now `{releases, held}`, with bit 0 the
+  reset's level: the parity is right whatever the counter powers up to, and
+  the value is unchanged where initial values are kept.
+
+- **ECP5: the TAP adapter ignored JTAGG's registered TDI and TDO.** `JTAGG`
+  registers TDI on the rising edge of TCK and TDO on the falling edge (not in
+  Lattice's documentation; LiteX and the Hazard3 ECP5 debug module rely on it
+  on hardware), but `jtag_tap_ecp5` sampled `JTDI` on the rising edge that
+  loads it, so every ECP5 wrapper would have taken each scan one bit late and
+  lost its last bit. The adapter now runs the scan logic on the falling edge,
+  delays JTAGG's state outputs by one TCK and drives `JTDO` from a new
+  `tdo_next` output of `jtag_reg_iface`, `jtag_burst_read` and
+  `jtag_pipe_iface` (the value `tdo` takes at the next edge; other vendors
+  leave it open). A design that instantiates `jtag_tap_ecp5` directly
+  connects the interface's `tdo_next` to it instead of `tdo`. The `JTAGG`
+  simulation model is now a TAP with that timing, and the ECP5 hub tests walk
+  it through instruction and data scans. Simulation only; ECP5 has not run on
+  a board.
+
+- **ECP5: register writes at Update-DR.** `jtag_tap_ecp5` passed JTAGG's
+  `JCE1`/`JCE2` on as the chain select, but they cover Capture-DR and
+  Shift-DR only, and the register and pipe adapters act at Update-DR only
+  while the select is high, so no ECP5 wrapper could commit a register
+  access. The adapter now holds the select from Capture-DR through
+  Update-DR, cleared by Update-DR or Test-Logic-Reset, so another
+  instruction's Update-DR still does nothing. Simulation only; ECP5 has not
+  run on a board.
+
+- **PolarFire example power-on reset.** The Discovery Kit tops built their
+  reset from registers with initial values, which Libero ignores, so it was
+  not guaranteed at power-up. It now comes from the `INIT` primitive's
+  `FABRIC_POR_N`.
+
+- **LiteX: Gowin sources.** `ela_rtl_sources("gowin")` left out
+  `jtag_reg_iface_gowin.v`, `dff_reg_sync.v`, `dff_sync.v` and the `GW_JTAG`
+  declaration `gowin/gw_jtag.v`, which `fcapz_ela_gowin` needs, so a LiteX
+  Gowin build could not elaborate.
+
+- **`core.json` lists what the new hubs need:** the PolarFire and Efinix TAP
+  adapters, the Gowin register adapter, its synchronisers and the `GW_JTAG`
+  declaration.
+- **Formal parity runner with GHDL 4.x.** GHDL now names hidden state
+  registers `nNNN_q`, which the runner's alias pass didn't recognise, so
+  their VHDL state never lined up with the Verilog. `fcapz_ela` induction
+  left points open and the bounded fallback ran for hours. The pass accepts
+  the new names. A `--timeout` (default 7200 s per GHDL/yosys run) reports a
+  stuck parameter set as `TIMEOUT` and stops the tool's whole process tree,
+  tool output is shown as it runs, and a proof only passes if yosys exits
+  cleanly.
+- **VHDL ELA register widths match the Verilog.** The trigger-mode and
+  storage-qualifier snapshots and `seg_count` were wider in VHDL, which
+  kept those registers out of the formal proof. `seg_count` now wraps to 0
+  on the last segment, as in Verilog. `fcapz_ela`'s first formal parameter
+  set now closes by induction.
+- **ELA: stale segment metadata after a soft reset.** After a finished
+  segmented capture, an arm or soft reset left `CAPTURE_LEN` and
+  `SEG_START` showing the old capture in Verilog: `seg_count` had wrapped
+  to 0, so the reset didn't change it and the readback snapshot wasn't
+  refreshed. Both HDLs now also refresh it when `done` falls.
+
+## [0.5.1] — 2026-11-02
+
+### Added
+
+- **EJTAG-AXI streaming read.** `CMD_STREAM_RSTART` (`0xA`) moves up to 16383
+  words per long DR scan as 33-bit `{data, valid}` slots, so the cable sets
+  the rate instead of the per-scan tool overhead. On the Arty A7 at TCK
+  30 MHz: about 2.8 MB/s over the FTDI backend and 1.9 MB/s over
+  `hw_server`, against 6 KB/s for `read_block` over `hw_server`. Opt in
+  with `STREAM_EN=1` on the core or the Verilog wrappers (default 0, about
+  200 LUTs / 200 FFs, no BRAM; not in the VHDL core yet); `FEATURES[24]`
+  announces it. Host: `EjtagAxiController.stream_read()` and `has_stream`,
+  `connect()` reports `"stream"`. Every scan's header is checked, a failed
+  attempt rereads the whole range, and words are returned only after the
+  range's AXI response reads OKAY.
+
+- **Transport: `raw_dr_capture()`, `jtag_lock()` / `jtag_unlock()`.**
+  `raw_dr_capture(width, tdi=0)` is one long constant-TDI DR scan returning
+  TDO; `XilinxHwServerTransport` builds the constant inside xsdb, so a 540 kbit
+  scan costs about its shift time. `jtag_lock()` / `jtag_unlock()` (hw_server
+  only) hold xsdb's `jtag lock`, which `stream_read()` takes per attempt:
+  without it other hw_server clients' scans aborted streams within tens of
+  milliseconds.
+
+- **FTDI backend: TDO sampled on the falling edge above 15 MHz.**
+  `FtdiMpsseTransport` reads TDO a full TCK period after the target drives it
+  when the clock is above 15 MHz (`tdo_sample_edge` overrides it): at 30 MHz
+  the Arty A7's onboard cable returned every bit one late on the rising edge.
+  Up to 15 MHz nothing changes. Verified on the Arty A7 at 30 MHz: probe, ELA
+  capture and EJTAG-AXI reads.
+
+- **FTDI: program AMD/Xilinx 7-series FPGAs.** `FtdiMpsseTransport.program()`
+  and `bitfile=` configure the FPGA over JTAG with a Vivado `.bit` or a raw
+  `.bin` (UG470: JPROGRAM, INIT_COMPLETE, CFG_IN, JSTART, DONE), with no
+  Vivado or hw_server. `--program` now works with `--backend ftdi`, and so do
+  RPC/MCP `program` and the desktop GUI's *Program on connect*. A bitstream
+  for another part is refused before the FPGA is cleared; DONE staying low is
+  an error. `bitfile=` programs only when the transport opens the channel, so
+  a transport joining a shared channel never reprograms the FPGA under
+  another, and `program()` is refused while other transports share it. The
+  Arty A7 loads in 1.2 s at 30 MHz. PolarFire and Gowin are not supported.
+- **FTDI: `cancel()` no longer waits on the call it aborts.** It takes no
+  lock: the call stops at its next USB transfer (programming within about a
+  quarter second of TCK), other transports on the channel keep working, and
+  the transport refuses I/O until `close()` or `connect()`. The desktop GUI's
+  connect Cancel now calls `cancel()` instead of `close()`.
+
+- **Arty A7 hardware suite over FTDI.** `FPGACAP_BACKEND=ftdi` runs
+  `examples/arty_a7/test_hw_integration.py` on the onboard cable through D2XX
+  (`FPGACAP_FTDI_TCK_MHZ`, default 30; `FPGACAP_FTDI_DEVICE`), with no Vivado:
+  it programs the bitstream over FTDI once per run (`FPGACAP_FTDI_PROGRAM=0`
+  keeps the loaded one). All 71 tests that do not need a UART loopback
+  bitstream pass at 6 and 30 MHz, in about 25 s, the startup-arm test
+  included; it now writes a sentinel before programming, so a connect that
+  does not reprogram cannot pass. The suite also gains a streaming-read test.
+  The Arty README gains a "Connect With FTDI" section, and the web interface
+  chapter now covers picking the FTDI adapter and the UI's fixed 6 MHz TCK.
+
 - **Docs: the 32-bit trigger limit.** Without `WIDE_TRIG`, only sample bits
   `[31:0]` can trigger; the RTL integration guide now says so.
 
@@ -36,7 +404,48 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   OpenOCD's remote sleeps are honoured. `FtdiMpsseTransport.open_pins()` and
   `exchange()` give it the adapter without a chain scan.
 
+- **Docs sync check.** `tests/test_docs_sync.py` fails CI when the manual's
+  hand-written examples drift from the code: Verilog snippets naming a
+  parameter or port the RTL module lacks, `fcapz` commands the CLI parser
+  rejects, and version strings that don't match `VERSION`. A deliberately old
+  example opts out with `<!-- docs-sync: skip (why) -->`.
+
+### Changed
+
+- **The desktop GUI (`fcapz-gui`) is no longer actively maintained.** It still
+  ships, but development goes to the web interface (`fcapz-web`), the
+  recommended graphical front-end. The README no longer advertises the desktop
+  GUI, and the manual marks it as unmaintained.
+
+- **RPC: EIO, AXI and UART side connects ignore `program`.** Only the
+  session's `connect` programs the FPGA; a side controller's own transport
+  reprogramming it would wipe the cores the session is using.
+
 ### Fixed
+
+- **EJTAG-AXI: late R beats after a timeout or RESET became the next read's
+  data.** A read that timed out waiting for `rvalid`, or that `CMD_RESET` cut
+  off after the slave accepted its address, left the slave's beats on the R
+  channel; the next read took them as its own data with resp OKAY. The bridge
+  now holds `rready` and discards them up to `rlast`, however late (Verilog
+  and VHDL). Commands wait for the drain up to `TIMEOUT` cycles without a
+  beat; after that writes and CONFIG run and reads answer SLVERR without
+  issuing an AR, so a slave that never answers cannot hang the bridge.
+  Write-channel timeouts and a RESET during an unaccepted address phase are
+  not covered yet.
+
+- **EJTAG-AXI (Verilog): `TIMEOUT` above 4096 never fired.** The AXI timeout
+  counter was 12 bits wide, so it could not reach a larger `TIMEOUT` and a
+  slave that never answered hung the bridge. The counters are now sized from
+  `TIMEOUT` (still 12 bits at the default 4096); the VHDL core was not
+  affected.
+
+- **Manual corrections.** A full review of the manual against the code fixed
+  wrong claims in most chapters, among them: UART `PARITY` is 1=even, 2=odd;
+  EJTAG-AXI reaches 32-bit addresses only; `WIDE_TRIG` is not a parameter of
+  the ELA wrappers; the reference Arty ELA has one trigger stage and no
+  storage qualification; VCD time is in sample-clock ticks; pushing a `v*` tag
+  publishes to PyPI; the desktop GUI chapter now describes the panels as built.
 
 - **UltraScale USER opcodes.** `IR_TABLE_XILINX_ULTRASCALE` / `IR_TABLE_US`
   said USER1-4 = `0x24`-`0x27`; single-die UltraScale parts use the 7-series

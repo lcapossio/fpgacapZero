@@ -49,7 +49,8 @@ begin
     u_tap : entity work.jtag_tap_polarfire
         generic map (
             IR_USER1 => IR_USER1,
-            IR_USER2 => IR_USER2
+            IR_USER2 => IR_USER2,
+            CH2_EN   => 0
         )
         port map (
             tck_pad_i   => tck_pad_i,

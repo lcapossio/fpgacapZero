@@ -44,6 +44,9 @@ is Python, and you can read every line of the FSM in
   `FIFO_DEPTH` beats.  The host paces the writes one per JTAG scan;
   the bridge returns one completion per beat so the host
   knows when to send the next beat.
+- **Streaming read** (opt-in, `STREAM_EN=1`) — up to 16383 words per
+  long DR scan, so the cable sets the rate instead of the per-scan
+  tool overhead.  See [Streaming read](#streaming-read).
 
 What it **can't** do (yet):
 
@@ -59,7 +62,7 @@ What it **can't** do (yet):
 ```mermaid
 flowchart LR
     host["Host<br>(XSDB or OpenOCD)"] <-->|"72-bit DR via USER4"| tck["TCK domain<br>shadow registers"]
-    tck <-->|"toggle handshake (CDC)"| axi["axi_clk domain<br>10-state FSM<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
+    tck <-->|"toggle handshake (CDC)"| axi["axi_clk domain<br>command FSM + write engine<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
     axi <-->|"AXI4 master"| bus["Your AXI4 bus"]
 ```
 
@@ -68,16 +71,72 @@ loads with a command + address + data + wstrb on every scan.  On
 DR update, the parsed fields are packed into a registered command
 word and pushed into a **TCK-to-AXI async command FIFO**.
 
-The **`axi_clk` domain** runs a 10-state FSM that drives the AXI
-master interface (`m_axi_*`).  Completed responses cross back to
+The **`axi_clk` domain** runs a command FSM that drives the AR and R
+channels and a write engine that owns AW, W and B.  Completed responses cross back to
 TCK through an **AXI-to-TCK async response FIFO**.  Burst reads use
 that response path plus a dedicated read FIFO so the AXI side can
 fill data while the host scans words out one per shift.
 
 Burst writes use one completion per beat through the same response
-path.  This keeps the inter-beat pacing host-controlled; the AXI
-side never times out between beats, only on the AXI handshake waits
-themselves (`wready`, `bvalid`, `arready`, `rvalid`).
+path, so the host paces the beats.  The beats are collected in an
+on-chip write buffer (`FIFO_DEPTH` entries of data + strobes) and the
+burst goes on the bus only once its last beat is in: a host that
+vanishes, a RESET, another bus command (read, write, burst read) or a
+new `BURST_SETUP` in the middle of a burst discards it, and the slave
+never sees a partial burst.  `SET_ADDR`, `CONFIG`, `NOP` and
+`BURST_RDATA` are handled on the JTAG side and do not cancel it.  The
+last beat's completion is the AXI write response.
+
+### What the bridge never does to the bus
+
+The debug bridge must not break the system it debugs, so the AXI side
+keeps these rules whatever the host does (bridges with `FEATURES[25]`):
+
+- A `VALID` it raised stays high, with the same payload, until the
+  slave's `READY`.  A timeout or a RESET never withdraws it.
+- A write is exactly `AWLEN + 1` beats with `WLAST` on the last; W may
+  go before AW.  The B is always taken.
+- Before any `VALID` goes up, a burst descriptor is checked: transfer
+  size within the bus, burst type not reserved, FIXED at most 16 beats,
+  WRAP of 2, 4, 8 or 16 beats from a size-aligned address, INCR inside
+  one 4 KB page.  A write burst longer than `FIFO_DEPTH` is refused too.
+  A refused burst answers SLVERR (every beat, for a write) and never
+  reaches the bus.
+
+When a write times out (`TIMEOUT` cycles with no AW, W or B handshake)
+the host gets SLVERR, and the write engine carries on by itself: it
+keeps its `VALID`s up, sends the rest of the beats and takes the late B
+without reporting it.  While it is busy the next write waits up to
+`TIMEOUT` cycles for it; after that it answers SLVERR without touching
+the bus.  An AR that times out stays up the same way, and when the
+slave takes it the read is drained as below.
+
+A read whose address the slave has accepted is never abandoned on the
+R channel.  If it times out waiting for `rvalid`, or a RESET cuts it
+off, the bridge keeps `rready` high and discards the late beats up to
+`rlast`, however late they come, so they cannot come back as the data
+of a later read.  The next command waits for them up to `TIMEOUT`
+cycles without a beat; after that, writes and CONFIG run normally,
+while reads answer SLVERR without touching the bus until the owed
+beats have arrived.  A slave that never answers therefore costs
+SLVERRs, not a hung bridge.
+
+`CFG_AXI_STATUS` (CONFIG `0x0030`, `bridge.axi_status()`) shows what the
+bridge still owes the slave:
+
+| Bit | Meaning |
+|-----|---------|
+| 0 | write engine busy (owns AW/W/B) |
+| 1 | ...finishing a write nobody waits for (timed out or RESET) |
+| 2 | ARVALID held after a timeout or RESET |
+| 3 | discarding the beats of an abandoned read |
+| 4 | burst write being collected (not on the bus yet) |
+| 5 | anything on the bus: 0, 2, 3, or a read still in flight; test this one for idle |
+
+Bits 0 to 4 cross into the TCK domain independently, so while an
+obligation passes from one to another (a held AR the slave takes
+becomes a drain) they can all read 0 for a moment.  Bit 5 is a single
+flop on the AXI side and has no such gap; `axi_status()["idle"]` uses it.
 
 ## The 72-bit DR shift format
 
@@ -116,10 +175,11 @@ polling.
 | `0x5` | SET_ADDR | Set the auto-increment base address |
 | `0x6` | BURST_SETUP | Configure burst (len, size, type in payload) |
 | `0x7` | BURST_WDATA | Push one word into burst write buffer |
-| `0x8` | BURST_RDATA | Pop one word from burst read FIFO |
+| `0x8` | BURST_RDATA | Pop one word from burst read FIFO (the word a scan captures after a BURST_RDATA is popped on that scan's update, whatever its command) |
 | `0x9` | BURST_RSTART | Initiate burst read (starts the address phase) |
+| `0xA` | STREAM_RSTART | Start a streaming read (addr = start, payload = word count); `STREAM_EN=1` only |
 | `0xE` | CONFIG | Read bridge config register (addr selects which) |
-| `0xF` | RESET | Reset bridge state machines |
+| `0xF` | RESET | Reset bridge state machines (until the AXI side has acknowledged it, status `busy`, a further RESET is folded into it, no command is queued and no response is captured: wait for `busy` to clear) |
 
 **Status bits `[71:68]`:**
 
@@ -152,12 +212,14 @@ print(info)
 #   "core_id": 0x4A58,
 #   "legacy_id": False,
 #   "legacy_raw_id": None,
-#   "version": 0x00044A58,
+#   "version": 0x00054A58,
 #   "version_major": 0,
-#   "version_minor": 4,
+#   "version_minor": 5,
 #   "addr_w": 32,
 #   "data_w": 32,
 #   "fifo_depth": 16,            # <-- cached from FEATURES register
+#   "stream": False,             # FEATURES[24]: streaming read built in
+#   "safe_writes": True,         # FEATURES[25]: bus-safe model, CFG_AXI_STATUS
 # }
 ```
 
@@ -175,6 +237,8 @@ After `connect()`, the controller has:
   `burst_read()` / `burst_write()` checks the requested count
   against this and rejects oversized requests at the API boundary
   with a clear error message — see "FIFO_DEPTH guard rails" below.
+- Cached whether the bitstream has the streaming read
+  (`FEATURES[24]`, `bridge.has_stream`).
 
 ### Single read
 
@@ -255,7 +319,13 @@ beat per JTAG scan.
   than its FIFO holds.  The host enforces this and raises
   `ValueError` with a remediation hint that tells you to rebuild
   the bitstream with a larger `FIFO_DEPTH` parameter if you need
-  longer bursts.
+  longer bursts.  The bridge checks it too (`FEATURES[25]`): a burst
+  read goes on the bus only if all its beats fit in the room left in
+  the FIFO, otherwise it answers SLVERR without an AR.  The R channel
+  then never waits on a full FIFO, so a host that stops draining
+  cannot hold the read channel of a shared bus.  Words left in the
+  FIFO by an aborted read count against the room until a RESET (the
+  host sends one after any error).
 - `count ≤ 256` — AXI4 maximum burst length.
 
 ### AXI4 burst write
@@ -264,9 +334,97 @@ beat per JTAG scan.
 bridge.burst_write(0x40000000, [0xAA, 0xBB, 0xCC, 0xDD])
 ```
 
-Same constraints as `burst_read`.  The host paces beats one per
-scan; the bridge per-beat-acks so the host knows when to queue the
-next beat.
+Same constraints as `burst_read`, and the count must also fit the
+bridge's write buffer (`FIFO_DEPTH`).  The host paces beats one per
+scan; the bridge acknowledges each beat as it buffers it, and answers
+the last one with the AXI write response once the whole burst has
+gone out.  Both single-burst calls refuse a burst that crosses a 4 KB
+boundary (`ValueError`); use the `_range` variants below to split.
+
+### Longer transfers
+
+```python
+words = bridge.burst_read_range(0x40000000, count=1000)
+bridge.burst_write_range(0x40000000, words)
+```
+
+These split the transfer into as many `burst_read()` / `burst_write()`
+calls as it takes: bursts of at most `FIFO_DEPTH` (and 256) beats, none
+crossing a 4 KB boundary.  The CLI (`axi-dump`, `axi-fill`, `axi-load`
+with `--burst`) and the RPC `axi_dump` / `axi_write_block` burst paths use them.
+
+### Streaming read
+
+```python
+if bridge.has_stream:
+    words = bridge.stream_read(0x80000000, count=262144)   # 1 MiB
+```
+
+Block and burst reads cost one 72-bit scan per word, and every scan
+pays the tool's per-scan overhead: a few KB/s whatever the cable.
+The streaming read moves up to 16383 words in one long DR scan
+(`slots_per_scan` changes it), so the cable's shift rate sets the
+speed.  Measured on the Arty A7 reference design (`arty_a7_vex_top`,
+onboard FT2232H cable, `hw_server`, TCK 30 MHz): about 1.9 MB/s for
+a 4 MiB read, against 6 KB/s for `read_block`.  That is about what
+`hw_server` shifts through that cable (about 18 Mbit/s at TCK
+30 MHz), so over `hw_server` the TCK rate is what is left to tune:
+check or set it in xsdb with `jtag frequency` (hw_server keeps it
+per cable).  The same cable driven directly by
+[`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport) at 30 MHz
+reads about 2.8 MB/s.
+
+It is built only when the bridge has `STREAM_EN=1` (default 0, about
+200 LUTs and 200 FFs, no BRAM; Verilog core only for now):
+
+```verilog
+fcapz_ejtagaxi_xilinx7 #(
+    .FIFO_DEPTH (256),
+    .STREAM_EN  (1)
+) u_axi ( ... );
+```
+
+The bridge announces it in `FEATURES[24]`.  On a bitstream without it
+`stream_read()` raises `RuntimeError`; `read_block()` and
+`burst_read()` keep working either way.
+
+**Protocol.**  `CMD_STREAM_RSTART` (addr = start, payload = word
+count) switches the 72-bit DR into stream mode.  The AXI side then
+reads the range in INCR bursts of `FIFO_DEPTH/4` beats that never
+cross a 4 KB boundary, and starts a burst only when the burst FIFO
+has room for all of it, so the slave is never back-pressured.  From
+then on every DR scan, of any length, shifts out 33-bit slots
+`{data[31:0], valid}`, LSB first:
+
+- Slot 0 is a header: `valid = 0`, `data` = words not yet delivered.
+- A slot with `valid = 1` carries the next word; `valid = 0` means
+  the FIFO was empty and nothing was consumed.
+- A word counts as delivered only once all 33 bits are out; a scan
+  that ends inside a slot gets that word again in the next scan.
+- TDI must stay 0.  Any 1 shifted in aborts the stream like
+  `CMD_RESET`.
+- Stream mode ends at the UPDATE of the first scan whose header reads
+  0, so the host ends with a 33-bit header-only scan.  The next normal
+  scan returns the range's AXI response (the first non-OKAY one).
+
+**Host rules.**  `stream_read()` keeps a scan's words only after the
+next scan's header confirms how many the bridge handed out, so a lost
+or repeated word is always caught.  On a header mismatch, a stall or a
+transport error it aborts the stream and reads the **whole** range
+again (up to `retries` times), because an aborted stream's AXI
+response is never seen.  Words are returned only after the final
+response reads OKAY, and the stream is aborted before any error is
+raised, so the bridge is back in normal mode for the next command.
+
+**Chain lock.**  A stream lives across many scans, and another
+client's scan of the same USER chain with a 1 in it aborts the
+stream.  On `hw_server` other clients (a soft-CPU debugger, the
+Vivado hardware manager, hw_server's own polls) scan every few tens
+of milliseconds, so each attempt holds xsdb's `jtag lock`
+(`XilinxHwServerTransport.jtag_lock()` / `jtag_unlock()`), the final
+abort included.  Other transports have no lock and fall back to one
+`raw_dr_scan()` per scan; the streaming read has only been tested on
+hardware over `hw_server`.
 
 ### Closing
 
@@ -284,8 +442,8 @@ The bridge has an on-chip async FIFO between the AXI side and the
 JTAG side, sized by the `FIFO_DEPTH` parameter at build time
 (default 16, max 256, must be a power of 2).
 
-When you call `burst_read(count=N)` or `burst_write(count=N)`, the
-host checks:
+When you call `burst_read(addr, count=N)` or `burst_write()` with an
+N-word `data` list, the host checks (it does not split the burst):
 
 ```python
 if count > self._fifo_depth:
@@ -297,7 +455,8 @@ if count > self._fifo_depth:
 
 This catches an oversized burst at the host API boundary, with a
 clear error message that points at the fix (rebuild with a bigger
-`FIFO_DEPTH`).
+`FIFO_DEPTH`), or call `burst_read_range()` /
+`burst_write_range()`, which split it).
 
 On the AXI side a burst read is flow-controlled exactly: while the
 bridge fills the FIFO, `rready` is the FIFO's own not-full, and a beat
@@ -316,6 +475,8 @@ register at `0x002C`:
 FEATURES[7:0]   = ADDR_W
 FEATURES[15:8]  = DATA_W
 FEATURES[23:16] = FIFO_DEPTH - 1   (AXI4 awlen convention so 256 fits in 8 bits)
+FEATURES[24]    = STREAM_ON        (streaming read built in)
+FEATURES[25]    = 1                (bus-safe writes, burst checks, CFG_AXI_STATUS)
 ```
 
 So `FIFO_DEPTH=16` is encoded as `0x0F` in the bitstream and the
