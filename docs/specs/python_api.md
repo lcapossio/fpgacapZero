@@ -1059,6 +1059,8 @@ USER1_IR = 2
 READ_IDLE_CYCLES = 20
 _BATCH_TIMEOUT_SEC = 5.0
 _BATCH_TIMEOUT_PER_SCAN_SEC = 0.05
+_SCAN_TIMEOUT_PER_BIT_SEC = 5e-05
+_CONNECT_SYNC_TIMEOUT_SEC = 40.0
 ```
 
 #### `OpenOcdTransport.connect`
@@ -1134,6 +1136,10 @@ raw_dr_scan(bits: int, width: int, *, chain: int | None = None) -> int
 ```
 
 Perform a raw DR scan via irscan + drscan on the OpenOCD socket.
+
+OpenOCD answers only once the whole scan has shifted, so the read
+timeout grows with *width*: a streaming read's scan of half a
+million bits outlasts the base timeout on a slow adapter.
 
 #### `OpenOcdTransport.write_reg`
 

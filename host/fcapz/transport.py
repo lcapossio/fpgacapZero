@@ -1642,6 +1642,13 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
         if cancelled:
             sock.close()
             raise ConnectionError("OpenOCD connect cancelled")
+        # OpenOCD cannot abort a command line it has started: after a
+        # session is dropped (a timeout, a cancel) it finishes that line --
+        # seconds for a stream read's scan on a slow adapter -- before it
+        # serves anyone.  Wait for it here, with the room the longest scan
+        # gets, so the first real command does not time out behind it.
+        with self._read_timeout(self._CONNECT_SYNC_TIMEOUT_SEC):
+            self._cmd("set __fcapz_sync 1")
         if self.tap.strip().lower() in ("", "auto"):
             self.tap = self._resolve_auto_tap()
 
@@ -1925,6 +1932,10 @@ class OpenOcdTransport(_ScanBurstMixin, Transport):
     #: Extra read timeout per bit of a raw DR scan: room for an adapter
     #: shifting as slowly as 20 kbit/s (remote_bitbang through a bridge).
     _SCAN_TIMEOUT_PER_BIT_SEC = 50e-6
+    #: How long connect() waits for OpenOCD to finish a dropped session's
+    #: last line: covers an EJTAG-AXI stream scan (16384 x 33 bits) at the
+    #: per-bit allowance above.
+    _CONNECT_SYNC_TIMEOUT_SEC = 40.0
 
     def _slot_select_ops(self, addr: int) -> list[ScanOp]:
         return [("tcl", cmd) for cmd in self._slot_select_cmds([addr])]

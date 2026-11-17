@@ -303,6 +303,13 @@ class TransportAbcTests(unittest.TestCase):
 # OpenOcdTransport failure modes
 # ---------------------------------------------------------------------------
 
+def _openocd_sock() -> MagicMock:
+    """A socket that sends no banner and answers connect()'s sync."""
+    sock = MagicMock()
+    sock.recv.side_effect = [b"", b"1"]
+    return sock
+
+
 class OpenOcdConnectFailureTests(unittest.TestCase):
     """OpenOCD transport failure modes — socket-level mocks."""
 
@@ -353,8 +360,7 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
 
     def test_connect_resolves_auto_tap_to_first(self):
         """tap='auto' is resolved to the first tap OpenOCD reports on connect."""
-        mock_sock = MagicMock()
-        mock_sock.recv.return_value = b""
+        mock_sock = _openocd_sock()
         with patch("socket.create_connection", return_value=mock_sock), patch.object(
             OpenOcdTransport, "list_taps", return_value=["GW1NR-9C.tap", "other.tap"]
         ):
@@ -363,8 +369,7 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
             self.assertEqual(t.tap, "GW1NR-9C.tap")
 
     def test_connect_closes_a_live_socket_first(self):
-        old, new = MagicMock(), MagicMock()
-        new.recv.return_value = b""
+        old, new = MagicMock(), _openocd_sock()
         t = OpenOcdTransport(tap="GW1NR-9C.tap")
         t._sock = old
         with patch("socket.create_connection", return_value=new):
@@ -374,8 +379,7 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
 
     def test_connect_keeps_explicit_tap(self):
         """A concrete tap name is left untouched (no auto-resolution)."""
-        mock_sock = MagicMock()
-        mock_sock.recv.return_value = b""
+        mock_sock = _openocd_sock()
         with patch("socket.create_connection", return_value=mock_sock), patch.object(
             OpenOcdTransport, "list_taps"
         ) as list_taps:
@@ -457,11 +461,25 @@ class OpenOcdConnectFailureTests(unittest.TestCase):
         t = OpenOcdTransport(tap="x.tap")
         t._sock = MagicMock()
         t.cancel()
-        new = MagicMock()
-        new.recv.return_value = b""
+        new = _openocd_sock()
         with patch("socket.create_connection", return_value=new):
             t.connect()
         self.assertIs(t._sock, new)
+
+    def test_connect_waits_for_a_dropped_sessions_last_line(self):
+        """OpenOCD finishes a dropped session's line (a stream read's long
+        scan) before it serves the next client: connect waits for that with
+        a long timeout, then restores the base one."""
+        sock = _openocd_sock()
+        t = OpenOcdTransport(tap="x.tap")
+        with patch("socket.create_connection", return_value=sock):
+            t.connect()
+        sync = sock.sendall.call_args_list[0].args[0]
+        self.assertEqual(sync, b"set __fcapz_sync 1")
+        timeouts = [c.args[0] for c in sock.settimeout.call_args_list]
+        self.assertEqual(
+            timeouts, [0.2, 5, OpenOcdTransport._CONNECT_SYNC_TIMEOUT_SEC, 5.0]
+        )
 
     def test_resolve_auto_tap_raises_when_no_taps(self):
         """tap='auto' against an OpenOCD with no taps gives a clear error."""
