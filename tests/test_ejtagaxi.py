@@ -607,18 +607,20 @@ class EjtagAxiTests(unittest.TestCase):
         self.assertEqual(info["bridge_id"], _BRIDGE_ID)
         self.assertEqual(t.stale_config_id_reads, 0)
 
-    def test_connect_resets_a_bridge_left_mid_stream(self):
-        """A session that dropped mid-stream sent no RESET; the bridge keeps
-        answering CONFIG with stream data until one arrives.  Seen on the
-        Arty over OpenOCD after a stream read timed out."""
+    def test_connect_recovers_a_bridge_left_mid_stream(self):
+        """A session that dropped mid-stream sent no RESET; the bridge
+        answers the first identity scan with stream slots, and that scan's
+        TDI ones abort the stream (RTL: like CMD_RESET).  Connect must ask
+        again, even with the deadline used up.  Seen on the Arty over
+        OpenOCD after a stream read timed out."""
 
         class _StuckStreaming(FakeBridgeTransport):
             stuck = True
 
             def _exec(self, cmd, addr, payload, wstrb):
-                if cmd == CMD_RESET:
-                    self.stuck = False
-                if self.stuck and cmd != CMD_RESET:
+                if self.stuck:
+                    if cmd or addr or payload or wstrb:
+                        self.stuck = False  # TDI ones: the stream aborts
                     self.prev_rdata = 0
                     self.prev_valid = True
                     return
@@ -628,7 +630,20 @@ class EjtagAxiTests(unittest.TestCase):
         t.ready_probe_timeout = 0.0  # used up, as behind a long scan
         info = EjtagAxiController(t, chain=4).connect()
         self.assertEqual(info["bridge_id"], _BRIDGE_ID)
-        self.assertIn(CMD_RESET, t.scan_log[:8])
+        # Recovered by the re-read alone: no RESET before the identity.
+        self.assertEqual(
+            t.scan_log[:8], [CMD_CONFIG, CMD_CONFIG, CMD_CONFIG, CMD_NOP] * 2
+        )
+
+    def test_connect_sends_no_reset_to_a_core_that_is_not_a_bridge(self):
+        """Another core on the chain (an EJTAG-UART, also chain 4 by
+        default) takes a 72-bit RESET frame as its own CMD_RESET and
+        flushes its FIFOs: a failed probe must not send one."""
+        t = FakeBridgeTransport(stale_config_id_reads=100)
+        t.ready_probe_timeout = 0.0
+        with self.assertRaises(RuntimeError):
+            EjtagAxiController(t, chain=4).connect()
+        self.assertNotIn(CMD_RESET, t.scan_log)
 
     def test_connect_timeout_with_stale_bridge_id_raises(self):
         t = FakeBridgeTransport(stale_config_id_reads=100)
