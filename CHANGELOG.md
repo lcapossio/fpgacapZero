@@ -9,13 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Vivado: insert an ELA after synthesis (prototype).**
-  `tools/fcapz_insert_vivado.tcl` adds an `fcapz_ela_xilinx7` to a
-  synthesized 7-series checkpoint and wires it to the nets marked
-  `mark_debug`, so the design's RTL needs no fcapz instance. It also writes a
-  `.prob` file that names the probes for the host. The demo in
-  `examples/arty_a7_insert/` captures correctly on an Arty A7. It inserts one
-  ELA, sampling one clock domain.
+- **Vivado: insert debug cores after synthesis.**
+  `tools/fcapz_insert_vivado.tcl` adds fcapz debug cores to a synthesized
+  7-series or UltraScale(+) checkpoint, wired to the nets marked
+  `mark_debug`, so the design's RTL needs no fcapz instance. It inserts one
+  ELA per sample clock (or per `-group`) and an optional EIO behind the core
+  manager on one USER chain, and can wire external triggers in and out and
+  cross-triggers between the ELAs, across clocks. It constrains every clock
+  crossing, and writes a `.prob` per ELA plus a manifest. The Arty A7 demo
+  in `examples/arty_a7_insert/` (two clocks) checks every inserted core on
+  hardware; `examples/kv260_insert/` is its Zynq UltraScale+ counterpart.
 
 - **RPC and web: a `cancel` command.** `{"cmd": "cancel", "target":
   <request_id>}` interrupts a command in flight without waiting for it:

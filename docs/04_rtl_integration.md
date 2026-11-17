@@ -228,6 +228,84 @@ The high-level `FcapzELA` wrapper currently targets the AMD/Xilinx 7-series and
 UltraScale-style ELA wrappers; lower-level source manifests for the other RTL
 wrappers are available through `ela_rtl_sources()` for custom integration.
 
+## Without RTL changes: insertion after synthesis (Vivado)
+
+For AMD 7-series and UltraScale(+) designs built in Vivado, the cores can be
+added to the synthesized netlist instead of the RTL, as for Vivado's own
+ILA.  Mark the nets to capture with `mark_debug`, synthesize as usual, then
+run `fcapz::insert` between synthesis and `opt_design`:
+
+```verilog
+(* mark_debug = "true" *) reg [7:0]  count;
+(* mark_debug = "true" *) reg [15:0] lfsr;
+```
+
+```tcl
+source tools/fcapz_insert_vivado.tcl
+fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl rtl \
+    -prob design.prob
+# the instrumented design is left open: opt_design, place_design, ...
+```
+
+It adds one [`fcapz_debug_multi`](#adding-more-cores-in-the-same-design)
+block on one USER chain: an ELA per sample clock, and an optional EIO,
+behind the core manager.  The sample clock of a net is the clock of the
+flip-flop that drives it; each clock gets its own ELA, named after its
+clock net.  ELA *n* is the core manager's slot *n* (`fcapz --ela-instance n`),
+and the EIO is the slot after the last ELA (`fcapz eio-read --instance N`).
+
+| Option | Meaning |
+| --- | --- |
+| `-prob <file>` | Probe map. One ELA writes `<file>`; several write `<root>_ela<n>.prob`. Also writes `<root>.insert.json`, the manifest: each ELA's instance, clock, depth and probes, and the EIO's bits. |
+| `-depth <n>`, `-depths {ela n ...}` | Samples per ELA (1024), for all or per ELA. |
+| `-group {name {globs} ?clock? ...}` | Nets whose names match a group's globs form an ELA of their own, named `name`; its clock is inferred or given. |
+| `-clock <net>` | Sample every ungrouped net on this clock, in one ELA. |
+| `-default_clock <net>` | The clock of nets not driven by a flip-flop (a LUT, a RAM, a DSP). |
+| `-clock_hz <hz>` or `{ela hz ...}` | The sample rate written to the `.prob`; by default taken from the timing clock on the net. |
+| `-eio_in {nets}` | Nets the EIO reads, in any clock (synchronized inside). |
+| `-eio_out {nets}` | Nets the EIO drives. Each net's own driver is cut off, so give it a placeholder: a register that holds a constant, kept with `dont_touch`. EIO outputs change in the JTAG clock; synchronize them where the design uses them. |
+| `-trigger_in {ela net ...}` | A design net into an ELA's external trigger. The ELA samples it as a level in its own clock: a pulse must last more than two of its cycles. |
+| `-trigger_out {ela net ...}` | An ELA's trigger pulse (one sample clock) onto a design net. |
+| `-armed_out {ela net ...}` | An ELA's armed level onto a design net. |
+| `-cross_trigger {dst src ...}` | ELA `src`'s trigger starts ELA `dst`, between any two clocks: a toggle crosses, and the destination turns it back into one pulse per trigger. |
+| `-chain` | The USER chain, 1 by default. It must be free. |
+| `-tck_mhz` | The TCK constraint, 10 MHz by default. Set it to the speed your cable runs at. |
+| `-cell`, `-part` | The instance name (`u_fcapz`), the part. |
+
+An option that names an ELA takes its name (its group, or its clock net) or
+its instance number.  The host captures as from any other build, with the
+`.prob` for the ELA's signal names:
+
+```bash
+fcapz --ela-instance 1 capture --probe-file design_ela1.prob --format vcd --out slow.vcd
+```
+
+Constraints: the BSCANE2 TCK gets a clock of `-tck_mhz`, and every path
+between it and a sample clock gets `set_max_delay -datapath_only` of one
+period of the faster clock, which keeps the ELAs' multi-bit settings and
+readback bundles timed.  The EIO, trigger and cross-trigger crossings are
+single bits with a synchronizer behind them, or levels the design takes in
+its own clock, and get `set_false_path`.  Sample clocks must be constrained,
+or the script warns that their crossings are not timed.
+
+Limits:
+
+- AMD 7-series and UltraScale(+) only.
+- The USER chain must be free: the script stops if a BSCANE2 in the netlist
+  uses it, or if the checkpoint holds Vivado debug cores whose hub will
+  take it at `opt_design`.  An ILA instantiated as IP in the RTL is not
+  detected.
+- One EIO, and no burst-chain options: the ELAs read out through the core
+  manager's single-chain burst.
+
+Demos, each with a `build.tcl` and a `capture.py` that checks every
+inserted core:
+[`examples/arty_a7_insert`](https://github.com/lcapossio/fpgacapZero/tree/main/examples/arty_a7_insert)
+(Artix-7, two clocks from an MMCM; hardware-checked) and
+[`examples/kv260_insert`](https://github.com/lcapossio/fpgacapZero/tree/main/examples/kv260_insert)
+(Zynq UltraScale+, the PS clock and a divided copy; builds with timing met,
+not yet checked on hardware).
+
 ## Adding more cores in the same design
 
 The reference Arty A7 design uses one USER1 debug manager plus AXI on USER4:
