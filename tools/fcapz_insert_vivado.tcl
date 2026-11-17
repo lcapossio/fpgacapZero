@@ -203,7 +203,9 @@ proc fcapz::_family {part} {
     if {[regexp {^(artix7|kintex7|virtex7|spartan7|zynq|aartix7|akintex7|azynq|qartix7|qkintex7|qvirtex7|qzynq)$} $arch]} {
         return 7
     }
-    if {[regexp {(uplus|^a?q?(kintex|virtex)u)$} $arch]} {
+    # kintexu, virtexu, and every UltraScale+ (kintexuplus, zynquplusrfsoc,
+    # virtexuplushbm, ...), with the a/q grade prefixes.
+    if {[regexp {uplus|^a?q?(kintex|virtex)u$} $arch]} {
         return us
     }
     error "fcapz::insert: part $part ($arch) is not 7-series or UltraScale(+)"
@@ -219,17 +221,50 @@ proc fcapz::_slot {slots key what} {
     error "fcapz::insert: $what: no ELA $key (ELAs: [lsort [array names s]])"
 }
 
-# MARK_DEBUG makes a net DONT_TOUCH, which connect_net refuses to edit:
-# lift it for the edit and put it back.
-proc fcapz::_connect {name pins} {
-    set net [get_nets $name]
-    set dt [string is true -strict [get_property DONT_TOUCH $net]]
-    if {$dt} { set_property DONT_TOUCH false $net }
-    connect_net -hierarchical -net $net -objects $pins
-    if {$dt} { set_property DONT_TOUCH true [get_nets $name] }
+# DONT_TOUCH (MARK_DEBUG sets it on a net, and designs set it on cells and
+# hierarchies) makes connect_net and disconnect_net refuse an edit. Lift it
+# on $objs and on every hierarchical cell above them; the result is the list
+# to hand back to _relock.
+proc fcapz::_unlock {objs} {
+    set todo {}
+    foreach obj $objs {
+        lappend todo $obj
+        set class [get_property CLASS $obj]
+        set p [expr {$class eq "cell" ? [get_property PARENT $obj] : [get_property PARENT_CELL $obj]}]
+        while {$p ne ""} {
+            set c [get_cells -quiet $p]
+            if {[llength $c] != 1} { break }
+            lappend todo $c
+            set p [get_property PARENT $c]
+        }
+    }
+    set lifted {}
+    foreach obj $todo {
+        if {[string is true -strict [get_property DONT_TOUCH $obj]]} {
+            set_property DONT_TOUCH false $obj
+            lappend lifted [list [get_property CLASS $obj] [get_property NAME $obj]]
+        }
+    }
+    return $lifted
 }
 
-# Drive net $name from $pin instead of its own driver, which is cut off.
+proc fcapz::_relock {lifted} {
+    foreach l $lifted {
+        lassign $l class name
+        set obj [expr {$class eq "cell" ? [get_cells -quiet $name] : [get_nets -quiet $name]}]
+        if {[llength $obj]} { set_property DONT_TOUCH true $obj }
+    }
+}
+
+proc fcapz::_connect {name pins} {
+    set lifted [fcapz::_unlock [get_nets $name]]
+    set err [catch {connect_net -hierarchical -net [get_nets $name] -objects $pins} msg]
+    fcapz::_relock $lifted
+    if {$err} { error "fcapz::insert: cannot connect $name: $msg" }
+}
+
+# Drive net $name from $pin instead of its own driver, which is cut off. If
+# the new connection fails, the driver is put back.
 proc fcapz::_drive {name pin what} {
     set net [get_nets $name]
     if {[llength [get_ports -quiet -of_objects $net -filter {DIRECTION == IN}]]} {
@@ -240,17 +275,18 @@ proc fcapz::_drive {name pin what} {
         error "fcapz::insert: $what: $name has [llength $drv] drivers, expected 1"
     }
     set seg [get_nets -of_objects $drv]
-    set cell [get_cells -of_objects $drv]
-    set lifted {}
-    foreach obj [list $net $seg $cell] {
-        if {[string is true -strict [get_property DONT_TOUCH $obj]]} {
-            set_property DONT_TOUCH false $obj
-            lappend lifted $obj
-        }
+    set seg_name [get_property NAME $seg]
+    set lifted [fcapz::_unlock [list $net $seg [get_cells -of_objects $drv]]]
+    if {[catch {disconnect_net -net $seg -objects $drv} msg]} {
+        fcapz::_relock $lifted
+        error "fcapz::insert: $what: cannot cut the driver of $name: $msg"
     }
-    disconnect_net -net $seg -objects $drv
-    connect_net -hierarchical -net [get_nets $name] -objects $pin
-    foreach obj $lifted { set_property -quiet DONT_TOUCH true $obj }
+    if {[catch {connect_net -hierarchical -net [get_nets $name] -objects $pin} msg]} {
+        connect_net -net [get_nets $seg_name] -objects $drv
+        fcapz::_relock $lifted
+        error "fcapz::insert: $what: cannot drive $name: $msg"
+    }
+    fcapz::_relock $lifted
 }
 
 # A JSON string literal.
@@ -441,6 +477,8 @@ proc fcapz::insert {args} {
         set s [fcapz::_slot $slots $src -cross_trigger]
         if {$d == $s} { error "fcapz::insert: -cross_trigger: ELA $dst cannot trigger itself" }
         if {[lindex $xtrig $d]} { error "fcapz::insert: -cross_trigger: ELA $dst has two sources" }
+        # XTRIG_SRCS holds source + 1 in 8 bits.
+        if {$s > 254} { error "fcapz::insert: -cross_trigger: source ELA $src is above 254" }
         lset xtrig $d [expr {$s + 1}]
         lset ext_trig $d 1
         lset ext_trig $s 1
@@ -471,6 +509,14 @@ proc fcapz::insert {args} {
             set hz [expr {round(1e9 / [get_property PERIOD $sc])}]
         }
         lappend clock_hz $hz
+    }
+    if {[llength $o(clock_hz)] > 1 && [llength $o(clock_hz)] % 2} {
+        error "fcapz::insert: -clock_hz: give one rate, or ELA/rate pairs"
+    }
+    foreach hz [expr {[llength $o(clock_hz)] == 1 ? $o(clock_hz) : [dict values $o(clock_hz)]}] {
+        if {![string is double -strict $hz] || $hz <= 0} {
+            error "fcapz::insert: -clock_hz: $hz is not a rate in Hz"
+        }
     }
     if {[llength $o(clock_hz)] == 1} {
         set clock_hz [lrepeat $num_elas $o(clock_hz)]
@@ -586,11 +632,16 @@ proc fcapz::insert {args} {
             set_max_delay -datapath_only -from $sclk -to $tck_clk $bound
         }
     }
-    # Single-bit crossings with a synchronizer behind them, and the levels
-    # and pulses the design takes in its own clock (synchronizing them is the
-    # design's job, as for any EIO output).
-    set_false_path -to [get_cells -hierarchical -filter "NAME =~ $cell/*xtrig_meta_reg*"]
-    foreach port {eio_probe_in eio_probe_out ela_trigger_in ela_trigger_out ela_armed_out} {
+    # The cross-trigger toggles enter a two-stage synchronizer: cut the path
+    # into its first stage only (it exists only when -cross_trigger is used).
+    set xmeta [get_pins -quiet -filter {REF_PIN_NAME == D} -of_objects \
+        [get_cells -quiet -hierarchical -filter "NAME =~ $cell/*xtrig_meta_reg\[0\]"]]
+    if {[llength $xmeta]} { set_false_path -to $xmeta }
+    # The EIO's inputs have a synchronizer behind them and its outputs are
+    # levels that change under host control; -trigger_in nets enter the ELA's
+    # synchronizer. trigger_out and armed_out leave in the ELA's clock and
+    # stay timed: synchronizing them into another clock is the design's job.
+    foreach port {eio_probe_in eio_probe_out ela_trigger_in} {
         set pins {}
         foreach p [get_pins -quiet $cell/$port*] {
             if {[llength [get_nets -quiet -of_objects $p]]} { lappend pins $p }

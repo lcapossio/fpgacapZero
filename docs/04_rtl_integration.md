@@ -265,8 +265,8 @@ and the EIO is the slot after the last ELA (`fcapz eio-read --instance N`).
 | `-eio_in {nets}` | Nets the EIO reads, in any clock (synchronized inside). |
 | `-eio_out {nets}` | Nets the EIO drives. Each net's own driver is cut off, so give it a placeholder: a register that holds a constant, kept with `dont_touch`. EIO outputs change in the JTAG clock; synchronize them where the design uses them. |
 | `-trigger_in {ela net ...}` | A design net into an ELA's external trigger. The ELA samples it as a level in its own clock: a pulse must last more than two of its cycles. |
-| `-trigger_out {ela net ...}` | An ELA's trigger pulse (one sample clock) onto a design net. |
-| `-armed_out {ela net ...}` | An ELA's armed level onto a design net. |
+| `-trigger_out {ela net ...}` | An ELA's trigger pulse (one sample clock) onto a design net, timed in that clock. |
+| `-armed_out {ela net ...}` | An ELA's armed level onto a design net, timed in the ELA's clock. |
 | `-cross_trigger {dst src ...}` | ELA `src`'s trigger starts ELA `dst`, between any two clocks: a toggle crosses, and the destination turns it back into one pulse per trigger. |
 | `-chain` | The USER chain, 1 by default. It must be free. |
 | `-tck_mhz` | The TCK constraint, 10 MHz by default. Set it to the speed your cable runs at. |
@@ -283,10 +283,12 @@ fcapz --ela-instance 1 capture --probe-file design_ela1.prob --format vcd --out 
 Constraints: the BSCANE2 TCK gets a clock of `-tck_mhz`, and every path
 between it and a sample clock gets `set_max_delay -datapath_only` of one
 period of the faster clock, which keeps the ELAs' multi-bit settings and
-readback bundles timed.  The EIO, trigger and cross-trigger crossings are
-single bits with a synchronizer behind them, or levels the design takes in
-its own clock, and get `set_false_path`.  Sample clocks must be constrained,
-or the script warns that their crossings are not timed.
+readback bundles timed.  The EIO's nets, the `-trigger_in` nets and the
+cross-trigger toggles enter a synchronizer, or are levels that change under
+host control, and get `set_false_path`.  `-trigger_out` and `-armed_out`
+leave in the ELA's sample clock and stay timed: a net in another clock must
+be synchronized by the design.  Sample clocks must be constrained, or the
+script warns that their crossings are not timed.
 
 Limits:
 
@@ -303,8 +305,7 @@ inserted core:
 [`examples/arty_a7_insert`](https://github.com/lcapossio/fpgacapZero/tree/main/examples/arty_a7_insert)
 (Artix-7, two clocks from an MMCM; hardware-checked) and
 [`examples/kv260_insert`](https://github.com/lcapossio/fpgacapZero/tree/main/examples/kv260_insert)
-(Zynq UltraScale+, the PS clock and a divided copy; builds with timing met,
-not yet checked on hardware).
+(Zynq UltraScale+, the PS clock and a divided copy; hardware-checked).
 
 ## Adding more cores in the same design
 
