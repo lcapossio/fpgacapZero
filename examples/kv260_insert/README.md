@@ -43,4 +43,6 @@ one; it fails if timing is not met. `capture.py` runs the Arty demo's
 checks against this build.
 
 Built with Vivado 2025.2: timing met against the 200 MHz `pl_clk0`
-constraint (WNS +1.458 ns, WHS +0.012 ns). Not yet run on hardware.
+constraint (WNS +1.445 ns, WHS +0.012 ns), and `capture.py` passes all 18
+checks on a KV260 (the Arty's 19 less its switch read, as the KV260 has no
+switches).

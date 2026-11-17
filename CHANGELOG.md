@@ -17,8 +17,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   manager on one USER chain, and can wire external triggers in and out and
   cross-triggers between the ELAs, across clocks. It constrains every clock
   crossing, and writes a `.prob` per ELA plus a manifest. The Arty A7 demo
-  in `examples/arty_a7_insert/` (two clocks) checks every inserted core on
-  hardware; `examples/kv260_insert/` is its Zynq UltraScale+ counterpart.
+  in `examples/arty_a7_insert/` (two clocks) and its Zynq UltraScale+
+  counterpart `examples/kv260_insert/` check every inserted core on hardware.
 
 - **RPC and web: a `cancel` command.** `{"cmd": "cancel", "target":
   <request_id>}` interrupts a command in flight without waiting for it:
