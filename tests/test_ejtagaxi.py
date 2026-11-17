@@ -607,6 +607,29 @@ class EjtagAxiTests(unittest.TestCase):
         self.assertEqual(info["bridge_id"], _BRIDGE_ID)
         self.assertEqual(t.stale_config_id_reads, 0)
 
+    def test_connect_resets_a_bridge_left_mid_stream(self):
+        """A session that dropped mid-stream sent no RESET; the bridge keeps
+        answering CONFIG with stream data until one arrives.  Seen on the
+        Arty over OpenOCD after a stream read timed out."""
+
+        class _StuckStreaming(FakeBridgeTransport):
+            stuck = True
+
+            def _exec(self, cmd, addr, payload, wstrb):
+                if cmd == CMD_RESET:
+                    self.stuck = False
+                if self.stuck and cmd != CMD_RESET:
+                    self.prev_rdata = 0
+                    self.prev_valid = True
+                    return
+                super()._exec(cmd, addr, payload, wstrb)
+
+        t = _StuckStreaming()
+        t.ready_probe_timeout = 0.0  # used up, as behind a long scan
+        info = EjtagAxiController(t, chain=4).connect()
+        self.assertEqual(info["bridge_id"], _BRIDGE_ID)
+        self.assertIn(CMD_RESET, t.scan_log[:8])
+
     def test_connect_timeout_with_stale_bridge_id_raises(self):
         t = FakeBridgeTransport(stale_config_id_reads=100)
         t.ready_probe_timeout = 0.0
