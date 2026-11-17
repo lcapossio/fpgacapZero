@@ -112,7 +112,7 @@ class RpcGateway:
             # Disconnect while a command holds the session (a hung connect, a
             # long capture): interrupt it, then close once it has let go,
             # instead of waiting out its timeout.
-            self._interrupt(serial_allowed)
+            self._interrupt(req, serial_allowed)
             self._lock.acquire()
         try:
             if not serial_allowed and (
@@ -124,7 +124,11 @@ class RpcGateway:
         finally:
             self._lock.release()
 
-    def interrupt_if_busy(self, *, serial_allowed: bool = True) -> None:
+    @property
+    def session_epoch(self) -> int:
+        return self._server.session_epoch
+
+    def interrupt_if_busy(self, req: Dict[str, Any], *, serial_allowed: bool = True) -> None:
         """Interrupt the session command holding the lock, if there is one.
 
         What a ``close`` does first when it finds the lock held.  The web app
@@ -135,11 +139,16 @@ class RpcGateway:
         if self._lock.acquire(blocking=False):
             self._lock.release()
             return
-        self._interrupt(serial_allowed)
+        self._interrupt(req, serial_allowed)
 
-    def _interrupt(self, serial_allowed: bool) -> None:
+    def _interrupt(self, req: Dict[str, Any], serial_allowed: bool) -> None:
+        # Only for a close that will run (not malformed, not cancelled
+        # itself), and only the session commands: a concurrent target scan
+        # is not the session being closed.
+        if not self._server.would_run(req):
+            return
         if serial_allowed or not self._server.session_touches_bytestream():
-            self._server.cancel({"cmd": "cancel"})
+            self._server.cancel({"cmd": "cancel"}, session_only=True)
 
     def _denied(self, req: Dict[str, Any]) -> Dict[str, Any]:
         return _serial_denied(req, self._server.session_epoch)

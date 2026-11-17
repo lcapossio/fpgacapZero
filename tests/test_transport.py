@@ -173,6 +173,46 @@ class XsdbTargetParserTests(unittest.TestCase):
         handles[0].cancel()
         proc.kill.assert_called_once()
 
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_list_jtag_targets_reaps_xsdb_when_the_registration_is_refused(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        """A cancel that came first refuses the registration: the child is
+        killed and reaped, not leaked with its pipes."""
+        proc = self._xsdb_proc("* 1  xck26\n")
+        popen_mock.return_value = proc
+
+        def refuse(_handle):
+            raise RuntimeError("request cancelled")
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            list_xilinx_hw_server_targets(host="localhost", port=3121, register=refuse)
+        proc.kill.assert_called()
+        proc.communicate.assert_called()
+
+    @patch("shutil.which", return_value="xsdb")
+    def test_hw_server_cancel_while_xsdb_spawns_fails_the_connect(
+        self, _which_mock: MagicMock
+    ) -> None:
+        """cancel() before _proc points at the child cannot kill it; connect
+        notices the cancel and reaps the child instead of waiting it out."""
+        t = XilinxHwServerTransport()
+        proc = MagicMock()
+
+        def spawning(*_a, **_k):
+            t.cancel()  # lands while Popen runs: t._proc is still None
+            return proc
+
+        with patch("subprocess.Popen", side_effect=spawning):
+            with self.assertRaisesRegex(ConnectionError, "cancelled"):
+                t.connect()
+        proc.kill.assert_called()
+        proc.communicate.assert_called()
+        self.assertIsNone(t._proc)
+
 # ---------------------------------------------------------------------------
 # Transport ABC contract
 # ---------------------------------------------------------------------------

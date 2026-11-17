@@ -147,11 +147,13 @@ def list_xilinx_hw_server_targets(
         text=True,
         env=env,
     )
-    if register is not None:
-        register(_ProcessCancel(proc))
     try:
+        if register is not None:
+            register(_ProcessCancel(proc))
         stdout, stderr = proc.communicate(script, timeout=float(timeout_sec))
-    except subprocess.TimeoutExpired:
+    except BaseException:
+        # A timeout, or a cancel (which may have refused the registration
+        # itself): kill and reap the child, never leave it or its pipes.
         proc.kill()
         proc.communicate()
         raise
@@ -2158,9 +2160,21 @@ class TapBridgeTransport(Transport):
         """
         return 0.0
 
+    # Counts cancel() calls, so a connect() that is still opening the
+    # channel (open_channel not yet set) notices one.
+    _cancel_seq = 0
+
     def _channel_name(self) -> str:
         """Short identifier for error messages (a port name, say)."""
         return type(self).__name__
+
+    def _raise_if_cancelled(self, exc: BaseException | None = None) -> None:
+        """A read cut short because cancel() closed the channel is a
+        cancelled link, not a bridge that stopped replying."""
+        if not self._open_channel:
+            raise ConnectionError(
+                f"link to {self._channel_name()} cancelled; reconnect"
+            ) from exc
 
     # -- lifecycle ----------------------------------------------------------
     def connect(self) -> None:
@@ -2169,8 +2183,18 @@ class TapBridgeTransport(Transport):
         # A new session may reach another image: nothing cached about the
         # old one's managers holds.
         self._forget_hub_state()
+        seq = self._cancel_seq
         self._open()
         self._open_channel = True
+        if seq != self._cancel_seq:
+            # cancel() ran while the channel was opening (it found nothing
+            # open to close): honour it now.
+            self._open_channel = False
+            try:
+                self._close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            raise ConnectionError(f"link to {self._channel_name()} cancelled while opening")
         self._out_of_step = False
         try:
             self._identify()
@@ -2203,6 +2227,7 @@ class TapBridgeTransport(Transport):
         ``MGR_OWNER`` token stays set, as after a cancel on the other
         backends; :meth:`connect` starts a new session.
         """
+        self._cancel_seq += 1  # seen by a connect still opening the channel
         if not self._open_channel:
             return
         self._open_channel = False
@@ -2265,6 +2290,7 @@ class TapBridgeTransport(Transport):
             ) from exc
 
         if len(header) < 2:
+            self._raise_if_cancelled()
             self._resync(2 + resp_bytes - len(header))
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()} did not reply "
@@ -2288,8 +2314,14 @@ class TapBridgeTransport(Transport):
 
         if resp_bytes == 0:
             return b""
-        payload = self._read_bytes(resp_bytes)
+        try:
+            payload = self._read_bytes(resp_bytes)
+        except OSError as exc:
+            raise ConnectionError(
+                f"link to {self._channel_name()} failed mid-transaction: {exc}"
+            ) from exc
         if len(payload) < resp_bytes:
+            self._raise_if_cancelled()
             self._resync(resp_bytes - len(payload))
             raise RuntimeError(
                 f"fcapz TAP bridge on {self._channel_name()}: short reply "
@@ -4154,6 +4186,10 @@ class XilinxHwServerTransport(Transport):
         bits[48]    = rnw  (1 = write, 0 = read)
     """
 
+    # Counts cancel() calls, so a connect() still spawning xsdb (before
+    # _proc points at the child) notices one.
+    _cancel_seq = 0
+
     # Default BSCANE2 IR codes for Xilinx 7-series.
     # USER1 (0x02) and USER2 (0x03) are verified.
     # Verified on xc7a100t (Arty A7): USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
@@ -4337,6 +4373,7 @@ class XilinxHwServerTransport(Transport):
                 "xsdb not found. Add Vivado bin to PATH or pass xsdb_path=."
             )
 
+        seq = self._cancel_seq
         self._proc = subprocess.Popen(
             [xsdb],
             stdin=subprocess.PIPE,
@@ -4345,6 +4382,14 @@ class XilinxHwServerTransport(Transport):
             text=True,
             bufsize=1,
         )
+        if seq != self._cancel_seq:
+            # cancel() ran while xsdb was spawning, before _proc pointed at
+            # it: kill and reap it here, or the connect would wait out its
+            # whole timeout on a session already cancelled.
+            proc, self._proc = self._proc, None
+            proc.kill()
+            proc.communicate()
+            raise ConnectionError("hw_server connect cancelled")
         self._poisoned = False
         self._stdout_lines = queue.Queue()
         self._stderr_lines = []
@@ -4687,6 +4732,7 @@ class XilinxHwServerTransport(Transport):
         # holds the pipe's buffer lock, and an "exit" write would wait on it.
         # Leaves _proc for the owner: its _send fails on the dead pipe and
         # its close() reaps the process.
+        self._cancel_seq += 1  # seen by a connect still spawning xsdb
         self._poisoned = True
         proc = self._proc
         if proc is not None:

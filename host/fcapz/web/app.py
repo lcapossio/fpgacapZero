@@ -41,7 +41,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .._version import __version__
 from ..openocd_launcher import OpenOcdLauncher
-from ..rpc import _SCHEMA_VERSION, RpcServer, error_envelope
+from ..rpc import _SCHEMA_VERSION, RequestCancelled, RpcServer, error_envelope
 from .gateway import RpcGateway
 from .logbuffer import install_log_capture
 
@@ -274,19 +274,29 @@ def create_app(
             raise HTTPException(status_code=403, detail="Host not allowed")
         return log_ring.snapshot(since)
 
+    def _with_ids(resp: dict, req: dict) -> dict:
+        """Add the correlation fields a reply from the gateway carries."""
+        resp = dict(resp, session_epoch=gateway.session_epoch)
+        if isinstance(req, dict) and req.get("request_id") is not None:
+            resp["request_id"] = req["request_id"]
+        return resp
+
     @app.post("/api/rpc")
     async def rpc(req: dict, request: Request, _: None = Depends(auth)):
         if not _host_header_ok(request.headers.get("host"), bind_host):
-            return {
-                "ok": False,
-                "schema_version": _SCHEMA_VERSION,
-                "error": "Host not allowed (possible DNS rebinding).",
-                "type": "PermissionError",
-            }
+            return _with_ids(
+                {
+                    "ok": False,
+                    "schema_version": _SCHEMA_VERSION,
+                    "error": "Host not allowed (possible DNS rebinding).",
+                    "type": "PermissionError",
+                },
+                req,
+            )
         client_host = request.client.host if request.client else None
         blocked = _openocd_guard(req, client_host)
         if blocked is not None:
-            return blocked
+            return _with_ids(blocked, req)
         serial_ok = _serial_allowed(client_host, token)
         cmd = req.get("cmd")
         if cmd == "cancel":
@@ -295,7 +305,7 @@ def create_app(
             # the very command it interrupts.
             return gateway.call(req, serial_allowed=serial_ok)
         if cmd == "close":
-            gateway.interrupt_if_busy(serial_allowed=serial_ok)
+            gateway.interrupt_if_busy(req, serial_allowed=serial_ok)
         return await run_in_threadpool(gateway.call, req, serial_allowed=serial_ok)
 
     @app.websocket("/api/ws")
@@ -339,7 +349,9 @@ def create_app(
                     )
                 except Exception as exc:  # noqa: BLE001 - keep serving this client
                     _log.warning("websocket request failed", exc_info=True)
-                    resp = error_envelope(exc, req, log=False)
+                    resp = error_envelope(
+                        exc, req, log=False, session_epoch=gateway.session_epoch
+                    )
                 await send(resp)
 
         worker_task = asyncio.create_task(worker())
@@ -366,7 +378,7 @@ def create_app(
                     continue
                 blocked = _openocd_guard(req, client_host)
                 if blocked is not None:
-                    await send(blocked)
+                    await send(_with_ids(blocked, req))
                     continue
                 cmd = req.get("cmd")
                 if cmd == "cancel":
@@ -374,7 +386,19 @@ def create_app(
                     await send(gateway.call(req, serial_allowed=serial_ok))
                     continue
                 if cmd == "close":
-                    gateway.interrupt_if_busy(serial_allowed=serial_ok)
+                    # Disconnect: what this client queued before it will not
+                    # run, and the command in flight is interrupted.
+                    while not pending.empty():
+                        dropped = pending.get_nowait()
+                        await send(
+                            error_envelope(
+                                RequestCancelled("cancelled by close"),
+                                dropped,
+                                log=False,
+                                session_epoch=gateway.session_epoch,
+                            )
+                        )
+                    gateway.interrupt_if_busy(req, serial_allowed=serial_ok)
                 pending.put_nowait(req)
         except WebSocketDisconnect:
             return

@@ -54,8 +54,10 @@ play.
 Every response carries `"schema_version"` so a stale client can
 detect when it's talking to a newer server and update its
 parser.  The current schema version is `"1.2"`.  Every response
-also carries `"session_epoch"`, a number that goes up with each
-`connect` and `close`; see [`cancel`](#cancel).
+also carries `"session_epoch"`, a number that goes up when a command
+that starts or ends a session finishes (`connect`, `close`, and the
+`eio_`/`axi_`/`uart_` connect and close commands), and when a cancel
+ends a session; see [`cancel`](#cancel).
 
 ## Spawning the server
 
@@ -360,18 +362,23 @@ WebSocket and over HTTP alike).
   nothing happens.  A request that finishes after the cancel arrived
   still fails with `RequestCancelled`: the session ends either way.
 - `session_epoch` (optional): only act if this is still the session's
-  epoch, so a late cancel cannot end a newer session.
-- With neither, it interrupts whatever session command is running, and
-  does nothing when the server is idle.
+  epoch, so a late cancel cannot end a newer session.  The epoch moves
+  when a `connect` finishes, so the epoch a client last saw still names
+  a `connect` in flight.
+- With neither, it interrupts every command running (a target scan
+  included), and does nothing when the server is idle.
 
 Response: `{"ok": true, "schema_version": "1.2", "cancelled": true}`,
 or `"cancelled": false` with a `reason` (`"idle"`, `"request not
 running"`, `"request finished"`, `"session ended"`).
 
-Interrupting closes the session's transports, which is what makes a
-blocked read return: the interrupted request fails (often with
-`ConnectionError`), and the client reconnects.  The cancel itself scans
-nothing on the JTAG chain, so a core-manager `MGR_OWNER` claim the
+Interrupting a session command cancels the session's transports, which
+is what makes a blocked read return: the interrupted request fails
+(often with `ConnectionError`), the server then closes the session, and
+the client reconnects.  Interrupting a stateless command (`scan_targets`,
+`openocd_start`, `openocd_status`, `list_serial_ports`) stops only what
+that command opened, and leaves the session alone.  The cancel itself
+scans nothing on the JTAG chain, so a core-manager `MGR_OWNER` claim the
 session held stays set.
 
 #### `scan_targets`

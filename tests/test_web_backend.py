@@ -799,6 +799,33 @@ def test_ws_close_interrupts_its_own_request_in_flight(monkeypatch):
     assert replies["z1"]["ok"] is True
 
 
+def test_ws_close_drops_what_was_queued_behind_the_request_in_flight(monkeypatch):
+    import threading
+
+    entered, cancelled = threading.Event(), threading.Event()
+
+    class _Hung(FakeTransport):
+        def connect(self) -> None:
+            entered.set()
+            cancelled.wait(10)
+            raise ConnectionError("transport cancelled")
+
+        def cancel(self) -> None:
+            cancelled.set()
+
+    monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: _Hung())
+    c = TestClient(create_app())
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_json({"cmd": "connect", "request_id": "c1", **_GOWIN})
+        assert entered.wait(5)
+        ws.send_json({"cmd": "connect", "request_id": "c2", **_GOWIN})
+        ws.send_json({"cmd": "close", "request_id": "z1"})
+        replies = {r["request_id"]: r for r in (ws.receive_json() for _ in range(3))}
+    assert replies["c2"]["type"] == "RequestCancelled"
+    assert replies["c1"]["ok"] is False
+    assert replies["z1"]["ok"] is True
+
+
 def test_ws_a_non_string_cmd_is_refused_and_the_socket_keeps_serving(monkeypatch):
     monkeypatch.setattr(RpcServer, "_build_transport", lambda self, req, **_: FakeTransport())
     c = TestClient(create_app())

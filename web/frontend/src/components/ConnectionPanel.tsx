@@ -439,6 +439,7 @@ export function ConnectionPanel({
         { backend, host, port: Number(port), timeout: HW_SCAN_TIMEOUT },
         HW_CONNECT_TIMEOUT,
         sig(),
+        SERVER_CANCEL,
       );
       const found = (r.targets as string[]) ?? [];
       if (found.length === 0) {
@@ -485,6 +486,7 @@ export function ConnectionPanel({
       },
       DISCOVER_TIMEOUT,
       sig(),
+      SERVER_CANCEL,
     );
     return (r.boards as Board[]) ?? [];
   }
@@ -502,6 +504,7 @@ export function ConnectionPanel({
         { backend, host, port: Number(port) },
         AUTO_DISCOVER_TIMEOUT,
         sig(),
+        SERVER_CANCEL,
       );
       return (r.boards as Board[]) ?? [];
     } catch (e) {

@@ -132,13 +132,13 @@ class RpcServerCancelTests(unittest.TestCase):
         transport = BlockingTransport()
         server = self._server(transport)
         held = []
-        live = server._live_transports
+        resolve = server._resolve
 
-        def spy():
+        def spy(holders):
             held.append(server._opening_lock.locked())
-            return live()
+            return resolve(holders)
 
-        server._live_transports = spy  # type: ignore[method-assign]
+        server._resolve = spy  # type: ignore[method-assign]
         thread, _ = _in_thread(server.handle, _CONNECT)
         self.assertTrue(transport.entered.wait(5))
         held.clear()
@@ -153,14 +153,17 @@ class RpcServerCancelTests(unittest.TestCase):
         go_on = threading.Event()
 
         class Unstoppable(BlockingTransport):
-            calls = 0
+            closed = False
 
             def connect(self) -> None:
                 self.entered.set()
                 go_on.wait(5)
 
             def cancel(self) -> None:
-                Unstoppable.calls += 1
+                pass  # too early: the connect does not notice
+
+            def close(self) -> None:
+                Unstoppable.closed = True
 
         transport = Unstoppable()
         server = self._server(transport)
@@ -170,7 +173,83 @@ class RpcServerCancelTests(unittest.TestCase):
         go_on.set()
         thread.join(5)
         self.assertIsInstance(box.get("error"), RequestCancelled)
-        self.assertGreaterEqual(Unstoppable.calls, 2)
+        self.assertTrue(Unstoppable.closed)
+        self.assertIsNone(server._analyzer)
+
+    def test_an_interrupted_session_command_tears_the_session_down(self):
+        transport = BlockingTransport()
+        server = self._server(transport)
+        epoch = server.session_epoch
+        thread, box = _in_thread(server.handle, _CONNECT)
+        self.assertTrue(transport.entered.wait(5))
+        server.handle({"cmd": "cancel"})
+        thread.join(5)
+        self.assertIsInstance(box.get("error"), ConnectionError)
+        self.assertIsNone(server._analyzer)
+        self.assertGreater(server.session_epoch, epoch)
+
+    def test_cancel_of_a_connect_in_flight_with_the_last_known_epoch(self):
+        """The epoch moves when connect finishes, so a client can still name
+        the epoch it knows while the connect runs."""
+        transport = BlockingTransport()
+        server = self._server(transport)
+        epoch = server.session_epoch
+        thread, _ = _in_thread(server.handle, _CONNECT)
+        self.assertTrue(transport.entered.wait(5))
+        resp = server.handle({"cmd": "cancel", "session_epoch": epoch})
+        thread.join(5)
+        self.assertIs(resp["cancelled"], True)
+
+    def test_side_connects_move_the_epoch(self):
+        server = self._server(BlockingTransport(block=False))
+        with mock.patch.object(server, "_handle", return_value={"ok": True}):
+            before = server.session_epoch
+            server.handle({"cmd": "axi_connect"})
+            self.assertEqual(server.session_epoch, before + 1)
+
+    def test_cancelling_a_scan_leaves_the_session_alone(self):
+        transport = BlockingTransport(block=False)
+        server = self._server(transport)
+        server.handle(_CONNECT)
+        scan_handle = BlockingTransport(block=False)
+        started, go_on = threading.Event(), threading.Event()
+
+        def scan(req):
+            server._register_opening(scan_handle)
+            started.set()
+            go_on.wait(5)
+            return {"ok": True}
+
+        with mock.patch.object(server, "_handle", side_effect=scan):
+            thread, box = _in_thread(server.handle, {"cmd": "scan_targets", "request_id": "s"})
+            self.assertTrue(started.wait(5))
+            resp = server.handle({"cmd": "cancel", "target": "s"})
+            go_on.set()
+            thread.join(5)
+        self.assertIs(resp["cancelled"], True)
+        self.assertTrue(scan_handle.cancelled.is_set())
+        self.assertFalse(transport.cancelled.is_set())
+        self.assertIsNotNone(server._analyzer)
+        # The scan's I/O finished, but it was cancelled: it does not succeed.
+        self.assertIsInstance(box.get("error"), RequestCancelled)
+
+    def test_an_untargeted_cancel_reaches_a_running_scan(self):
+        server = self._server(BlockingTransport(block=False))
+        started, go_on = threading.Event(), threading.Event()
+
+        def scan(req):
+            started.set()
+            go_on.wait(5)
+            return {"ok": True}
+
+        with mock.patch.object(server, "_handle", side_effect=scan):
+            thread, box = _in_thread(server.handle, {"cmd": "scan_targets"})
+            self.assertTrue(started.wait(5))
+            resp = server.handle({"cmd": "cancel"})
+            go_on.set()
+            thread.join(5)
+        self.assertIs(resp["cancelled"], True)
+        self.assertIsInstance(box.get("error"), RequestCancelled)
 
     def test_malformed_cmd_and_request_id_are_refused(self):
         server = self._server(BlockingTransport(block=False))
@@ -317,6 +396,38 @@ class GatewayCancelTests(unittest.TestCase):
         gateway.call({"cmd": "cancel"})  # the local client may
         thread.join(5)
         self.assertFalse(thread.is_alive())
+
+    def test_remote_cancel_cannot_end_a_serial_connect_before_it_registers(self):
+        transport = BlockingTransport(block=False)
+        gateway = self._gateway(transport)
+        building, go_on = threading.Event(), threading.Event()
+
+        def slow_build(req, **_):
+            building.set()
+            go_on.wait(5)
+            return transport
+
+        gateway._server._build_transport = slow_build  # type: ignore[method-assign]
+        thread, box = _in_thread(gateway.call, {**_CONNECT, "backend": "serial"})
+        self.assertTrue(building.wait(5))
+        resp = gateway.call({"cmd": "cancel"}, serial_allowed=False)
+        go_on.set()
+        thread.join(5)
+        self.assertEqual(resp["type"], "PermissionError")
+        self.assertIs(box["value"]["ok"], True)
+
+    def test_a_close_cancelled_before_it_runs_interrupts_nothing(self):
+        transport = BlockingTransport()
+        gateway = self._gateway(transport)
+        thread, _ = _in_thread(gateway.call, _CONNECT)
+        self.assertTrue(transport.entered.wait(5))
+        gateway.call({"cmd": "cancel", "target": "z"})
+        gateway.interrupt_if_busy({"cmd": "close", "request_id": "z"})
+        self.assertFalse(transport.cancelled.is_set())
+        gateway.interrupt_if_busy({"cmd": "close", "request_id": []})
+        self.assertFalse(transport.cancelled.is_set())
+        gateway.call({"cmd": "cancel"})
+        thread.join(5)
 
 
 if __name__ == "__main__":
