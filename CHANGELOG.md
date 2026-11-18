@@ -9,6 +9,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Vivado: insert debug cores after synthesis.**
+  `tools/fcapz_insert_vivado.tcl` adds fcapz debug cores to a synthesized
+  7-series or UltraScale(+) checkpoint, wired to the nets marked
+  `mark_debug`, so the design's RTL needs no fcapz instance. It inserts one
+  ELA per sample clock (or per `-group`) and an optional EIO behind the core
+  manager on one USER chain, and can wire external triggers in and out and
+  cross-triggers between the ELAs, across clocks. It constrains every clock
+  crossing, and writes a `.prob` per ELA plus a manifest. The Arty A7 demo
+  in `examples/arty_a7_insert/` (two clocks) and its Zynq UltraScale+
+  counterpart `examples/kv260_insert/` check every inserted core on hardware.
+
 - **RPC and web: a `cancel` command.** `{"cmd": "cancel", "target":
   <request_id>}` interrupts a command in flight without waiting for it:
   the stdin server and each WebSocket now keep reading while a request
