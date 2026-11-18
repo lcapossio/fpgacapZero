@@ -125,8 +125,8 @@ class Demo:
         self.check(n == 65 and 0x40 in counts, f"{n} samples with count 0x40")
         self.check(all((counts[i] - counts[i - 1]) & 0xFF == 1 for i in range(1, n)),
                    "count steps by one")
-        self.check(all(lfsrs[i] == lfsr_next(lfsrs[i - 1]) for i in range(1, n)),
-                   "lfsr follows its polynomial")
+        self.check(all(lfsrs) and all(lfsrs[i] == lfsr_next(lfsrs[i - 1]) for i in range(1, n)),
+                   "lfsr follows its polynomial (never 0)")
         self.check(all(triples[i] == (counts[i - 1] * 3) & 0xFF for i in range(1, n)),
                    "u_gen/triple is 3 x the previous count")
         self.check(set(ctrls) == {ctrl}, f"ctrl_q holds the EIO value {ctrl:#x} ({set(ctrls)})")
@@ -144,8 +144,8 @@ class Demo:
         self.check(n == 65 and 0x40 in counts, f"{n} samples with slow_count 0x40")
         self.check(all((counts[i] - counts[i - 1]) & 0xFF == 1 for i in range(1, n)),
                    "slow_count steps by one")
-        self.check(all(lfsrs[i] == lfsr_next(lfsrs[i - 1]) for i in range(1, n)),
-                   "slow_lfsr follows its polynomial")
+        self.check(all(lfsrs) and all(lfsrs[i] == lfsr_next(lfsrs[i - 1]) for i in range(1, n)),
+                   "slow_lfsr follows its polynomial (never 0)")
         if self.slow_hz is not None:
             hz = self.probes[self.slow].sample_clock_hz
             self.check(hz == self.slow_hz,

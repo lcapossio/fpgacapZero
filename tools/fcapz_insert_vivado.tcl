@@ -31,7 +31,7 @@
 #   -prob <file>        probe map; one ELA writes <file>, several write
 #                       <root>_ela<n>.prob.  Also writes <root>.insert.json.
 #   -depth <n>          samples per ELA (1024); -depths {ela n ...} per ELA
-#   -group {name {globs} ?clock? ...}
+#   -group {{name {globs} ?clock?} ...}
 #                       nets whose names match a group's globs form an ELA of
 #                       their own; its clock is inferred, or the one given
 #   -clock <net>        sample every ungrouped net on this clock (one ELA)

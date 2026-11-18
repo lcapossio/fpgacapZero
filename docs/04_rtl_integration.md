@@ -258,7 +258,7 @@ and the EIO is the slot after the last ELA (`fcapz eio-read --instance N`).
 | --- | --- |
 | `-prob <file>` | Probe map. One ELA writes `<file>`; several write `<root>_ela<n>.prob`. Also writes `<root>.insert.json`, the manifest: each ELA's instance, clock, depth and probes, and the EIO's bits. |
 | `-depth <n>`, `-depths {ela n ...}` | Samples per ELA (1024), for all or per ELA. |
-| `-group {name {globs} ?clock? ...}` | Nets whose names match a group's globs form an ELA of their own, named `name`; its clock is inferred or given. |
+| `-group {{name {globs} ?clock?} ...}` | A list of groups: nets whose names match a group's globs form an ELA of their own, named `name`; its clock is inferred or given. One group is still a list of one: `-group {{fast {count*} clk}}`. |
 | `-clock <net>` | Sample every ungrouped net on this clock, in one ELA. |
 | `-default_clock <net>` | The clock of nets not driven by a flip-flop (a LUT, a RAM, a DSP). |
 | `-clock_hz <hz>` or `{ela hz ...}` | The sample rate written to the `.prob`; by default taken from the timing clock on the net. |
@@ -297,8 +297,10 @@ Limits:
   uses it, or if the checkpoint holds Vivado debug cores whose hub will
   take it at `opt_design`.  An ILA instantiated as IP in the RTL is not
   detected.
-- One EIO, and no burst-chain options: the ELAs read out through the core
-  manager's single-chain burst.
+- One EIO, and no burst-chain options. ELAs with the largest sample width
+  and depth read out through the core manager's single-chain burst; a
+  smaller one (such as the 512-sample ELA in the demos) reads through the
+  register window, which is slower.
 
 Demos, each with a `build.tcl` and a `capture.py` that checks every
 inserted core:

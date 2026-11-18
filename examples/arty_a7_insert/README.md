@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+-->
+
 # Arty A7: debug cores inserted after synthesis
 
 This design contains no fcapz RTL. The signals to capture are marked
