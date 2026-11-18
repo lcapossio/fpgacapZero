@@ -302,6 +302,28 @@ for i, result in enumerate(a.capture_continuous(count=10)):
     print(f"capture {i}: {len(result.samples)} samples")
 ```
 
+### `stream_segments(count=0, *, raw=False, timeout=10.0, poll_interval=0.005)`
+
+Continuous capture on a segmented core (`COMPARE_CAPS` bit 23): arms
+the core with the segment ring on and yields every window as it
+completes, in order, releasing its segment as soon as it is read.
+`result.seq` numbers the windows; `result.after_gap` marks a window
+that follows a wait (the host fell behind and every segment was
+full), and `result.lost` counts what the waits have cost since the arm
+(stored samples with `raw=True`, sample clocks otherwise).  With
+`raw=True` (needs `pretrigger=0`, `posttrigger >= 1`, and no trigger
+delay or holdoff) every stored sample is a trigger, so the windows are
+consecutive blocks.  Runs until *count* windows or
+until the generator is closed, then resets the core.  Raises
+`CaptureNotReady` when no window completes within *timeout*, and
+`CaptureChangedError` when another controller arms the core or takes
+the ring.  See [chapter 05](05_ela_core.md#continuous-capture).
+
+```python
+for result in a.stream_segments(count=1000, raw=True):
+    consume(result.samples)
+```
+
 ### Segmented memory
 
 For `NUM_SEGMENTS > 1`:
