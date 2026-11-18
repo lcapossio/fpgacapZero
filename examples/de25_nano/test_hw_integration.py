@@ -876,6 +876,98 @@ class TestSegmentedCapture(unittest.TestCase):
 
 
 @unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
+class TestContinuousCapture(unittest.TestCase):
+    """Continuous capture: the four segments run as a ring the host drains
+    (Analyzer.stream_segments).  The probe is an 8-bit counter at 50 MHz."""
+
+    SEG_DEPTH = 1024 // 4
+
+    def setUp(self):
+        from fcapz.analyzer import Analyzer
+
+        self.a = Analyzer(_make_transport(), chain=ELA_CHAIN)
+        self.a.connect()
+
+    def tearDown(self):
+        self.a.close()
+
+    def _config(self, **kw):
+        from fcapz.analyzer import CaptureConfig, TriggerConfig
+
+        base = dict(
+            sample_width=8,
+            depth=1024,
+            sample_clock_hz=SAMPLE_CLOCK_HZ,
+            pretrigger=0,
+            posttrigger=self.SEG_DEPTH - 1,
+            trigger=TriggerConfig(mode="value_match", value=0x00, mask=0x00),
+        )
+        base.update(kw)
+        return CaptureConfig(**base)
+
+    def test_ring_reported(self):
+        self.a.configure(self._config())
+        self.assertTrue(self.a.transport.read_reg(0x00E0) & (1 << 23))
+
+    def test_triggered_windows_keep_coming(self):
+        # A trigger every 256 clocks: far faster than JTAG reads windows, so
+        # the ring fills and waits after the first four.
+        from fcapz.analyzer import TriggerConfig
+
+        self.a.configure(self._config(
+            pretrigger=2, posttrigger=3,
+            trigger=TriggerConfig(mode="value_match", value=0x00, mask=0xFF),
+        ))
+        windows = list(self.a.stream_segments(count=10, timeout=5.0))
+        self.assertEqual([w.seq for w in windows], list(range(10)))
+        for w in windows:
+            self.assertEqual(len(w.samples), 6)
+            self.assertEqual(w.samples[2], 0x00, w.samples)
+            steps = {(b - a) & 0xFF for a, b in zip(w.samples, w.samples[1:])}
+            self.assertEqual(steps, {1}, w.samples)
+        self.assertFalse(any(w.after_gap for w in windows[:4]))
+        self.assertTrue(windows[4].after_gap)
+        self.assertGreater(windows[-1].lost, 0)
+        self.assertFalse(self.a.status()["armed"], "the stream leaves the core reset")
+
+    def test_raw_blocks_are_gapless(self):
+        # 50 MHz / 195312 is about 256 stored samples a second: a segment
+        # takes about a second to fill, ample time to read the one before.
+        decim = 195_311
+        self.a.configure(self._config(decimation=decim))
+        blocks = list(self.a.stream_segments(count=8, raw=True, timeout=10.0))
+        self.assertEqual([b.seq for b in blocks], list(range(8)))
+        self.assertFalse(any(b.after_gap for b in blocks))
+        self.assertEqual(blocks[-1].lost, 0)
+        samples = [v for b in blocks for v in b.samples]
+        stamps = [t for b in blocks for t in b.timestamps]
+        self.assertEqual(len(samples), 8 * self.SEG_DEPTH)
+        self.assertEqual(len(stamps), len(samples))
+        self.assertEqual(
+            {(b - a) & 0xFF for a, b in zip(samples, samples[1:])}, {(decim + 1) & 0xFF}
+        )
+        # Across every block boundary too: one stored sample per decim + 1 clocks.
+        self.assertEqual(
+            {(b - a) & 0xFFFF_FFFF for a, b in zip(stamps, stamps[1:])}, {decim + 1}
+        )
+
+    def test_raw_blocks_mark_the_wait(self):
+        # Every clock stored: the ring fills in 20 us and waits for the host.
+        self.a.configure(self._config())
+        blocks = list(self.a.stream_segments(count=6, raw=True, timeout=5.0))
+        for b in blocks:
+            self.assertEqual(
+                {(y - x) & 0xFF for x, y in zip(b.samples, b.samples[1:])}, {1}
+            )
+        self.assertFalse(any(b.after_gap for b in blocks[:4]))
+        self.assertTrue(blocks[4].after_gap)
+        self.assertGreater(blocks[-1].lost, 0)
+        # The first four blocks are consecutive: no wait came between them.
+        first = [t for b in blocks[:4] for t in b.timestamps]
+        self.assertEqual({(b - a) & 0xFFFF_FFFF for a, b in zip(first, first[1:])}, {1})
+
+
+@unittest.skipIf(_SKIP, "FPGACAP_SKIP_HW is set")
 class TestEioProbe(unittest.TestCase):
     """EIO: probe identity and widths through direct instance 3."""
 
