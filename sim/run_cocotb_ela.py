@@ -129,6 +129,19 @@ TARGETS: tuple[CocotbTarget, ...] = (
                   "rearm_mid_capture_restarts_cleanly",
                   "capture_gen_counts_restarts",
                   "soft_reset_clears_segment_metadata")),
+    *(
+        CocotbTarget(name, params,
+                     ("stream_caps_and_registers", "stream_raw_blocks_are_gapless",
+                      "stream_waits_for_release_and_counts_loss",
+                      "stream_release_is_checked",
+                      "stream_triggered_windows_keep_coming",
+                      "stream_off_keeps_segments_terminal"))
+        for name, params in (
+            ("stream4", {"NUM_SEGMENTS": 4, "DEPTH": 32, "DECIM_EN": 1}),
+            ("stream2_pipe1_ts", {"NUM_SEGMENTS": 2, "DEPTH": 32, "DECIM_EN": 1,
+                                  "INPUT_PIPE": 1, "TIMESTAMP_W": 16}),
+        )
+    ),
     CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
     *(
         CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},

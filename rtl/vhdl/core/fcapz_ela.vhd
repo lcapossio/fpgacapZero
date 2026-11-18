@@ -252,6 +252,11 @@ architecture rtl of fcapz_ela is
     -- RLE only: also end the post-trigger window this many sample clocks
     -- after the trigger commit (0 = entries only).  Taken on arm.
     constant ADDR_RLE_POST_CLKS : natural := 16#0090#;  -- RW
+    -- Continuous (segment ring) capture, segmented builds only.
+    constant ADDR_STREAM_CTRL    : natural := 16#0094#;  -- RW: [0] ring, [1] raw blocks, [5:4] STREAM_DATA index
+    constant ADDR_STREAM_RELEASE : natural := 16#0098#;  -- RW: {session[7:0], release-through seq[23:0]}
+    constant ADDR_STREAM_DATA    : natural := 16#009C#;  -- RO: field STREAM_CTRL[5:4] selects
+    constant ADDR_STREAM_STATUS  : natural := 16#00FC#;  -- RO: stream flags
     constant ADDR_DATA_BASE    : natural := 16#0100#;
 
     -- Full-width comparator A programmability (mirrors the Verilog WIDE_TRIG).
@@ -572,6 +577,60 @@ architecture rtl of fcapz_ela is
     signal rb_meta_sample_busy    : std_logic := '0';
     signal rb_meta_event_sample   : std_logic := '0';
 
+    -- Continuous capture: segment ring (see rtl/fcapz_ela.v).  stream_w
+    -- counts completed segments and stream_r the segments the host has
+    -- released, both modulo 2^24.  With every segment holding an unread
+    -- window the ELA waits (stream_hold) and counts what it loses.
+    signal jtag_stream_ctrl       : std_logic_vector(5 downto 0) := (others => '0');
+    signal stream_cfg_hold        : std_logic_vector(1 downto 0) := "00";
+    signal stream_cfg_stage       : std_logic_vector(1 downto 0) := "00";
+    signal stream_on              : std_logic := '0';  -- latched on arm
+    signal stream_raw             : std_logic := '0';
+    signal stream_w               : unsigned(23 downto 0) := (others => '0');
+    signal stream_r               : unsigned(23 downto 0) := (others => '0');
+    signal stream_w_d1            : unsigned(23 downto 0) := (others => '0');
+    signal stream_w_pub           : unsigned(23 downto 0) := (others => '0');  -- once its writes have landed
+    signal stream_session         : unsigned(7 downto 0) := (others => '0');
+    signal stream_lost            : unsigned(31 downto 0) := (others => '0');  -- raw: samples, ring: cycles
+    signal stream_bank_gap        : std_logic := '0';  -- the current segment starts after a wait
+    signal stream_seg_gap         : std_logic_vector(NUM_SEGMENTS - 1 downto 0) := (others => '0');
+    signal stream_owned           : unsigned(23 downto 0) := (others => '0');
+    signal stream_hold            : std_logic := '0';
+    signal stream_flags           : std_logic_vector(3 downto 0) := (others => '0');  -- {rel_err, hold, raw, on}
+    signal stream_event_sample    : std_logic := '0';
+    signal comb_store_eligible    : std_logic := '0';
+    -- Release mailbox, jtag_clk -> sample_clk; the payload is held until
+    -- the acknowledgement is back.
+    signal jtag_rel_payload       : std_logic_vector(31 downto 0) := (others => '0');
+    signal jtag_rel_req           : std_logic := '0';
+    signal jtag_rel_ack_sync1     : std_logic := '0';
+    signal jtag_rel_ack_sync2     : std_logic := '0';
+    signal rel_req_sync1          : std_logic := '0';
+    signal rel_req_sync2          : std_logic := '0';
+    signal rel_req_sync3          : std_logic := '0';
+    signal rel_ack_sample         : std_logic := '0';
+    signal stream_rel_err         : std_logic := '0';  -- a release was refused since arm
+    signal stream_r_d             : unsigned(23 downto 0) := (others => '0');
+    signal stream_w_pub_d         : unsigned(23 downto 0) := (others => '0');
+    signal stream_session_d       : unsigned(7 downto 0) := (others => '0');
+    signal stream_lost_d          : unsigned(31 downto 0) := (others => '0');
+    signal stream_flags_d         : std_logic_vector(3 downto 0) := (others => '0');
+    signal rb_stream_w_sample       : unsigned(23 downto 0) := (others => '0');
+    signal rb_stream_r_sample       : unsigned(23 downto 0) := (others => '0');
+    signal rb_stream_session_sample : unsigned(7 downto 0) := (others => '0');
+    signal rb_stream_lost_sample    : unsigned(31 downto 0) := (others => '0');
+    signal rb_stream_flags_sample   : std_logic_vector(3 downto 0) := (others => '0');
+    signal rb_stream_gap_sample     : std_logic_vector(NUM_SEGMENTS - 1 downto 0) := (others => '0');
+    signal rb_stream_w_jtag         : unsigned(23 downto 0) := (others => '0');
+    signal rb_stream_r_jtag         : unsigned(23 downto 0) := (others => '0');
+    signal rb_stream_session_jtag   : unsigned(7 downto 0) := (others => '0');
+    signal rb_stream_lost_jtag      : unsigned(31 downto 0) := (others => '0');
+    signal rb_stream_flags_jtag     : std_logic_vector(3 downto 0) := (others => '0');
+    signal rb_stream_gap_jtag       : std_logic_vector(NUM_SEGMENTS - 1 downto 0) := (others => '0');
+    -- The published stream state was taken after the latest ARM / reset
+    -- reached sample_clk (STREAM_STATUS[6]).
+    signal rb_stream_cur_jtag       : std_logic := '0';
+
     signal jtag_rd_data_window    : std_logic := '0';
     signal datawin_req_now        : std_logic := '0';
     signal datawin_is_ts_comb     : std_logic := '0';
@@ -773,7 +832,19 @@ begin
     -- finished segmented capture refreshes on done falling.
     rb_meta_event_sample <= '1' when (done = '1' and rb_done_d = '0') or
                                      (NUM_SEGMENTS > 1 and seg_count /= rb_seg_count_d) or
-                                     (NUM_SEGMENTS > 1 and done = '0' and rb_done_d = '1') else '0';
+                                     (NUM_SEGMENTS > 1 and done = '0' and rb_done_d = '1') or
+                                     stream_event_sample = '1' else '0';
+    -- The ring publishes its counters with the segment descriptors, so a
+    -- window the host sees counted always has its descriptor in place.
+    stream_flags <= stream_rel_err & stream_hold & stream_raw & stream_on;
+    stream_event_sample <= '1' when NUM_SEGMENTS > 1 and
+                                    (stream_w_pub /= stream_w_pub_d or stream_r /= stream_r_d or
+                                     stream_session /= stream_session_d or
+                                     stream_lost /= stream_lost_d or
+                                     stream_flags /= stream_flags_d) else '0';
+    stream_owned <= stream_w - stream_r;
+    stream_hold <= '1' when NUM_SEGMENTS > 1 and stream_on = '1' and armed = '1' and done = '0' and
+                            stream_owned >= NUM_SEGMENTS else '0';
     mem_we_a <= '1' when (done = '0' and triggered = '0' and
                          (comb_store_ok = '1' or comb_trigger_commit_now = '1')) or
                          (armed = '1' and done = '0' and triggered = '1' and
@@ -975,6 +1046,7 @@ begin
         variable store_tick : boolean;
         variable store_ok : boolean;
         variable store_base : boolean;
+        variable store_eligible : boolean;
         variable rle_sample : std_logic_vector(SAMPLE_W - 1 downto 0);
         variable rle_repeat : boolean;
         variable trigger_commit_now : boolean;
@@ -1114,7 +1186,8 @@ begin
         else
             sq_eff := sq_ok;
         end if;
-        store_base := store_tick and sq_eff and sel_flush_active = '0';
+        store_eligible := store_tick and sq_eff and sel_flush_active = '0';
+        store_base := store_eligible and stream_hold = '0';
         -- Run-length capture: the sample the RAM would store, and whether it
         -- only extends the newest entry instead of opening a new one.
         if PROBE_PIPE > 0 then
@@ -1125,8 +1198,14 @@ begin
         rle_repeat := rle_active = '1' and rle_open = '1' and rle_sample = rle_value and
                       rle_count /= RLE_COUNT_MAX;
         store_ok := store_base and not rle_repeat;
+        -- Raw blocks: every eligible stored sample is a trigger, so a window
+        -- starts on a sample the decimator keeps.
+        if NUM_SEGMENTS > 1 and stream_on = '1' and stream_raw = '1' then
+            hit_eff := bool_to_sl(store_ok);
+        end if;
         -- An arm or soft reset on this edge takes priority (see p_capture).
         trigger_commit_now := armed = '1' and done = '0' and triggered = '0' and
+                              stream_hold = '0' and
                               arm_sync_pulse = '0' and
                               startup_arm_pending = '0' and
                               reset_sync_pulse = '0' and
@@ -1138,6 +1217,7 @@ begin
         comb_sq_ok <= bool_to_sl(sq_ok);
         comb_store_ok <= bool_to_sl(store_ok);
         comb_store_base <= bool_to_sl(store_base);
+        comb_store_eligible <= bool_to_sl(store_eligible);
         comb_rle_repeat <= bool_to_sl(rle_repeat);
         comb_trigger_commit_now <= bool_to_sl(trigger_commit_now);
         comb_seq_stage_hit <= seq_stage_hit;
@@ -1671,9 +1751,25 @@ begin
             rb_start_ptr_sample <= 0;
             rb_seg_start_ptr_sample <= (others => 0);
             rb_seg_len_sample <= (others => (others => '0'));
+            stream_r_d <= (others => '0');
+            stream_w_pub_d <= (others => '0');
+            stream_session_d <= (others => '0');
+            stream_lost_d <= (others => '0');
+            stream_flags_d <= (others => '0');
+            rb_stream_w_sample <= (others => '0');
+            rb_stream_r_sample <= (others => '0');
+            rb_stream_session_sample <= (others => '0');
+            rb_stream_lost_sample <= (others => '0');
+            rb_stream_flags_sample <= (others => '0');
+            rb_stream_gap_sample <= (others => '0');
         elsif rising_edge(sample_clk) then
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
+            stream_r_d <= stream_r;
+            stream_w_pub_d <= stream_w_pub;
+            stream_session_d <= stream_session;
+            stream_lost_d <= stream_lost;
+            stream_flags_d <= stream_flags;
             rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
             rb_meta_ack_sync2 <= rb_meta_ack_sync1;
 
@@ -1687,6 +1783,12 @@ begin
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
                 rb_seg_start_ptr_sample <= seg_start_ptr;
+                rb_stream_w_sample <= stream_w_pub;
+                rb_stream_r_sample <= stream_r;
+                rb_stream_session_sample <= stream_session;
+                rb_stream_lost_sample <= stream_lost;
+                rb_stream_flags_sample <= stream_flags;
+                rb_stream_gap_sample <= stream_seg_gap;
                 -- Without a clock limit every segment reads the capture
                 -- length, as on a core without seg_len.
                 if HAS_RLE_SEG_LEN and post_clk_en = '1' then
@@ -1716,6 +1818,13 @@ begin
             rb_seg_start_ptr_jtag <= (others => 0);
             rb_seg_len_jtag <= (others => (others => '0'));
             rb_done_jtag <= '0';
+            rb_stream_w_jtag <= (others => '0');
+            rb_stream_r_jtag <= (others => '0');
+            rb_stream_session_jtag <= (others => '0');
+            rb_stream_lost_jtag <= (others => '0');
+            rb_stream_flags_jtag <= (others => '0');
+            rb_stream_gap_jtag <= (others => '0');
+            rb_stream_cur_jtag <= '0';
         elsif rising_edge(jtag_clk) then
             rb_meta_toggle_sync1 <= rb_meta_toggle_sample;
             rb_meta_toggle_sync2 <= rb_meta_toggle_sync1;
@@ -1728,18 +1837,122 @@ begin
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
                 rb_seg_start_ptr_jtag <= rb_seg_start_ptr_sample;
                 rb_seg_len_jtag <= rb_seg_len_sample;
+                rb_stream_w_jtag <= rb_stream_w_sample;
+                rb_stream_r_jtag <= rb_stream_r_sample;
+                rb_stream_session_jtag <= rb_stream_session_sample;
+                rb_stream_lost_jtag <= rb_stream_lost_sample;
+                rb_stream_flags_jtag <= rb_stream_flags_sample;
+                rb_stream_gap_jtag <= rb_stream_gap_sample;
                 rb_meta_ack_toggle_jtag <= rb_meta_toggle_sync2;
                 -- Done counts only for the latest ARM / reset (see
                 -- rtl/fcapz_ela.v).
                 if rb_gen_sample = (arm_toggle_jtag & reset_toggle_jtag) then
                     rb_done_jtag <= rb_done_sample;
+                    rb_stream_cur_jtag <= '1';
                 else
                     rb_done_jtag <= '0';
+                    rb_stream_cur_jtag <= '0';
                 end if;
             end if;
             if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
                (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
                 rb_done_jtag <= '0';
+                rb_stream_cur_jtag <= '0';
+            end if;
+        end if;
+    end process;
+
+    -- Continuous capture: settings and release mailbox (jtag_clk).
+    -- STREAM_CTRL is staged with the other settings on ARM.
+    p_stream_jtag : process(jtag_clk, jtag_rst)
+    begin
+        if jtag_rst = '1' then
+            jtag_stream_ctrl <= (others => '0');
+            stream_cfg_hold <= "00";
+            jtag_rel_payload <= (others => '0');
+            jtag_rel_req <= '0';
+            jtag_rel_ack_sync1 <= '0';
+            jtag_rel_ack_sync2 <= '0';
+        elsif rising_edge(jtag_clk) then
+            jtag_rel_ack_sync1 <= rel_ack_sample;
+            jtag_rel_ack_sync2 <= jtag_rel_ack_sync1;
+            if NUM_SEGMENTS > 1 and jtag_wr_en = '1' and
+               to_integer(unsigned(jtag_addr)) = ADDR_STREAM_CTRL then
+                jtag_stream_ctrl <= jtag_wdata(5 downto 0);
+            end if;
+            -- A release written while the previous one is in flight is
+            -- dropped: the host waits for STREAM_STATUS[0] to clear.
+            if NUM_SEGMENTS > 1 and jtag_wr_en = '1' and
+               to_integer(unsigned(jtag_addr)) = ADDR_STREAM_RELEASE and
+               jtag_rel_req = jtag_rel_ack_sync2 then
+                jtag_rel_payload <= jtag_wdata;
+                jtag_rel_req <= not jtag_rel_req;
+            end if;
+            if jtag_wr_en = '1' and to_integer(unsigned(jtag_addr)) = ADDR_CTRL and
+               (jtag_wdata(0) = '1' or jtag_wdata(1) = '1') then
+                if NUM_SEGMENTS > 1 then
+                    stream_cfg_hold <= jtag_stream_ctrl(1 downto 0);
+                else
+                    stream_cfg_hold <= "00";
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- A release names the session it belongs to and the sequence number of
+    -- the last window the host has read.  It is taken only for the running
+    -- session and only up to the windows completed so far; a repeat is
+    -- harmless.
+    p_stream_sample : process(sample_clk, sample_rst)
+        variable rel_seq : unsigned(23 downto 0);
+    begin
+        if sample_rst = '1' then
+            stream_cfg_stage <= "00";
+            stream_r <= (others => '0');
+            stream_w_d1 <= (others => '0');
+            stream_w_pub <= (others => '0');
+            stream_session <= (others => '0');
+            stream_lost <= (others => '0');
+            stream_rel_err <= '0';
+            rel_req_sync1 <= '0';
+            rel_req_sync2 <= '0';
+            rel_req_sync3 <= '0';
+            rel_ack_sample <= '0';
+        elsif rising_edge(sample_clk) then
+            if cfg_stage_en = '1' then
+                stream_cfg_stage <= stream_cfg_hold;
+            end if;
+            rel_req_sync1 <= jtag_rel_req;
+            rel_req_sync2 <= rel_req_sync1;
+            rel_req_sync3 <= rel_req_sync2;
+            -- Published two clocks late: the last write of a completed
+            -- window (queued with INPUT_PIPE) has landed by then.
+            stream_w_d1 <= stream_w;
+            stream_w_pub <= stream_w_d1;
+            if stream_hold = '1' and stream_lost /= x"FFFFFFFF" and
+               (stream_raw = '0' or comb_store_eligible = '1') then
+                stream_lost <= stream_lost + 1;
+            end if;
+            if (rel_req_sync2 xor rel_req_sync3) = '1' then
+                -- The payload is stable: jtag_clk holds it until this
+                -- acknowledgement returns.
+                rel_ack_sample <= rel_req_sync2;
+                rel_seq := unsigned(jtag_rel_payload(23 downto 0));
+                if stream_on = '1' and
+                   unsigned(jtag_rel_payload(31 downto 24)) = stream_session and
+                   rel_seq - stream_r <= stream_owned then
+                    stream_r <= rel_seq;
+                else
+                    stream_rel_err <= '1';
+                end if;
+            end if;
+            if arm_sync_pulse = '1' or startup_arm_pending = '1' or reset_sync_pulse = '1' then
+                stream_r <= (others => '0');
+                stream_w_d1 <= (others => '0');
+                stream_w_pub <= (others => '0');
+                stream_lost <= (others => '0');
+                stream_rel_err <= '0';
+                stream_session <= stream_session + 1;
             end if;
         end if;
     end process;
@@ -1935,6 +2148,11 @@ begin
             seq_pipe_a <= (others => '0');
             seq_pipe_b <= (others => '0');
             sq_pipe <= '0';
+            stream_on <= '0';
+            stream_raw <= '0';
+            stream_w <= (others => '0');
+            stream_bank_gap <= '0';
+            stream_seg_gap <= (others => '0');
         elsif rising_edge(sample_clk) then
             if EXT_TRIG_EN /= 0 then
                 trigger_in_sync1 <= trigger_in;
@@ -1987,7 +2205,8 @@ begin
             if armed = '1' and triggered = '0' and not any_arm_pulse_now and not reset_pulse_now and
                trig_delay_pending = '0' and
                pre_count >= count_u(pretrig_len) and trig_holdoff_active = '0' and
-               sel_flush_active = '0' and hit_eff = '1' then
+               sel_flush_active = '0' and hit_eff = '1' and stream_hold = '0' and
+               not (stream_on = '1' and stream_raw = '1') then
                 trigger_out_i <= '1';
             else
                 trigger_out_i <= '0';
@@ -2024,6 +2243,11 @@ begin
                 segment_wrapped <= '0';
                 seg_start_ptr <= (others => 0);
                 seg_len <= (others => (others => '0'));
+                stream_on <= '0';
+                stream_raw <= '0';
+                stream_w <= (others => '0');
+                stream_bank_gap <= '0';
+                stream_seg_gap <= (others => '0');
                 trig_delay_pending <= '0';
                 trig_delay_count <= (others => '0');
                 trig_holdoff_active <= '0';
@@ -2086,6 +2310,11 @@ begin
                 seg_count <= 0;
                 all_seg_done <= '0';
                 segment_wrapped <= '0';
+                stream_on <= bool_to_sl(NUM_SEGMENTS > 1) and stream_cfg_stage(0) and not rle_active_next;
+                stream_raw <= bool_to_sl(NUM_SEGMENTS > 1) and stream_cfg_stage(0) and stream_cfg_stage(1);
+                stream_w <= (others => '0');
+                stream_bank_gap <= '0';
+                stream_seg_gap <= (others => '0');
                 if not reset_pulse_now then
                     seg_start_ptr <= seg_start_ptr;
                 end if;
@@ -2132,11 +2361,16 @@ begin
             -- rtl/fcapz_ela.v).  Only the single-segment ring still advances
             -- past the sample stored on this edge, which keeps the rolling
             -- history contiguous.
+            -- Waiting for a free segment: the next window starts after a gap.
+            if stream_hold = '1' and not any_arm_pulse_now and not reset_pulse_now then
+                stream_bank_gap <= '1';
+            end if;
+
             if armed = '1' and done = '0' and (any_arm_pulse_now or reset_pulse_now) then
                 if NUM_SEGMENTS = 1 and not reset_pulse_now and mem_we_a = '1' then
                     wr_ptr <= next_ptr(wr_ptr, 0);
                 end if;
-            elsif armed = '1' and done = '0' then
+            elsif armed = '1' and done = '0' and stream_hold = '0' then
                 base := seg_base(cur_segment);
                 trigger_commit_now := false;
                 force_store_now := comb_trigger_commit_now = '1';
@@ -2253,16 +2487,23 @@ begin
                                 end if;
                             end loop;
                             seg_start_ptr <= seg_start_next;
-                            if cur_segment = NUM_SEGMENTS - 1 then
+                            if stream_on = '1' then
+                                stream_w <= stream_w + 1;
+                                stream_seg_gap(cur_segment) <= stream_bank_gap;
+                            end if;
+                            stream_bank_gap <= '0';
+                            if cur_segment = NUM_SEGMENTS - 1 and stream_on = '0' then
                                 done <= '1';
                                 armed <= '0';
                                 all_seg_done <= '1';
                                 start_ptr <= seg_start_ptr(0);
                                 seg_count <= NUM_SEGMENTS mod 2 ** SEG_IDX_W;
                             else
-                                next_segment := cur_segment + 1;
+                                -- Auto-rearm for the next segment (the ring
+                                -- wraps from the last to segment 0).
+                                next_segment := (cur_segment + 1) mod NUM_SEGMENTS;
                                 cur_segment <= next_segment;
-                                seg_count <= seg_count + 1;
+                                seg_count <= (seg_count + 1) mod 2 ** SEG_IDX_W;
                                 triggered <= '0';
                                 pre_count <= (others => '0');
                                 post_left <= (others => '0');
@@ -2395,6 +2636,40 @@ begin
                 end if;
                 r(21) := '1';  -- CAPTURE_GEN
                 r(22) := '1';  -- SQ_MODE is compare mode + 1
+                if NUM_SEGMENTS > 1 then
+                    r(23) := '1';  -- segment ring (STREAM_*)
+                end if;
+            when ADDR_STREAM_CTRL =>
+                r := (others => '0');
+                if NUM_SEGMENTS > 1 then
+                    r(5 downto 0) := jtag_stream_ctrl;
+                end if;
+            when ADDR_STREAM_RELEASE =>
+                r := jtag_rel_payload when NUM_SEGMENTS > 1 else x"00000000";
+            when ADDR_STREAM_DATA =>
+                -- 0: {session, completed}, 1: released, 2: lost (saturating).
+                r := (others => '0');
+                if NUM_SEGMENTS > 1 then
+                    case jtag_stream_ctrl(5 downto 4) is
+                        when "00" => r := std_logic_vector(rb_stream_session_jtag) & std_logic_vector(rb_stream_w_jtag);
+                        when "01" => r := x"00" & std_logic_vector(rb_stream_r_jtag);
+                        when "10" => r := std_logic_vector(rb_stream_lost_jtag);
+                        when others => null;
+                    end case;
+                end if;
+            when ADDR_STREAM_STATUS =>
+                -- [0] release in flight, [1] ring on, [2] raw blocks, [3]
+                -- waiting for a free segment, [4] a release was refused, [5]
+                -- the selected segment starts after a wait, [6] the state
+                -- shown is from after the latest ARM / reset, [15:8] session.
+                r := (others => '0');
+                if NUM_SEGMENTS > 1 then
+                    r(15 downto 8) := std_logic_vector(rb_stream_session_jtag);
+                    r(6) := rb_stream_cur_jtag;
+                    r(5) := rb_stream_gap_jtag(jtag_seg_sel);
+                    r(4 downto 1) := rb_stream_flags_jtag;
+                    r(0) := jtag_rel_req xor jtag_rel_ack_sync2;
+                end if;
             when ADDR_WIDE_SEL =>
                 r := (others => '0');
                 if HAS_WIDE_TRIG then
