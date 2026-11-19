@@ -95,6 +95,51 @@ optimises across hierarchy.
 on `arty_a7_top` (xc7a100t, 2025.2). JTAG `tck_bscan` is constrained at 10 MHz
 (adapter-dependent in practice, often higher).
 
+### Against the AMD/Xilinx ILA
+
+[`scripts/ila_comparison.tcl`](../../scripts/ila_comparison.tcl) builds
+fcapz and the Vivado ILA (v6.2) at the same sample width and depth with
+matching trigger features, on xc7a100t with Vivado 2025.2, and counts
+each core after `opt_design`.  The ILA counts include its `dbg_hub`
+(the BSCANE2 and JTAG hub Vivado inserts at `opt_design`, 490 LUTs and
+741 FFs here), and the fcapz counts include `fcapz_ela_xilinx7`'s own
+BSCANE2, register interface and readout, so both are what one core
+costs in a design.  LUTs include LUTRAM and SRLs (ILA uses some; fcapz
+none).  Every pair uses the same BRAM: 0.5 tiles at 8b x 1024, 7.5 at
+64b x 4096.
+
+LUTs / FFs:
+
+| Profile | fcapz 8b x 1024 | ILA + `dbg_hub` 8b x 1024 | fcapz 64b x 4096 | ILA + `dbg_hub` 64b x 4096 |
+|---|---:|---:|---:|---:|
+| fcapz minimum: one EQ/NEQ/edge comparator, slow USER1 readout, one segment | 559 / 785 | — | 715 / 1,019 | — |
+| Basic: one comparator with relational modes, 4 segments, fast readout (ILA: 1 comparator) | 1,365 / 1,929 | 1,078 / 1,775 | 1,460 / 2,188 | 1,218 / 2,050 |
+| Dual: 2 comparators, storage qualification, trigger in/out, input pipe (ILA: 2 comparators, capture control, basic trigger) | 1,438 / 2,130 | 1,172 / 1,920 | 1,715 / 2,647 | 1,341 / 2,363 |
+| Sequenced: 4-stage sequencer with 2 comparators per stage (ILA: advanced trigger, 8 comparators) | 2,888 / 3,477 | 2,985 / 4,466 | 4,473 / 5,009 | 3,325 / 5,581 |
+| ILA advanced trigger with 2 comparators | — | 2,773 / 3,902 | — | 2,938 / 4,345 |
+| fcapz sequenced plus decimation and 32-bit timestamps (no ILA equivalent; +1 / +4 BRAM) | 2,932 / 3,652 | — | 4,346 / 5,183 | — |
+
+What it shows:
+
+- The smallest fcapz build takes 52-59% of the LUTs of the smallest
+  ILA, which always has relational compares and a fast readout.  It is
+  the build for a design that has little room left.
+- Feature for feature, fcapz takes 20-30% more LUTs than the ILA for a
+  basic or dual-comparator trigger, about the same for an 8-comparator
+  sequenced trigger at 8 bits, and fewer FFs there.
+- fcapz grows faster with sample width: each comparator keeps its
+  value and mask in flip-flops and compares in LUTs, where the ILA loads
+  SRL-based match units.  The 64-bit sequenced build is 35% larger in
+  LUTs than the ILA's.
+- `dbg_hub` is paid once per design and shared by every ILA and VIO.
+  The fcapz equivalent is inside each wrapper, or shared by every core
+  behind one core manager (`fcapz_debug_multi`).
+
+Run it with `vivado -mode batch -source scripts/ila_comparison.tcl`; it
+writes the table and a CSV under `vivado/ila_compare` and takes about
+40 minutes.  `FPGACAP_ILA_SIZES` and `FPGACAP_ILA_CASES` pick other
+sizes or a subset of the cases.
+
 ## Clocking
 - `sample_clk` is the capture clock.
 - JTAG clock (TCK) is independent; control/config paths cross through the

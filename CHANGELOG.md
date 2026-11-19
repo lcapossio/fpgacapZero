@@ -9,6 +9,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Resource comparison against the AMD/Xilinx ILA.**
+  `scripts/ila_comparison.tcl` builds fcapz and the Vivado ILA (with its
+  `dbg_hub`) at matching widths, depths and trigger features; the results
+  are in `docs/specs/architecture.md`.
 - **Capture profiles.** Save a whole capture setup (trigger,
   sequencer, pre/post-trigger, storage qualification, decimation,
   holdoff, delay, run-length capture, probes) under a name in

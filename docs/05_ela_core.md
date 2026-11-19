@@ -1182,6 +1182,14 @@ The full per-configuration table — Slice LUTs, FFs, BRAM, and the
 `arty_a7_top` placed reference rows — is the canonical resource reference in
 [`specs/architecture.md`](specs/architecture.md#resource-usage-xc7a100t).
 
+Against the AMD/Xilinx ILA at the same width, depth and trigger
+features (ILA counted with its `dbg_hub`), the smallest fcapz build
+takes 52-59% of the smallest ILA's LUTs.  With matching trigger
+features fcapz takes 20-30% more LUTs for a basic or dual-comparator
+trigger and about the same for a sequenced one at 8 bits, and it grows
+faster with sample width.
+See [the comparison](specs/architecture.md#against-the-amdxilinx-ila).
+
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
 with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
