@@ -212,6 +212,20 @@ is disabled when the bitstream reports `TRIG_STAGES=0`.  Picking an
 entry from the **Trigger preset** dropdown (recent trigger settings)
 also restores its sequencer stages.
 
+**Capture profile** (row below **Trigger preset**): a whole capture
+setup saved under a name.  **Save…** asks for a name and stores
+every setting of the panel (trigger, sequencer stages, pre/post-trigger,
+the **Advanced** options and the probes) in `gui.toml` under
+`[capture_profiles.NAME]`; picking a profile fills the panel from it
+again, and **Delete** removes the selected one.  The CLI uses the same
+profiles with `--capture-profile NAME` and manages them with
+`fcapz capture-profile` (see
+[chapter 10](10_cli_reference.md#capture-profile)).  Unlike the
+trigger presets, which keep the last ten captures by themselves,
+profiles stay until you delete them.  The panel has no **startup arm**
+setting, so a profile saved here has it off, and one saved by the CLI
+with `--startup-arm` keeps it only for the CLI.
+
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
 **Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).
 

@@ -3239,6 +3239,43 @@ tx_free:  conservative lower bound of TX FIFO free space.
 
 ## `fcapz`
 
+### `CAPTURE_PROFILE_FORMAT`
+
+```python
+CAPTURE_PROFILE_FORMAT = 'fcapz.capture.v1'
+```
+
+## `fcapz.capture_profile`
+
+### `load_capture_profile`
+
+```python
+load_capture_profile(
+    path: str | Path,
+    *,
+    sample_width: int = 8,
+    depth: int = 1024,
+) -> CaptureConfig
+```
+
+Load a JSON profile file as a `CaptureConfig` for a core of
+*sample_width* bits and *depth* samples.
+
+### `save_capture_profile`
+
+```python
+save_capture_profile(
+    path: str | Path,
+    cfg: CaptureConfig,
+    *,
+    name: str | None = None,
+) -> None
+```
+
+Save every user setting of *cfg* to a JSON profile file.
+
+## `fcapz`
+
 ### `PROBE_FILE_FORMAT`
 
 ```python

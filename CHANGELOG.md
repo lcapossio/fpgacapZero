@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Capture profiles.** Save a whole capture setup (trigger,
+  sequencer, pre/post-trigger, storage qualification, decimation,
+  holdoff, delay, run-length capture, probes) under a name in
+  `gui.toml` or as a JSON file, and restore it later. The GUI's
+  capture panel has a **Capture profile** row (**Save…**, **Delete**);
+  the CLI loads one with `--capture-profile NAME|FILE` on `configure`,
+  `capture` and `stream` (options on the command line still win) and
+  manages them with `fcapz capture-profile save|list|show|delete`,
+  which needs no board. Python: `save_capture_profile()` and
+  `load_capture_profile()`.
 - **Continuous capture.** A segmented ELA (`NUM_SEGMENTS > 1`) can now
   run as a ring that never ends: after its last segment it wraps to
   segment 0 and keeps capturing into every segment the host has read and

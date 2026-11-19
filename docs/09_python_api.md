@@ -472,6 +472,33 @@ probe_file = load_probe_file("design.prob")
 cfg = CaptureConfig(..., sample_width=probe_file.sample_width, probes=probe_file.probes)
 ```
 
+### Capture profiles
+
+`save_capture_profile` writes every user setting of a `CaptureConfig`
+(trigger, sequencer, pre/post-trigger, storage qualification,
+decimation, holdoff, delay, run-length capture, probes, ...) to a JSON
+file; `load_capture_profile` reads it back for a core of a given
+sample width and depth.  The file is the same one `fcapz
+capture-profile save FILE.json` writes and `--capture-profile` reads
+([chapter 10](10_cli_reference.md#capture-profile)).
+
+```python
+from fcapz import load_capture_profile, save_capture_profile
+
+save_capture_profile("burst.json", cfg, name="burst")
+
+info = analyzer.probe()
+cfg = load_capture_profile(
+    "burst.json", sample_width=info["sample_width"], depth=info["depth"]
+)
+analyzer.configure(cfg)
+```
+
+`fcapz.capture_profile` also converts between a `CaptureConfig` and the
+profile mapping (`capture_profile_from_config`,
+`capture_config_from_profile`), for profiles kept somewhere else.
+A profile with an unknown key or a bad value raises `ValueError`.
+
 ### `SequencerStage`
 
 ```python
