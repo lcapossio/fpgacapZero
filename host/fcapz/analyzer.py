@@ -2260,7 +2260,9 @@ class Analyzer:
             next_seq = 0
             yielded = 0
             while count == 0 or yielded < count:
-                completed = self._stream_wait_window(ctrl, session, next_seq, timeout, poll_interval)
+                completed = self._stream_wait_window(
+                    ctrl, session, next_seq, timeout, poll_interval
+                )
                 ready = (completed - next_seq) & _STREAM_SEQ_MASK
                 if ready > nseg:
                     raise CaptureChangedError(
