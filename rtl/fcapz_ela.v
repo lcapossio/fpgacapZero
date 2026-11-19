@@ -149,6 +149,11 @@ module fcapz_ela #(
     // after the trigger commit (0 = entries only).  Taken on arm.
     localparam ADDR_RLE_POST_CLKS = 16'h0090;  // RW
 
+    // Continuous (segment ring) capture, segmented builds only.
+    localparam ADDR_STREAM_CTRL    = 16'h0094;  // RW: [0] ring, [1] raw blocks, [5:4] STREAM_DATA index
+    localparam ADDR_STREAM_RELEASE = 16'h0098;  // RW: {session[7:0], release-through seq[23:0]}
+    localparam ADDR_STREAM_DATA    = 16'h009C;  // RO: field STREAM_CTRL[5:4] selects
+    localparam ADDR_STREAM_STATUS  = 16'h00FC;  // RO: stream flags
     localparam ADDR_DATA_BASE   = 16'h0100;
     localparam [1:0] DEFAULT_TRIG_EXT_MODE = DEFAULT_TRIG_EXT[1:0];
 
@@ -287,7 +292,8 @@ module fcapz_ela #(
         32'h0008_0000 |  // bit19: timestamp window base decoded at full width
         (HAS_USER1_DATA ? 32'h0010_0000 : 32'h0000_0000) |  // bit20: DATA_OFFSET
         32'h0020_0000 |  // bit21: CAPTURE_GEN
-        32'h0040_0000;   // bit22: SQ_MODE is compare mode + 1
+        32'h0040_0000 |  // bit22: SQ_MODE is compare mode + 1
+        (HAS_SEGMENTS ? 32'h0080_0000 : 32'h0000_0000);  // bit23: segment ring (STREAM_*)
 
     // ---- Compare mode encoding -----------------------------------------------
     // CMP_MODE[3:0]: 0=EQ 1=NEQ 2=LT 3=GT 4=LEQ 5=GEQ 6=RISING 7=FALLING 8=CHANGED
@@ -585,6 +591,51 @@ module fcapz_ela #(
     reg [PTR_W-1:0]    rb_seg_start_ptr_jtag [0:NUM_SEGMENTS-1];
     reg [LEN_W-1:0]    rb_seg_len_jtag [0:NUM_SEGMENTS-1];
     reg                rb_done_jtag;
+
+    // ---- Continuous capture: segment ring ----------------------------------
+    // With STREAM_CTRL[0] set at ARM, a segmented capture does not stop after
+    // its last segment: it wraps to segment 0 and keeps going, one window per
+    // segment, as long as the host has released the segment it would reuse.
+    // stream_w counts completed segments and stream_r the segments the host
+    // has released, both modulo 2^24; segment stream_w mod NUM_SEGMENTS is
+    // the one being captured.  With stream_w - stream_r == NUM_SEGMENTS every
+    // segment holds an unread window, and the ELA waits (stream_hold) with
+    // all RAM writes stopped, counting what it loses in stream_lost.
+    //
+    // STREAM_CTRL[1] (raw blocks) makes every eligible stored sample a
+    // trigger, so with PRETRIG = 0 and POSTTRIG = segment depth - 1 the
+    // segments hold consecutive samples.
+    reg [5:0]  jtag_stream_ctrl;
+    reg [1:0]  stream_cfg_hold, stream_cfg_stage;
+    reg        stream_on, stream_raw;        // latched on arm
+    reg [23:0] stream_w, stream_r;
+    reg [23:0] stream_w_d1, stream_w_pub;    // stream_w once its writes have landed
+    reg [7:0]  stream_session;               // advances on every arm / soft reset
+    reg [31:0] stream_lost;                  // raw: samples, ring: cycles (saturating)
+    reg        stream_bank_gap;              // the current segment starts after a wait
+    reg [NUM_SEGMENTS-1:0] stream_seg_gap;
+    // Release mailbox, jtag_clk -> sample_clk: the payload is held until the
+    // sample side has taken it and its acknowledgement is back.
+    reg [31:0] jtag_rel_payload;
+    reg        jtag_rel_req, jtag_rel_ack_sync1, jtag_rel_ack_sync2;
+    reg        rel_req_sync1, rel_req_sync2, rel_req_sync3, rel_ack_sample;
+    reg        stream_rel_err;               // a release was refused since arm
+    wire [23:0] stream_owned = stream_w - stream_r;
+    wire stream_hold = HAS_SEGMENTS && stream_on && armed && !done &&
+                       (stream_owned >= NUM_SEGMENTS);
+    // Published copies (completed-capture snapshot, then jtag_clk).
+    reg [23:0] rb_stream_w_sample, rb_stream_r_sample, rb_stream_w_jtag, rb_stream_r_jtag;
+    reg [7:0]  rb_stream_session_sample, rb_stream_session_jtag;
+    reg [31:0] rb_stream_lost_sample, rb_stream_lost_jtag;
+    reg [3:0]  rb_stream_flags_sample, rb_stream_flags_jtag;  // {rel_err, hold, raw, on}
+    reg [NUM_SEGMENTS-1:0] rb_stream_gap_sample, rb_stream_gap_jtag;
+    // The published stream state was taken after the latest ARM / reset
+    // reached sample_clk (STREAM_STATUS[6]), so its session is that arm's.
+    reg        rb_stream_cur_jtag;
+    reg [23:0] stream_r_d, stream_w_pub_d;
+    reg [7:0]  stream_session_d;
+    reg [31:0] stream_lost_d;
+    reg [3:0]  stream_flags_d;
 
     // ---- Sample buffer (dual-port RAM) -------------------------------------
     localparam TS_DATA_W = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
@@ -886,13 +937,13 @@ module fcapz_ela #(
                        !seq_is_final[seq_state] && seq_count_reached;
 
     // Phase 2: combine with external trigger
-    reg trigger_hit;
+    reg trigger_hit_cfg;
     always @(*) begin
         case (ext_trig_mode)
-            2'd0: trigger_hit = internal_trigger_hit;                          // disabled
-            2'd1: trigger_hit = internal_trigger_hit | trig_in_aligned;        // OR
-            2'd2: trigger_hit = internal_trigger_hit & trig_in_aligned;        // AND
-            default: trigger_hit = internal_trigger_hit;
+            2'd0: trigger_hit_cfg = internal_trigger_hit;                          // disabled
+            2'd1: trigger_hit_cfg = internal_trigger_hit | trig_in_aligned;        // OR
+            2'd2: trigger_hit_cfg = internal_trigger_hit & trig_in_aligned;        // AND
+            default: trigger_hit_cfg = internal_trigger_hit;
         endcase
     end
 
@@ -938,13 +989,17 @@ module fcapz_ela #(
     end
 
     // Phase 1: combined store enable (storage qualification AND decimation)
-    wire store_enable_base = store_sample & decim_tick & !sel_flush_active;
+    wire store_eligible = store_sample & decim_tick & !sel_flush_active;
+    wire store_enable_base = store_eligible & !stream_hold;
     // Run-length capture: the sample the RAM would store, and whether it
     // only extends the newest entry instead of opening a new one.
     wire [SAMPLE_W-1:0] rle_sample = (PROBE_PIPE >= 1) ? probe_prev : active_probe;
     wire rle_repeat = rle_active && rle_open && (rle_sample == rle_value) &&
                       (rle_count != {RLE_DATA_W{1'b1}});
     wire store_enable = store_enable_base & !rle_repeat;
+    // Raw blocks: every eligible stored sample is a trigger, so a window
+    // starts on a sample the decimator keeps.
+    wire trigger_hit = (HAS_SEGMENTS && stream_on && stream_raw) ? store_enable : trigger_hit_cfg;
 
     // ---- JTAG-domain register writes ---------------------------------------
     wire jtag_rd_data_window = HAS_USER1_DATA && (
@@ -1143,9 +1198,17 @@ module fcapz_ela #(
     wire rb_meta_sample_busy = rb_meta_toggle_sample ^ rb_meta_ack_sync2;
     // seg_count wraps to 0 on the last segment, so an arm or soft reset after
     // a finished segmented capture doesn't change it; done falling does.
+    wire [3:0] stream_flags = {stream_rel_err, stream_hold, stream_raw, stream_on};
+    // The ring publishes its counters with the segment descriptors, so a
+    // window the host sees counted always has its descriptor in place.
+    wire stream_event_sample = HAS_SEGMENTS &&
+        ((stream_w_pub != stream_w_pub_d) || (stream_r != stream_r_d) ||
+         (stream_session != stream_session_d) || (stream_lost != stream_lost_d) ||
+         (stream_flags != stream_flags_d));
     wire rb_meta_event_sample = (done && !rb_done_d) ||
                                 (HAS_SEGMENTS && (seg_count != rb_seg_count_d)) ||
-                                (HAS_SEGMENTS && !done && rb_done_d);
+                                (HAS_SEGMENTS && !done && rb_done_d) ||
+                                stream_event_sample;
 
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
@@ -1159,6 +1222,17 @@ module fcapz_ela #(
             rb_gen_sample <= 2'b00;
             rb_capture_len_sample <= {LEN_W{1'b0}};
             rb_start_ptr_sample <= {PTR_W{1'b0}};
+            stream_r_d       <= 24'd0;
+            stream_w_pub_d   <= 24'd0;
+            stream_session_d <= 8'd0;
+            stream_lost_d    <= 32'd0;
+            stream_flags_d   <= 4'd0;
+            rb_stream_w_sample       <= 24'd0;
+            rb_stream_r_sample       <= 24'd0;
+            rb_stream_session_sample <= 8'd0;
+            rb_stream_lost_sample    <= 32'd0;
+            rb_stream_flags_sample   <= 4'd0;
+            rb_stream_gap_sample     <= {NUM_SEGMENTS{1'b0}};
             for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1) begin
                 rb_seg_start_ptr_sample[rb_sample_i] <= {PTR_W{1'b0}};
                 rb_seg_len_sample[rb_sample_i]       <= {LEN_W{1'b0}};
@@ -1166,6 +1240,11 @@ module fcapz_ela #(
         end else begin
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
+            stream_r_d       <= stream_r;
+            stream_w_pub_d   <= stream_w_pub;
+            stream_session_d <= stream_session;
+            stream_lost_d    <= stream_lost;
+            stream_flags_d   <= stream_flags;
             rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
             rb_meta_ack_sync2 <= rb_meta_ack_sync1;
 
@@ -1180,6 +1259,12 @@ module fcapz_ela #(
                 rb_gen_sample <= {arm_toggle_sync4, reset_toggle_sync4};
                 rb_capture_len_sample <= capture_len;
                 rb_start_ptr_sample <= start_ptr;
+                rb_stream_w_sample       <= stream_w_pub;
+                rb_stream_r_sample       <= stream_r;
+                rb_stream_session_sample <= stream_session;
+                rb_stream_lost_sample    <= stream_lost;
+                rb_stream_flags_sample   <= stream_flags;
+                rb_stream_gap_sample     <= stream_seg_gap;
                 for (rb_sample_i = 0; rb_sample_i < NUM_SEGMENTS; rb_sample_i = rb_sample_i + 1) begin
                     rb_seg_start_ptr_sample[rb_sample_i] <= seg_start_ptr[rb_sample_i];
                     // Without a clock limit every segment reads the
@@ -1203,6 +1288,13 @@ module fcapz_ela #(
             rb_capture_len_jtag <= {LEN_W{1'b0}};
             rb_start_ptr_jtag <= {PTR_W{1'b0}};
             rb_done_jtag <= 1'b0;
+            rb_stream_w_jtag       <= 24'd0;
+            rb_stream_r_jtag       <= 24'd0;
+            rb_stream_session_jtag <= 8'd0;
+            rb_stream_lost_jtag    <= 32'd0;
+            rb_stream_flags_jtag   <= 4'd0;
+            rb_stream_gap_jtag     <= {NUM_SEGMENTS{1'b0}};
+            rb_stream_cur_jtag     <= 1'b0;
             for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1) begin
                 rb_seg_start_ptr_jtag[rb_jtag_i] <= {PTR_W{1'b0}};
                 rb_seg_len_jtag[rb_jtag_i]       <= {LEN_W{1'b0}};
@@ -1216,6 +1308,12 @@ module fcapz_ela #(
             if (rb_meta_toggle_sync2 ^ rb_meta_toggle_sync3) begin
                 rb_capture_len_jtag <= rb_capture_len_sample;
                 rb_start_ptr_jtag <= rb_start_ptr_sample;
+                rb_stream_w_jtag       <= rb_stream_w_sample;
+                rb_stream_r_jtag       <= rb_stream_r_sample;
+                rb_stream_session_jtag <= rb_stream_session_sample;
+                rb_stream_lost_jtag    <= rb_stream_lost_sample;
+                rb_stream_flags_jtag   <= rb_stream_flags_sample;
+                rb_stream_gap_jtag     <= rb_stream_gap_sample;
                 for (rb_jtag_i = 0; rb_jtag_i < NUM_SEGMENTS; rb_jtag_i = rb_jtag_i + 1) begin
                     rb_seg_start_ptr_jtag[rb_jtag_i] <= rb_seg_start_ptr_sample[rb_jtag_i];
                     rb_seg_len_jtag[rb_jtag_i]       <= rb_seg_len_sample[rb_jtag_i];
@@ -1227,9 +1325,12 @@ module fcapz_ela #(
                 // far longer than the toggle synchronizer.
                 rb_done_jtag <= rb_done_sample &&
                                 (rb_gen_sample == {arm_toggle_jtag, reset_toggle_jtag});
+                rb_stream_cur_jtag <= (rb_gen_sample == {arm_toggle_jtag, reset_toggle_jtag});
             end
-            if (jtag_wr_en && jtag_addr == ADDR_CTRL && (jtag_wdata[0] || jtag_wdata[1]))
+            if (jtag_wr_en && jtag_addr == ADDR_CTRL && (jtag_wdata[0] || jtag_wdata[1])) begin
                 rb_done_jtag <= 1'b0;
+                rb_stream_cur_jtag <= 1'b0;
+            end
         end
     end
 
@@ -1385,6 +1486,89 @@ module fcapz_ela #(
                 seq_mask_a_stage[si] <= seq_mask_a_hold[si];
                 seq_value_b_stage[si] <= seq_value_b_hold[si];
                 seq_mask_b_stage[si] <= seq_mask_b_hold[si];
+            end
+        end
+    end
+
+    // ---- Continuous capture: settings and release mailbox -----------------
+    // STREAM_CTRL is staged with the other settings on ARM.
+    always @(posedge jtag_clk or posedge jtag_rst) begin
+        if (jtag_rst) begin
+            jtag_stream_ctrl   <= 6'h0;
+            stream_cfg_hold    <= 2'b00;
+            jtag_rel_payload   <= 32'h0;
+            jtag_rel_req       <= 1'b0;
+            jtag_rel_ack_sync1 <= 1'b0;
+            jtag_rel_ack_sync2 <= 1'b0;
+        end else begin
+            jtag_rel_ack_sync1 <= rel_ack_sample;
+            jtag_rel_ack_sync2 <= jtag_rel_ack_sync1;
+            if (HAS_SEGMENTS && jtag_wr_en && jtag_addr == ADDR_STREAM_CTRL)
+                jtag_stream_ctrl <= jtag_wdata[5:0];
+            // A release written while the previous one is in flight is
+            // dropped: the host waits for STREAM_STATUS[0] to clear.
+            if (HAS_SEGMENTS && jtag_wr_en && jtag_addr == ADDR_STREAM_RELEASE &&
+                (jtag_rel_req == jtag_rel_ack_sync2)) begin
+                jtag_rel_payload <= jtag_wdata;
+                jtag_rel_req     <= ~jtag_rel_req;
+            end
+            if (cfg_snapshot)
+                stream_cfg_hold <= HAS_SEGMENTS ? jtag_stream_ctrl[1:0] : 2'b00;
+        end
+    end
+
+    // A release names the session it belongs to and the sequence number of
+    // the last window the host has read.  It is taken only for the running
+    // session and only up to the windows completed so far; a repeat is
+    // harmless.
+    wire [23:0] rel_seq      = jtag_rel_payload[23:0];
+    wire [23:0] rel_advance  = rel_seq - stream_r;
+    wire        rel_strobe   = rel_req_sync2 ^ rel_req_sync3;
+    wire        rel_ok       = stream_on && (jtag_rel_payload[31:24] == stream_session) &&
+                               (rel_advance <= stream_owned);
+
+    always @(posedge sample_clk or posedge sample_rst) begin
+        if (sample_rst) begin
+            stream_cfg_stage <= 2'b00;
+            stream_r         <= 24'd0;
+            stream_w_d1      <= 24'd0;
+            stream_w_pub     <= 24'd0;
+            stream_session   <= 8'd0;
+            stream_lost      <= 32'd0;
+            stream_rel_err   <= 1'b0;
+            rel_req_sync1    <= 1'b0;
+            rel_req_sync2    <= 1'b0;
+            rel_req_sync3    <= 1'b0;
+            rel_ack_sample   <= 1'b0;
+        end else begin
+            if (cfg_stage_en)
+                stream_cfg_stage <= stream_cfg_hold;
+            rel_req_sync1 <= jtag_rel_req;
+            rel_req_sync2 <= rel_req_sync1;
+            rel_req_sync3 <= rel_req_sync2;
+            // Published two clocks late: the last write of a completed
+            // window (queued with INPUT_PIPE) has landed by then.
+            stream_w_d1  <= stream_w;
+            stream_w_pub <= stream_w_d1;
+            if (stream_hold && stream_lost != 32'hFFFF_FFFF &&
+                (!stream_raw || store_eligible))
+                stream_lost <= stream_lost + 32'd1;
+            if (rel_strobe) begin
+                // The payload is stable: jtag_clk holds it until this
+                // acknowledgement returns.
+                rel_ack_sample <= rel_req_sync2;
+                if (rel_ok)
+                    stream_r <= rel_seq;
+                else
+                    stream_rel_err <= 1'b1;
+            end
+            if (any_arm_pulse || reset_pulse) begin
+                stream_r       <= 24'd0;
+                stream_w_d1    <= 24'd0;
+                stream_w_pub   <= 24'd0;
+                stream_lost    <= 32'd0;
+                stream_rel_err <= 1'b0;
+                stream_session <= stream_session + 8'd1;
             end
         end
     end
@@ -1553,7 +1737,7 @@ module fcapz_ela #(
         {1'b0, pretrig_len_stage} + {1'b0, posttrig_len_stage} + {{LEN_W{1'b0}}, 1'b1};
     wire [LEN_W:0] capture_len_next =
         {1'b0, pretrig_len} + {1'b0, posttrig_len} + {{LEN_W{1'b0}}, 1'b1};
-    wire trigger_commit_now = armed && !done && !triggered && !capture_restart &&
+    wire trigger_commit_now = armed && !done && !triggered && !capture_restart && !stream_hold &&
         pretrigger_ready && trigger_holdoff_done && !sel_flush_active &&
         ((trig_delay_pending && (trig_delay_count == 16'h0)) ||
          (!trig_delay_pending && trigger_hit && (trig_delay == 16'h0)));
@@ -1688,7 +1872,8 @@ module fcapz_ela #(
             trigger_out_r <= (armed && !triggered && !capture_restart &&
                               !trig_delay_pending &&
                               pretrigger_ready && trigger_holdoff_done &&
-                              !sel_flush_active && trigger_hit) ? 1'b1 : 1'b0;
+                              !sel_flush_active && trigger_hit && !stream_hold &&
+                              !(stream_on && stream_raw)) ? 1'b1 : 1'b0;
     end
 
     // Phase 4: segment base address
@@ -1727,6 +1912,11 @@ module fcapz_ela #(
             seg_count   <= {SEG_IDX_W{1'b0}};
             all_seg_done <= 1'b0;
             segment_wrapped <= 1'b0;
+            stream_on       <= 1'b0;
+            stream_raw      <= 1'b0;
+            stream_w        <= 24'd0;
+            stream_bank_gap <= 1'b0;
+            stream_seg_gap  <= {NUM_SEGMENTS{1'b0}};
             post_clk_left <= {POST_CLK_W{1'b0}};
             post_clk_last <= 1'b0;
             for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1) begin
@@ -1753,6 +1943,11 @@ module fcapz_ela #(
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
                 segment_wrapped <= 1'b0;
+                stream_on       <= 1'b0;
+                stream_raw      <= 1'b0;
+                stream_w        <= 24'd0;
+                stream_bank_gap <= 1'b0;
+                stream_seg_gap  <= {NUM_SEGMENTS{1'b0}};
                 for (seg_i = 0; seg_i < NUM_SEGMENTS; seg_i = seg_i + 1) begin
                     seg_start_ptr[seg_i] <= {PTR_W{1'b0}};
                     seg_len[seg_i]       <= {LEN_W{1'b0}};
@@ -1810,6 +2005,11 @@ module fcapz_ela #(
                 seg_count   <= {SEG_IDX_W{1'b0}};
                 all_seg_done <= 1'b0;
                 segment_wrapped <= 1'b0;
+                stream_on       <= HAS_SEGMENTS && stream_cfg_stage[0] && !rle_active_next;
+                stream_raw      <= HAS_SEGMENTS && stream_cfg_stage[0] && stream_cfg_stage[1];
+                stream_w        <= 24'd0;
+                stream_bank_gap <= 1'b0;
+                stream_seg_gap  <= {NUM_SEGMENTS{1'b0}};
                 // Overflow check: use SEG_DEPTH for segmented mode
                 if (NUM_SEGMENTS > 1)
                     overflow <= (config_capture_len > SEG_DEPTH);
@@ -1863,7 +2063,10 @@ module fcapz_ela #(
                 end
             end
 
-            if (armed && !done && !capture_restart) begin
+            if (stream_hold && !capture_restart)
+                stream_bank_gap <= 1'b1;
+
+            if (armed && !done && !capture_restart && !stream_hold) begin
                 if (trig_holdoff_active) begin
                     if (trig_holdoff_count == 16'h0)
                         trig_holdoff_active <= 1'b0;
@@ -1947,7 +2150,12 @@ module fcapz_ela #(
                             seg_start_ptr[cur_segment] <= capture_start_ptr;
                             if (HAS_RLE_SEG_LEN)
                                 seg_len[cur_segment] <= capture_len_done;
-                            if (cur_segment == NUM_SEGMENTS - 1) begin
+                            if (stream_on) begin
+                                stream_w        <= stream_w + 24'd1;
+                                stream_seg_gap[cur_segment] <= stream_bank_gap;
+                            end
+                            stream_bank_gap <= 1'b0;
+                            if (cur_segment == NUM_SEGMENTS - 1 && !stream_on) begin
                                 // All segments done
                                 done      <= 1'b1;
                                 armed     <= 1'b0;
@@ -1955,8 +2163,10 @@ module fcapz_ela #(
                                 all_seg_done <= 1'b1;
                                 seg_count    <= seg_count + 1'b1;
                             end else begin
-                                // Auto-rearm for next segment
-                                cur_segment <= cur_segment + 1'b1;
+                                // Auto-rearm for next segment (the ring
+                                // wraps from the last to segment 0)
+                                cur_segment <= (cur_segment == NUM_SEGMENTS - 1)
+                                    ? {SEG_IDX_W{1'b0}} : cur_segment + 1'b1;
                                 seg_count   <= seg_count + 1'b1;
                                 triggered   <= 1'b0;
                                 post_left   <= {LEN_W{1'b0}};
@@ -1971,7 +2181,8 @@ module fcapz_ela #(
                                 trig_delay_pending <= 1'b0;
                                 trig_delay_count   <= 16'h0;
                                 // Set wr_ptr to next segment base
-                                wr_ptr      <= (cur_segment + 1) * SEG_DEPTH[PTR_W-1:0];
+                                wr_ptr      <= (cur_segment == NUM_SEGMENTS - 1)
+                                    ? {PTR_W{1'b0}} : (cur_segment + 1) * SEG_DEPTH[PTR_W-1:0];
                                 segment_wrapped <= 1'b0;
                             end
                         end else begin
@@ -2124,6 +2335,24 @@ module fcapz_ela #(
             ADDR_RLE_CTRL:    jtag_rdata_mux = HAS_RLE ? {30'h0, jtag_rle_ctrl} : 32'h0;
             ADDR_RLE_W:       jtag_rdata_mux = RLE_W;
             ADDR_RLE_POST_CLKS: jtag_rdata_mux = HAS_RLE ? jtag_rle_post_clks : {POST_CLK_W{1'b0}};
+            ADDR_STREAM_CTRL:   jtag_rdata_mux = HAS_SEGMENTS ? {26'h0, jtag_stream_ctrl} : 32'h0;
+            ADDR_STREAM_RELEASE: jtag_rdata_mux = HAS_SEGMENTS ? jtag_rel_payload : 32'h0;
+            // 0: {session, completed}, 1: released, 2: lost (saturating).
+            ADDR_STREAM_DATA:   jtag_rdata_mux = !HAS_SEGMENTS ? 32'h0
+                : (jtag_stream_ctrl[5:4] == 2'd0) ? {rb_stream_session_jtag, rb_stream_w_jtag}
+                : (jtag_stream_ctrl[5:4] == 2'd1) ? {8'h0, rb_stream_r_jtag}
+                : (jtag_stream_ctrl[5:4] == 2'd2) ? rb_stream_lost_jtag
+                : 32'h0;
+            // [0] release in flight, [1] ring on, [2] raw blocks, [3] waiting
+            // for a free segment, [4] a release was refused, [5] the selected
+            // segment starts after a wait, [6] the state shown is from after
+            // the latest ARM / reset, [15:8] session.
+            ADDR_STREAM_STATUS: jtag_rdata_mux = !HAS_SEGMENTS ? 32'h0
+                : {16'h0, rb_stream_session_jtag, 1'b0, rb_stream_cur_jtag,
+                   rb_stream_gap_jtag[jtag_seg_sel_clamped],
+                   rb_stream_flags_jtag[3], rb_stream_flags_jtag[2],
+                   rb_stream_flags_jtag[1], rb_stream_flags_jtag[0],
+                   (jtag_rel_req != jtag_rel_ack_sync2)};
 
             default: begin
                 if (seq_addr_hit) begin

@@ -3638,5 +3638,299 @@ class ContinuousCaptureTests(unittest.TestCase):
         self.assertEqual(t.reset_writes, 0)
 
 
+class _RingTransport(FakeTransport):
+    """A 4-segment core with the continuous-capture ring, modelled at the
+    register level: each read of the completed count lets the core finish
+    one more window if a segment is free."""
+
+    NSEG = 4
+
+    def __init__(self, *, auto: bool = True):
+        super().__init__()
+        regs = self._chain_regs[1]
+        regs[0x00B8] = self.NSEG
+        regs[0x003C] = (self.NSEG << 16) | (1 << 8) | 0x64
+        # Ring (bit 23), CAPTURE_GEN (bit 21) and so DATA_OFFSET (bit 20).
+        regs[0x00E0] = 0x3_01FF | (1 << 23) | (1 << 21) | (1 << 20)
+        regs[0x00F8] = 0  # CAPTURE_GEN
+        regs[0x001C] = 2  # CAPTURE_LEN: pre 0 + post 1 + 1
+        self.auto = auto
+        self.stream_ctrl = 0
+        self.staged = 0
+        self.on = False
+        self.raw = False
+        self.session = 0
+        self.w = 0
+        self.r = 0
+        self.lost = 0
+        self.rel_err = False
+        self.payload = 0
+        self.bank = [None] * self.NSEG  # seq each segment holds
+        self.gap = [False] * self.NSEG
+        self.pending_gap = False
+        self.writes: list[tuple[int, int]] = []
+        # Reads of STREAM_STATUS that still show the state from before the
+        # latest arm / reset (bit 6 clear), with this session.
+        self.stale_reads = 0
+        self.stale_session = 0
+
+    def complete(self) -> None:
+        if not self.on:
+            return
+        if self.w - self.r >= self.NSEG:
+            self.lost += 3
+            self.pending_gap = True
+            return
+        seg = self.w % self.NSEG
+        self.bank[seg] = self.w
+        self.gap[seg] = self.pending_gap
+        self.pending_gap = False
+        self.w += 1
+
+    def write_reg(self, addr: int, value: int) -> None:
+        self.writes.append((addr, value))
+        if addr == 0x0094:
+            self.stream_ctrl = value & 0x3F
+        elif addr == 0x0098:
+            self.payload = value
+            seq = value & 0xFF_FFFF
+            if (self.on and (value >> 24) == self.session
+                    and ((seq - self.r) & 0xFF_FFFF) <= self.w - self.r):
+                self.r = seq
+            else:
+                self.rel_err = True
+        elif addr == 0x0004 and value & 0x3:
+            self.regs[0x00F8] = (self.regs.get(0x00F8, 0) + 1) & 0xFFFF
+            self.session = (self.session + 1) & 0xFF
+            self.on = bool(value & 0x1 and self.stream_ctrl & 0x1)
+            self.raw = self.on and bool(self.stream_ctrl & 0x2)
+            self.w = self.r = self.lost = 0
+            self.rel_err = False
+            self.pending_gap = False
+            self.gap = [False] * self.NSEG
+        super().write_reg(addr, value)
+
+    def read_reg(self, addr: int) -> int:
+        if addr == 0x009C:
+            field = (self.stream_ctrl >> 4) & 0x3
+            if field == 0:
+                if self.auto:
+                    self.complete()
+                return (self.session << 24) | (self.w & 0xFF_FFFF)
+            if field == 1:
+                return self.r
+            if field == 2:
+                return self.lost
+            return 0
+        if addr == 0x00FC:
+            if self.stale_reads:
+                self.stale_reads -= 1
+                return self.stale_session << 8
+            seg = self.regs.get(0x00C0, 0) % self.NSEG
+            return ((self.session << 8) | (1 << 6) | (int(self.gap[seg]) << 5)
+                    | (int(self.rel_err) << 4) | (int(self.raw) << 2) | (int(self.on) << 1))
+        return super().read_reg(addr)
+
+    def read_block(self, addr: int, words: int):
+        seg = self.regs.get(0x00C0, 0) % self.NSEG
+        seq = self.bank[seg]
+        return [(seq * 2 + i) & 0xFF for i in range(words)] if seq is not None else [0] * words
+
+
+class StreamSegmentsTests(unittest.TestCase):
+    def _analyzer(self, t: FakeTransport, **cfg) -> Analyzer:
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        base = dict(
+            pretrigger=0,
+            posttrigger=1,
+            trigger=TriggerConfig(mode="value_match", value=0, mask=0),
+            sample_width=8,
+            depth=1024,
+        )
+        base.update(cfg)
+        analyzer.configure(CaptureConfig(**base))
+        return analyzer
+
+    def test_configure_turns_a_leftover_ring_off(self):
+        t = _RingTransport()
+        t.stream_ctrl = 0x3
+        self._analyzer(t)
+        self.assertEqual(t.stream_ctrl, 0)
+
+    def test_windows_come_in_order_and_are_released(self):
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        results = list(analyzer.stream_segments(count=10, raw=True))
+        self.assertEqual([r.seq for r in results], list(range(10)))
+        for r in results:
+            self.assertEqual(r.segment, r.seq % 4)
+            self.assertEqual(r.samples, [(r.seq * 2) & 0xFF, (r.seq * 2 + 1) & 0xFF])
+            self.assertFalse(r.after_gap)
+        releases = [v for a, v in t.writes if a == 0x0098]
+        self.assertEqual(releases[-1], (1 << 24) | 10)  # session 1, through 10
+        self.assertIn((0x0004, 0x1), t.writes)
+        # Arms with the ring and raw blocks on, and leaves the core reset
+        # with the ring off.
+        self.assertIn((0x0094, 0x3), t.writes)
+        self.assertEqual(t.writes[-1], (0x0004, 0x2))
+        self.assertEqual(t.stream_ctrl & 0x3, 0)
+
+    def test_wait_marks_the_next_window_and_reports_the_loss(self):
+        t = _RingTransport(auto=False)
+        analyzer = self._analyzer(t)
+        stream = analyzer.stream_segments(timeout=0.2)
+        t.auto = False
+        # Fill every segment and make the core wait before the first read.
+        for _ in range(4):
+            t.complete()
+        orig = t.read_reg
+        state = {"filled": False}
+
+        def read_reg(addr):
+            if addr == 0x009C and not state["filled"] and t.on:
+                state["filled"] = True
+                for _ in range(6):
+                    t.complete()
+            return orig(addr)
+
+        t.read_reg = read_reg
+        first = [next(stream) for _ in range(4)]
+        self.assertEqual([r.seq for r in first], [0, 1, 2, 3])
+        self.assertTrue(all(r.lost > 0 for r in first))
+        t.auto = True
+        t.complete()
+        fifth = next(stream)
+        stream.close()
+        self.assertEqual(fifth.seq, 4)
+        self.assertTrue(fifth.after_gap)
+
+    def test_another_arm_stops_the_stream_without_resetting(self):
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        stream = analyzer.stream_segments(timeout=0.2)
+        next(stream)
+        t.write_reg(0x0004, 0x1)  # another controller arms
+        n_writes = len(t.writes)
+        from fcapz.analyzer import CaptureChangedError
+        with self.assertRaises(CaptureChangedError):
+            for _ in range(8):
+                next(stream)
+        self.assertNotIn((0x0004, 0x2), t.writes[n_writes:])
+
+    def test_closing_after_another_arm_leaves_the_core_alone(self):
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        stream = analyzer.stream_segments(timeout=0.2)
+        next(stream)
+        t.write_reg(0x0004, 0x1)  # another controller arms
+        n_writes = len(t.writes)
+        stream.close()
+        self.assertNotIn((0x0004, 0x2), t.writes[n_writes:])
+        self.assertNotIn((0x0094, 0), t.writes[n_writes:])
+
+    def test_the_session_is_taken_once_the_arm_is_published(self):
+        # A reset still on its way: the core is at session 4 and JTAG still
+        # shows 3.  The arm makes it 5; the host waits for STREAM_STATUS[6].
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        t.session = 4
+        t.stale_session = 3
+        t.stale_reads = 3
+        results = list(analyzer.stream_segments(count=3))
+        self.assertEqual([r.seq for r in results], [0, 1, 2])
+        releases = [v for a, v in t.writes if a == 0x0098]
+        self.assertEqual(releases[-1] >> 24, 5)
+
+    def test_closing_after_a_hidden_rearm_leaves_the_core_alone(self):
+        # Another controller's arm the session does not show yet: CAPTURE_GEN
+        # still tells.
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        stream = analyzer.stream_segments(timeout=0.2)
+        next(stream)
+        t.regs[0x00F8] += 1
+        n_writes = len(t.writes)
+        stream.close()
+        self.assertEqual(t.writes[n_writes:], [])
+
+    def test_closing_after_this_analyzer_rearms_leaves_the_new_capture(self):
+        # A later arm() on the same analyzer moves its own record of the
+        # arm; the old stream must still see that the capture is not its own,
+        # even while STREAM_STATUS still shows the old session.
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        stream = analyzer.stream_segments(timeout=0.2)
+        next(stream)
+        old_session = t.session
+        analyzer.arm()
+        t.stale_reads, t.stale_session = 5, old_session
+        n_writes = len(t.writes)
+        stream.close()
+        self.assertEqual(t.writes[n_writes:], [])
+
+    def test_refused_release_raises(self):
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        stream = analyzer.stream_segments(timeout=0.2)
+        orig = t.write_reg
+
+        def write_reg(addr, value):
+            if addr == 0x0098:
+                value ^= 1 << 24  # wrong session
+            orig(addr, value)
+
+        t.write_reg = write_reg
+        from fcapz.analyzer import CaptureChangedError
+        with self.assertRaises(CaptureChangedError):
+            next(stream)
+
+    def test_no_window_times_out(self):
+        t = _RingTransport(auto=False)
+        analyzer = self._analyzer(t)
+        from fcapz.analyzer import CaptureNotReady
+        with self.assertRaises(CaptureNotReady):
+            next(analyzer.stream_segments(timeout=0.05))
+        self.assertEqual(t.writes[-1], (0x0004, 0x2))
+
+    def test_cli_writes_one_json_line_per_window(self):
+        import contextlib
+        import io
+        import tempfile
+
+        from fcapz.cli import _stream_to_jsonl, build_parser
+
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "windows.jsonl"
+            args = build_parser().parse_args(
+                ["stream", "--raw", "--pretrigger", "0", "--posttrigger", "1",
+                 "--count", "5", "--out", str(out)]
+            )
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(_stream_to_jsonl(analyzer, args), 0)
+            lines = [json.loads(line) for line in out.read_text().splitlines()]
+        self.assertEqual([d["stream"]["seq"] for d in lines], [0, 1, 2, 3, 4])
+        self.assertEqual(lines[3]["segment"], 3)
+        self.assertEqual(lines[4]["samples"][0]["value"], 8)
+        self.assertIn("streamed 5 windows", printed.getvalue())
+
+    def test_checks_the_core_and_config(self):
+        t = FakeTransport()  # one segment, no ring
+        analyzer = self._analyzer(t)
+        with self.assertRaises(RuntimeError):
+            next(analyzer.stream_segments())
+        ring = self._analyzer(_RingTransport(), pretrigger=1, posttrigger=0)
+        with self.assertRaises(ValueError):
+            next(ring.stream_segments(raw=True))
+        with self.assertRaises(ValueError):
+            next(ring.stream_segments(count=-1))
+        for cfg in (dict(trigger_delay=3), dict(trigger_holdoff=3), dict(posttrigger=0)):
+            ring = self._analyzer(_RingTransport(), **cfg)
+            with self.assertRaises(ValueError, msg=str(cfg)):
+                next(ring.stream_segments(raw=True))
+
+
 if __name__ == "__main__":
     unittest.main()

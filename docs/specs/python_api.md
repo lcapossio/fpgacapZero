@@ -398,6 +398,45 @@ arm so the stream starts from a known-idle state. Defaults to `False`
 to preserve the original behavior (and leave the from-boot window
 observable for callers that want it).
 
+#### `Analyzer.stream_segments`
+
+```python
+stream_segments(
+    count: int = 0,
+    *,
+    raw: bool = False,
+    timeout: float = 10.0,
+    poll_interval: float = 0.005,
+) -> Iterator[CaptureResult]
+```
+
+Generator: continuous capture on a segmented core, one
+`CaptureResult` per window, in order, for as long as it runs.
+
+The core does not stop after its last segment: it wraps to segment 0
+and keeps capturing, one window per segment, into every segment the
+host has read and released.  This generator reads each completed
+window, releases its segment, and yields it; `result.seq` numbers
+the windows.  When the host falls behind and every segment holds an
+unread window the core waits, writing nothing; the first window after
+the wait has `after_gap` set, and `lost` counts what the waits cost.
+
+With `raw=False` each window is a triggered capture as configured.
+With `raw=True` every stored sample is a trigger and the windows
+are consecutive blocks: with no wait in between, the last sample of
+one window and the first of the next are consecutive stored samples
+(after decimation).  Raw blocks need `pretrigger=0`,
+`posttrigger >= 1` and no trigger delay or holdoff; use
+`posttrigger = segment depth - 1` for the fewest windows.
+
+Call `configure` first; this arms the core itself.  Yields
+*count* windows, or runs until closed if *count* is 0, and leaves the
+core reset (`reset`).  Needs `COMPARE_CAPS` bit 23 (a core with
+NUM_SEGMENTS &gt; 1); not with run-length capture or, with `raw=True`,
+storage qualification.  Raises `CaptureNotReady` if no window
+completes within *timeout* seconds, and `CaptureChangedError`
+if another controller arms the core or touches the ring meanwhile.
+
 #### `Analyzer.probe_optional`
 
 ```python
@@ -490,6 +529,9 @@ One capture read back by `Analyzer.capture`, with the config that made it.
 | `timestamps` | `List[int]` | `list()` |  |
 | `segment` | `int` | `0` | which segment this result is from Run-length capture: sample clocks each entry in ``samples`` held (empty when the capture was not run-length). The last entry is cut where the capture ends: on the clock it starts (length 1) when posttrigger entries end it, or on the post_clocks stop clock. The signal may have held longer. |
 | `run_lengths` | `List[int]` | `list()` |  |
+| `seq` | <code>int &#124; None</code> | `None` |  |
+| `after_gap` | `bool` | `False` |  |
+| `lost` | `int` | `0` |  |
 
 ### `ProbeSpec`
 

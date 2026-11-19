@@ -181,6 +181,24 @@ _ADDR_DATA_OFFSET = 0x00F4
 # COMPARE_CAPS bit 22: SQ_MODE holds the compare mode plus one (1 = EQ,
 # 2 = NEQ).  Cores without it take the raw compare mode, so EQ (0) means off.
 _COMPARE_CAPS_SQ_MODE_PLUS1 = 1 << 22
+# COMPARE_CAPS bit 23: continuous capture, a ring of segments the host
+# releases as it reads them (STREAM_* registers; segmented cores only).
+_COMPARE_CAPS_STREAM = 1 << 23
+_ADDR_STREAM_CTRL = 0x0094     # [0] ring, [1] raw blocks (taken on arm), [5:4] STREAM_DATA field
+_ADDR_STREAM_RELEASE = 0x0098  # {session[7:0], release-through seq[23:0]}
+_ADDR_STREAM_DATA = 0x009C     # field 0 {session, completed}, 1 released, 2 lost
+_ADDR_STREAM_STATUS = 0x00FC
+_STREAM_CTRL_RING = 1 << 0
+_STREAM_CTRL_RAW = 1 << 1
+_STREAM_FIELD_COMPLETED = 0
+_STREAM_FIELD_RELEASED = 1
+_STREAM_FIELD_LOST = 2
+_STREAM_STATUS_REL_BUSY = 1 << 0
+_STREAM_STATUS_ON = 1 << 1
+_STREAM_STATUS_REL_ERR = 1 << 4
+_STREAM_STATUS_GAP = 1 << 5
+_STREAM_STATUS_CURRENT = 1 << 6  # the state shown is from after the latest arm / reset
+_STREAM_SEQ_MASK = 0xFF_FFFF
 _ADDR_DATA_BASE = 0x0100
 
 _STATUS_ARMED = 1 << 0
@@ -380,6 +398,15 @@ class CaptureResult:
     # entries end it, or on the post_clocks stop clock.  The signal may have
     # held longer.
     run_lengths: List[int] = field(default_factory=list)
+    # Continuous capture (:meth:`Analyzer.stream_segments`) only: the
+    # window's sequence number (modulo 2**24) since the arm, whether the
+    # ring waited for the host before this window (so it does not follow
+    # the previous one without a gap), and what the ring had lost to such
+    # waits when it was read: stored samples with ``raw=True``, sample
+    # clocks otherwise (saturating at 2**32 - 1).
+    seq: int | None = None
+    after_gap: bool = False
+    lost: int = 0
 
 
 def entry_start_clocks(result: CaptureResult) -> list[int]:
@@ -1045,6 +1072,10 @@ class Analyzer:
         if raw_compare_caps & _COMPARE_CAPS_DATA_OFFSET:
             # A paged read puts it back to 0, but not one cut short.
             self.transport.write_reg(_ADDR_DATA_OFFSET, 0)
+        if raw_compare_caps & _COMPARE_CAPS_STREAM:
+            # Taken on arm: a ring left on by an earlier stream would turn
+            # the next segmented capture into one that never ends.
+            self.transport.write_reg(_ADDR_STREAM_CTRL, 0)
         # Always written, so mode 0 turns off a qualifier left by an earlier
         # capture.
         self.transport.write_reg(_ADDR_SQ_MODE, sq_mode)
@@ -1939,6 +1970,13 @@ class Analyzer:
             d["run_lengths"] = [
                 {"index": i, "value": v} for i, v in enumerate(result.run_lengths)
             ]
+        if result.seq is not None:
+            # Continuous capture (Analyzer.stream_segments).
+            d["stream"] = {
+                "seq": result.seq,
+                "after_gap": result.after_gap,
+                "lost": result.lost,
+            }
         return d
 
     def write_json(self, result: CaptureResult, out_path: str) -> None:
@@ -2145,6 +2183,223 @@ class Analyzer:
             result = self.capture(timeout=timeout_per)
             yield result
             yielded += 1
+
+    def stream_segments(
+        self,
+        count: int = 0,
+        *,
+        raw: bool = False,
+        timeout: float = 10.0,
+        poll_interval: float = 0.005,
+    ) -> Iterator[CaptureResult]:
+        """Generator: continuous capture on a segmented core, one
+        ``CaptureResult`` per window, in order, for as long as it runs.
+
+        The core does not stop after its last segment: it wraps to segment 0
+        and keeps capturing, one window per segment, into every segment the
+        host has read and released.  This generator reads each completed
+        window, releases its segment, and yields it; ``result.seq`` numbers
+        the windows.  When the host falls behind and every segment holds an
+        unread window the core waits, writing nothing; the first window after
+        the wait has ``after_gap`` set, and ``lost`` counts what the waits cost.
+
+        With ``raw=False`` each window is a triggered capture as configured.
+        With ``raw=True`` every stored sample is a trigger and the windows
+        are consecutive blocks: with no wait in between, the last sample of
+        one window and the first of the next are consecutive stored samples
+        (after decimation).  Raw blocks need ``pretrigger=0``,
+        ``posttrigger >= 1`` and no trigger delay or holdoff; use
+        ``posttrigger = segment depth - 1`` for the fewest windows.
+
+        Call :meth:`configure` first; this arms the core itself.  Yields
+        *count* windows, or runs until closed if *count* is 0, and leaves the
+        core reset (:meth:`reset`).  Needs ``COMPARE_CAPS`` bit 23 (a core with
+        NUM_SEGMENTS > 1); not with run-length capture or, with ``raw=True``,
+        storage qualification.  Raises :class:`CaptureNotReady` if no window
+        completes within *timeout* seconds, and :class:`CaptureChangedError`
+        if another controller arms the core or touches the ring meanwhile.
+        """
+        config = self._config
+        if config is None:
+            raise RuntimeError("call configure() before stream_segments()")
+        if not (self._hw_compare_caps & _COMPARE_CAPS_STREAM and self._hw_num_segments > 1):
+            raise RuntimeError(
+                "continuous capture needs a segmented core (NUM_SEGMENTS > 1) "
+                "that reports COMPARE_CAPS bit 23"
+            )
+        if count < 0:
+            raise ValueError("count must be >= 0")
+        if config.rle:
+            raise ValueError("continuous capture does not support run-length capture")
+        if raw and config.pretrigger:
+            raise ValueError("raw blocks need pretrigger=0")
+        if raw and config.stor_qual_mode:
+            raise ValueError("raw blocks do not support storage qualification")
+        if raw and (config.trigger_delay or config.trigger_holdoff):
+            # Both hold off the next window's trigger, which leaves a gap
+            # the core does not mark.
+            raise ValueError("raw blocks need trigger_delay=0 and trigger_holdoff=0")
+        if raw and config.posttrigger < 1:
+            # A one-sample window completes on the clock after its trigger
+            # without storing it, so every other sample would be lost.
+            raise ValueError("raw blocks need posttrigger >= 1")
+        nseg = self._hw_num_segments
+        ctrl = _STREAM_CTRL_RING | (_STREAM_CTRL_RAW if raw else 0)
+        owned = False
+        session: int | None = None
+        stream_gen: int | None = None
+        try:
+            with self._selected():
+                self.transport.write_reg(_ADDR_STREAM_CTRL, ctrl)
+            self.arm()
+            owned = True
+            # This stream's arm, kept: a later arm() on this analyzer moves
+            # _armed_gen, and that capture is not this stream's to stop.
+            stream_gen = self._armed_gen
+            session = self._stream_wait_session(stream_gen, timeout)
+            next_seq = 0
+            yielded = 0
+            while count == 0 or yielded < count:
+                completed = self._stream_wait_window(
+                    ctrl, session, next_seq, timeout, poll_interval
+                )
+                ready = (completed - next_seq) & _STREAM_SEQ_MASK
+                if ready > nseg:
+                    raise CaptureChangedError(
+                        f"the ring reports {ready} unread windows with {nseg} "
+                        "segments: another controller released windows this "
+                        "host had not read"
+                    )
+                if count:
+                    ready = min(ready, count - yielded)
+                batch = []
+                with self._selected():
+                    for _ in range(ready):
+                        result = self._read_capture(next_seq % nseg)
+                        status = int(self.transport.read_reg(_ADDR_STREAM_STATUS))
+                        result.seq = next_seq
+                        result.after_gap = bool(status & _STREAM_STATUS_GAP)
+                        batch.append(result)
+                        next_seq = (next_seq + 1) & _STREAM_SEQ_MASK
+                    lost = self._stream_field(ctrl, _STREAM_FIELD_LOST)
+                    # Released before the windows are handed out, so the
+                    # core keeps capturing while the caller works on them.
+                    self._stream_release(ctrl, session, next_seq, timeout)
+                for result in batch:
+                    result.lost = lost
+                    yield result
+                    yielded += 1
+        except (CaptureChangedError, ManagerResetError):
+            owned = False  # someone else holds the core now; leave it alone
+            raise
+        finally:
+            if owned:
+                self._stream_stop(session, stream_gen)
+
+    def _stream_field(self, ctrl: int, index: int) -> int:
+        """STREAM_DATA field *index*, selected in the same operation as the
+        read.  Call with this analyzer selected."""
+        (value,) = self.transport.read_regs_after_write(
+            _ADDR_STREAM_CTRL, ctrl | (index << 4), [_ADDR_STREAM_DATA]
+        )
+        return int(value) & 0xFFFF_FFFF
+
+    def _stream_completed(self, ctrl: int) -> tuple[int, int]:
+        """(session, completed windows).  Call with this analyzer selected."""
+        word = self._stream_field(ctrl, _STREAM_FIELD_COMPLETED)
+        return word >> 24, word & _STREAM_SEQ_MASK
+
+    def _stream_wait_session(self, stream_gen: int | None, timeout: float) -> int:
+        """Wait until the ring state published to JTAG is from after this
+        arm (``STREAM_STATUS[6]``); return its session.  Session and flag
+        come from one read, so they describe the same snapshot."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._selected():
+                status = int(self.transport.read_reg(_ADDR_STREAM_STATUS))
+                gen = self._capture_gen()
+            if stream_gen is not None and gen != stream_gen:
+                raise CaptureChangedError(
+                    f"CAPTURE_GEN moved from {stream_gen} to {gen} after "
+                    "this arm: another controller armed or reset the core"
+                )
+            if status & _STREAM_STATUS_CURRENT:
+                if not status & _STREAM_STATUS_ON:
+                    raise RuntimeError(
+                        "the ring did not start on arm (run-length capture "
+                        "left on, or a core without continuous capture)"
+                    )
+                return (status >> 8) & 0xFF
+            if time.monotonic() >= deadline:
+                raise CaptureNotReady("the ring's state after the arm never reached JTAG")
+
+    def _stream_stop(self, session: int | None, stream_gen: int | None) -> None:
+        """Turn the ring off and reset the core, unless another controller
+        has armed or reset it since this stream did (the session in
+        ``STREAM_STATUS`` or ``CAPTURE_GEN`` moved): that capture is theirs.
+        The check reads only, and the check, the write and the reset run in
+        one scope, so no other client of this transport comes in between."""
+        with self._selected():
+            status = int(self.transport.read_reg(_ADDR_STREAM_STATUS))
+            gen = self._capture_gen()
+            if (session is not None and (status >> 8) & 0xFF != session) or (
+                stream_gen is not None and gen != stream_gen
+            ):
+                return
+            self.transport.write_reg(_ADDR_STREAM_CTRL, 0)
+            self.reset()
+
+    def _stream_wait_window(
+        self, ctrl: int, session: int, next_seq: int, timeout: float, poll_interval: float
+    ) -> int:
+        """Poll until window *next_seq* has completed; return the count."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._selected():
+                got, completed = self._stream_completed(ctrl)
+            if got != session:
+                raise CaptureChangedError(
+                    f"the ring's session moved from {session} to {got}: another "
+                    "controller armed or reset the core"
+                )
+            if completed != next_seq:
+                return completed
+            if time.monotonic() >= deadline:
+                if self._config_state is not None:
+                    with self._selected():
+                        self._check_configured_state("while streaming")
+                raise CaptureNotReady(
+                    f"no window completed within {timeout} s (window {next_seq})"
+                )
+            time.sleep(poll_interval)
+
+    def _stream_release(self, ctrl: int, session: int, through: int, timeout: float) -> None:
+        """Release every window before *through* and check the core took it.
+        Call with this analyzer selected."""
+        read = self.transport.read_reg
+        deadline = time.monotonic() + timeout
+        while read(_ADDR_STREAM_STATUS) & _STREAM_STATUS_REL_BUSY:
+            # Another release in flight: a write now would be dropped.
+            if time.monotonic() >= deadline:
+                raise CaptureChangedError("the ring's release mailbox stayed busy")
+        self.transport.write_reg(_ADDR_STREAM_RELEASE, ((session & 0xFF) << 24) | through)
+        while True:
+            status = int(read(_ADDR_STREAM_STATUS))
+            if not status & _STREAM_STATUS_REL_BUSY:
+                released = self._stream_field(ctrl, _STREAM_FIELD_RELEASED)
+                if released == through:
+                    return
+                if status & _STREAM_STATUS_REL_ERR:
+                    raise CaptureChangedError(
+                        f"the core refused the release through window {through} "
+                        f"(session {session}): another controller armed or "
+                        "reset the core, or released windows itself"
+                    )
+            if time.monotonic() >= deadline:
+                raise CaptureChangedError(
+                    f"the release through window {through} never showed "
+                    "(another controller may hold the ring)"
+                )
 
     @_selected_transaction
     def _read_ela_probe_registers_raw(

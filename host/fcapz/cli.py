@@ -490,7 +490,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also print the capture as AXI4-Lite transactions (AXI monitor probe maps only)",
     )
 
-    for parser in [cfg, cap]:
+    stream = sub.add_parser(
+        "stream",
+        help=(
+            "Continuous capture on a segmented core: write every window to a "
+            "JSON Lines file as it completes (Ctrl+C to stop)"
+        ),
+    )
+
+    for parser in [cfg, cap, stream]:
         parser.add_argument(
             "--pretrigger", type=int, default=8, metavar="N",
             help="Samples to keep before the trigger",
@@ -675,6 +683,28 @@ def build_parser() -> argparse.ArgumentParser:
             "--format vcd). Names: gtkwave, surfer, wavetrace, custom (needs "
             "gui.toml custom_argv)."
         ),
+    )
+
+    stream.add_argument(
+        "--raw",
+        action="store_true",
+        help=(
+            "Raw blocks: every stored sample is a trigger, so the windows are "
+            "consecutive (needs --pretrigger 0 and no trigger delay or "
+            "holdoff; set --posttrigger to the segment depth - 1)"
+        ),
+    )
+    stream.add_argument(
+        "--count", type=_non_negative_int, default=0, metavar="N",
+        help="Stop after N windows (0 = until Ctrl+C)",
+    )
+    stream.add_argument(
+        "--timeout", type=_positive_float, default=10.0, metavar="SEC",
+        help="Seconds to wait for each window",
+    )
+    stream.add_argument(
+        "--out", required=True, metavar="FILE",
+        help="JSON Lines output, one capture export per window ('-' = stdout)",
     )
 
     # -- EIO subcommands ---------------------------------------------------
@@ -909,6 +939,36 @@ def _axi_probes_for_capture(data: dict, probe_file: str | None):
         f"sample_width={sample_width}; pass --probe-file "
         "(fcapz axi-mon --write-probe-file writes one)"
     )
+
+
+def _stream_to_jsonl(analyzer: Analyzer, args: argparse.Namespace) -> int:
+    """``fcapz stream``: one JSON export per window, flushed as it comes."""
+    out = sys.stdout if args.out == "-" else open(args.out, "w", encoding="utf-8")
+    windows = 0
+    gaps = 0
+    lost = 0
+    stream = analyzer.stream_segments(args.count, raw=args.raw, timeout=args.timeout)
+    try:
+        for result in stream:
+            out.write(json.dumps(analyzer.export_json(result), separators=(",", ":")))
+            out.write("\n")
+            out.flush()
+            windows += 1
+            gaps += int(result.after_gap)
+            lost = result.lost
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stream.close()
+        if out is not sys.stdout:
+            out.close()
+    unit = "samples" if args.raw else "sample clocks"
+    print(
+        f"streamed {windows} windows -> {args.out}"
+        + (f" ({gaps} after a wait, {lost} {unit} lost)" if gaps or lost else ""),
+        file=sys.stderr if args.out == "-" else sys.stdout,
+    )
+    return 0
 
 
 def _print_axi_transactions(decoded: dict, *, only_anomalies: bool, kind, limit: int) -> None:
@@ -1260,7 +1320,7 @@ def main() -> int:
             print("armed")
             return 0
 
-        if args.cmd in ("configure", "capture"):
+        if args.cmd in ("configure", "capture", "stream"):
             profile_name = getattr(args, "profile", None)
             if profile_name:
                 from .gui.settings import (
@@ -1294,6 +1354,9 @@ def main() -> int:
         if args.cmd == "configure":
             print("configured")
             return 0
+
+        if args.cmd == "stream":
+            return _stream_to_jsonl(analyzer, args)
 
         analyzer.arm()
         result = analyzer.capture(timeout=args.timeout)

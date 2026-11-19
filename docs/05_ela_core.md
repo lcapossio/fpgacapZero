@@ -876,6 +876,59 @@ Constraints:
   this and raises `ValueError: pre+post+1 exceeds segment depth` if
   you try to overflow a segment.
 
+### Continuous capture
+
+On a segmented core the capture can also run as a ring that never
+ends (`COMPARE_CAPS` bit 23, every `NUM_SEGMENTS > 1` core).  After its
+last segment the core wraps to segment 0 and keeps going, one window
+per segment, while the host reads finished windows and releases their
+segments.  The core counts the windows it completes, the host the
+windows it has released, and the core writes only into released
+segments.  When the host falls behind and every segment holds an
+unread window, the core waits: it stores nothing and evaluates no
+trigger until a segment is released.  It then counts what it misses,
+marks the next window as following a wait, and starts that window
+afresh, so no window is ever spliced across the pause.
+
+```python
+cfg = CaptureConfig(pretrigger=4, posttrigger=11,
+                    trigger=TriggerConfig(mode="value_match", value=0xA5, mask=0xFF))
+analyzer.configure(cfg)
+for result in analyzer.stream_segments():     # arms the core itself
+    print(result.seq, result.after_gap, result.samples)
+```
+
+Each `CaptureResult` is a triggered window as configured.  With
+`raw=True` every stored sample is a trigger instead, and the windows
+are consecutive blocks of the sampled signal.  Raw blocks need
+`pretrigger=0`, `posttrigger >= 1` and no trigger delay or holdoff
+(the host refuses anything else):
+
+```python
+seg_depth = 1024 // 4          # DEPTH / NUM_SEGMENTS
+cfg = CaptureConfig(pretrigger=0, posttrigger=seg_depth - 1, decimation=9,
+                    trigger=TriggerConfig(mode="value_match", value=0, mask=0))
+analyzer.configure(cfg)
+samples = []
+for block in analyzer.stream_segments(count=100, raw=True):
+    if block.after_gap:
+        print(f"gap before block {block.seq}: {block.lost} samples lost so far")
+    samples.extend(block.samples)
+```
+
+How fast the ring can run without waiting depends on the link: the
+host must read a segment's window in the time the core takes to fill
+the other segments.  Over JTAG that is tens to hundreds of kilobytes
+per second, so raw blocks keep up with a slow or decimated signal, and
+triggered windows with any trigger rate the readout can follow.
+`fcapz stream` does the same from the command line (see
+[chapter 10](10_cli_reference.md#stream)).
+
+Run-length capture does not combine with the ring (the core runs
+a normal segmented capture), and the host refuses raw blocks with
+storage qualification.  The external trigger output does not pulse for
+raw blocks.
+
 ## Runtime probe mux (`PROBE_MUX_W > 0`)
 
 The runtime probe mux lets one ELA observe a wide bus and runtime-

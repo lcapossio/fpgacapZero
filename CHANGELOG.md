@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Continuous capture.** A segmented ELA (`NUM_SEGMENTS > 1`) can now
+  run as a ring that never ends: after its last segment it wraps to
+  segment 0 and keeps capturing into every segment the host has read and
+  released, waiting, without splicing a window, when the host falls
+  behind. Each window is a triggered capture, or with raw blocks a
+  consecutive block of the sampled signal. New registers `STREAM_CTRL`,
+  `STREAM_RELEASE`, `STREAM_DATA` and `STREAM_STATUS`, reported by
+  `COMPARE_CAPS` bit 23, in the Verilog and VHDL cores. The host reads it
+  with `Analyzer.stream_segments()`, which numbers the windows and
+  reports each wait and what it lost, and the CLI with `fcapz stream`,
+  which writes one JSON export per window to a JSON Lines file.
+
 - **Vivado: insert debug cores after synthesis.**
   `tools/fcapz_insert_vivado.tcl` adds fcapz debug cores to a synthesized
   7-series or UltraScale(+) checkpoint, wired to the nets marked

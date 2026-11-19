@@ -119,6 +119,7 @@ EIO/AXI/UART panels are refused — one CLI run builds exactly one transport, so
 | `axi-decode` | Reassemble a saved AXI monitor capture into AXI4-Lite transactions |
 | `configure` | Write capture configuration without arming |
 | `capture` | Configure, arm, capture and export to a file |
+| `stream` | Continuous capture on a segmented core: write every window to a JSON Lines file as it completes (Ctrl+C to stop) |
 | `eio-probe` | Read EIO core identity and widths |
 | `eio-read` | Read EIO input probes |
 | `eio-write` | Write EIO output probes |
@@ -548,6 +549,45 @@ Each stage is a JSON object with these fields (all optional except
 
 `value_*` and `mask_*` accept Python int literals (decimal or `0x`
 prefix).  See [chapter 05](05_ela_core.md) for the compare modes.
+
+## `stream`
+
+Continuous capture on a segmented core (`NUM_SEGMENTS > 1`, one
+that reports `COMPARE_CAPS` bit 23): the core keeps capturing, one window per segment,
+into every segment the host has read, and `stream` writes each
+window to a JSON Lines file as it completes, one `capture --format
+json` export per line with a `stream` object (`seq`, `after_gap`,
+`lost`) added.  It runs until `--count` windows or Ctrl+C, then
+resets the core.  It takes every `configure` option; see
+[chapter 05](05_ela_core.md#continuous-capture) for how the ring works.
+
+<!-- BEGIN GENERATED cli:stream/configure (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Options `stream` has in addition to those of `configure`:
+
+| Option | Default | Description |
+|---|---|---|
+| `--raw` | off | Raw blocks: every stored sample is a trigger, so the windows are consecutive (needs --pretrigger 0 and no trigger delay or holdoff; set --posttrigger to the segment depth - 1) |
+| `--count N` | `0` | Stop after N windows (0 = until Ctrl+C) |
+| `--timeout SEC` | `10.0` | Seconds to wait for each window |
+| `--out FILE` | required | JSON Lines output, one capture export per window ('-' = stdout) |
+
+<!-- END GENERATED cli:stream/configure -->
+
+```bash
+# Triggered windows, one per trigger, for as long as it runs
+fcapz --backend hw_server --port 3121 stream   --pretrigger 4 --posttrigger 11   --trigger-value 0xA5 --trigger-mask 0xFF --out windows.jsonl
+
+# Raw blocks: consecutive samples, 256-sample segments, every 10th sample
+fcapz --backend hw_server --port 3121 stream --raw   --pretrigger 0 --posttrigger 255 --decimation 9 --out blocks.jsonl
+```
+
+With `--raw` the windows join into one record: unless a line has
+`after_gap` set, its first sample follows the previous line's last.
+A window with `after_gap` comes after a wait: the host fell behind,
+the core paused with every segment full, and `lost` counts what it
+missed since the arm (stored samples with `--raw`, sample clocks
+without).
 
 ## EIO subcommands
 

@@ -52,6 +52,10 @@ ADDR_CAPTURE_GEN = 0x00F8
 ADDR_RLE_CTRL = 0x00A8
 ADDR_RLE_W = 0x00CC
 ADDR_RLE_POST_CLKS = 0x0090
+ADDR_STREAM_CTRL = 0x0094
+ADDR_STREAM_RELEASE = 0x0098
+ADDR_STREAM_DATA = 0x009C
+ADDR_STREAM_STATUS = 0x00FC
 ADDR_DATA_BASE = 0x0100
 
 
@@ -149,6 +153,8 @@ class ElaFunctionalCoverage:
             "rle_prearm": 0,
             "rle_segments": 0,
             "rle_post_clks": 0,
+            "stream_raw": 0,
+            "stream_ring": 0,
         }
 
     def hit(self, name: str) -> None:
@@ -1314,7 +1320,7 @@ async def config_combo_sq_segments(dut):
     features = await ela.read(ADDR_FEATURES)
     assert features & 0x10
     assert ((features >> 16) & 0xFF) == 4
-    assert await ela.read(ADDR_COMPARE_CAPS) == 0x007B_01FF
+    assert await ela.read(ADDR_COMPARE_CAPS) == 0x00FB_01FF  # bit 23: segment ring
     await ela.write(ADDR_PRETRIG, 0)
     await ela.write(ADDR_POSTTRIG, 2)
     await ela.write(ADDR_SQ_MODE, 2)  # NEQ
@@ -2454,3 +2460,229 @@ async def rle_segment_lengths_need_the_clock_limit(dut):
     await ela.write(ADDR_RLE_POST_CLKS, 0)
     await ela.write(ADDR_RLE_CTRL, 0)
     FUNCTIONAL_COVERAGE.hit("rle_post_clks")
+
+
+# ---- Continuous capture (segment ring) --------------------------------------
+
+STREAM_SEG_DEPTH = DEPTH // max(NUM_SEGMENTS, 1)
+
+
+class StreamHost:
+    """The host side of the segment ring, as the Python API drives it."""
+
+    def __init__(self, ela: ElaDriver) -> None:
+        self.ela = ela
+        self.read_seq = 0
+
+    async def start(self, *, raw: bool, pre: int = 0, post: int | None = None,
+                    value: int = 0, mask: int = 0) -> None:
+        ela = self.ela
+        if post is None:
+            post = STREAM_SEG_DEPTH - 1
+        await ela.configure_value_capture(pre=pre, post=post, value=value, mask=mask)
+        await ela.write(ADDR_STREAM_CTRL, 0x3 if raw else 0x1)
+        await ela.arm()
+        self.read_seq = 0
+
+    async def field(self, index: int) -> int:
+        ctrl = await self.ela.read(ADDR_STREAM_CTRL)
+        await self.ela.write(ADDR_STREAM_CTRL, (ctrl & 0x3) | (index << 4))
+        return await self.ela.read(ADDR_STREAM_DATA)
+
+    async def completed(self) -> tuple[int, int]:
+        word = await self.field(0)
+        return word >> 24, word & 0xFFFFFF
+
+    async def released(self) -> int:
+        return await self.field(1)
+
+    async def lost(self) -> int:
+        return await self.field(2)
+
+    async def status(self) -> int:
+        return await self.ela.read(ADDR_STREAM_STATUS)
+
+    async def read_window(self, seq: int, length: int) -> tuple[list[int], bool]:
+        await self.ela.write(ADDR_SEG_SEL, seq % NUM_SEGMENTS)
+        gap = bool(await self.status() & 0x20)
+        samples = [s & 0xFF for s in await self.ela.read_samples(length)]
+        return samples, gap
+
+    async def release(self, session: int, through: int) -> None:
+        await self.ela.write(ADDR_STREAM_RELEASE, ((session & 0xFF) << 24) | (through & 0xFFFFFF))
+        for _ in range(100):
+            if not await self.status() & 0x1:
+                await self.ela.wait_jtag(12)  # the new snapshot reaches JTAG
+                return
+        raise AssertionError("release never acknowledged")
+
+    async def next_windows(self, length: int, timeout: int = 4000):
+        """Read every window completed so far, release them, and return
+        [(seq, samples, gap)]."""
+        out = []
+        for _ in range(timeout):
+            session, done = await self.completed()
+            if done != self.read_seq:
+                break
+            await self.ela.wait_sample(4)
+        else:
+            raise AssertionError(f"no window after seq {self.read_seq}")
+        while self.read_seq != done:
+            samples, gap = await self.read_window(self.read_seq, length)
+            out.append((self.read_seq, samples, gap))
+            self.read_seq += 1
+        await self.release(session, self.read_seq)
+        return out
+
+
+def stream_steps(values: list[int]) -> set[int]:
+    return {(values[i] - values[i - 1]) & 0xFF for i in range(1, len(values))}
+
+
+@cocotb.test()
+async def stream_caps_and_registers(dut):
+    """Segmented builds advertise the ring in COMPARE_CAPS[23]; STREAM_CTRL
+    reads back."""
+    ela = await setup(dut)
+    caps = await ela.read(ADDR_COMPARE_CAPS)
+    assert (caps >> 23) & 1 == (1 if NUM_SEGMENTS > 1 else 0), hex(caps)
+    await ela.write(ADDR_STREAM_CTRL, 0x23)
+    expect = 0x23 if NUM_SEGMENTS > 1 else 0
+    assert await ela.read(ADDR_STREAM_CTRL) == expect
+    if NUM_SEGMENTS > 1:
+        status = await ela.read(ADDR_STREAM_STATUS)
+        assert status & 0x1F == 0, hex(status)
+
+
+@cocotb.test()
+async def stream_raw_blocks_are_gapless(dut):
+    """Raw blocks: concatenated across segment boundaries and ring laps, the
+    windows hold every decimated sample once, in order."""
+    ela = await setup(dut)
+    decim = 63 if DECIM_EN else 0
+    step = decim + 1
+    await ela.write(ADDR_DECIM, decim)
+    host = StreamHost(ela)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await host.start(raw=True)
+    seen = []
+    while len(seen) < 3 * NUM_SEGMENTS:
+        seen.extend(await host.next_windows(STREAM_SEG_DEPTH))
+    counter.cancel()
+    assert [w[0] for w in seen] == list(range(len(seen)))
+    assert not any(w[2] for w in seen), "a window was marked as following a wait"
+    stream = [v for w in seen for v in w[1]]
+    assert stream_steps(stream) == {step & 0xFF}, f"steps {stream_steps(stream)} in {stream}"
+    assert await host.lost() == 0
+    assert not await ela.read(ADDR_STATUS) & 0x4, "the ring must not report done"
+    FUNCTIONAL_COVERAGE.hit("stream_raw")
+
+
+@cocotb.test()
+async def stream_waits_for_release_and_counts_loss(dut):
+    """With every segment unread the ring waits: nothing is overwritten, the
+    lost count grows, and the first window after the wait is marked."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+    host = StreamHost(ela)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await host.start(raw=True)
+    await ela.wait_sample(DEPTH * 4)
+    session, done = await host.completed()
+    assert done == NUM_SEGMENTS, done
+    assert await host.status() & 0x8, "not waiting with every segment full"
+    before = [await host.read_window(seg, STREAM_SEG_DEPTH) for seg in range(NUM_SEGMENTS)]
+    lost0 = await host.lost()
+    await ela.wait_sample(200)
+    after = [await host.read_window(seg, STREAM_SEG_DEPTH) for seg in range(NUM_SEGMENTS)]
+    assert before == after, "an unreleased segment was overwritten"
+    lost1 = await host.lost()
+    assert lost1 > lost0 > 0, (lost0, lost1)
+    first = [v for w in before for v in w[0]]
+    assert stream_steps(first) == {1}, first
+    await host.release(session, 2)
+    assert await host.released() == 2
+    done = 0
+    for _ in range(400):
+        _, done = await host.completed()
+        if done >= NUM_SEGMENTS + 2:
+            break
+        await ela.wait_sample(2)
+    assert done == NUM_SEGMENTS + 2, done
+    windows = [await host.read_window(seq, STREAM_SEG_DEPTH)
+               for seq in (NUM_SEGMENTS, NUM_SEGMENTS + 1)]
+    counter.cancel()
+    assert windows[0][1], "the window after the wait is not marked"
+    assert not windows[1][1], "only the first window after the wait is marked"
+    resumed = windows[0][0] + windows[1][0]
+    assert stream_steps(resumed) == {1}, resumed
+    # It resumed after a gap, not where the last window before the wait ended.
+    assert (resumed[0] - first[-1]) & 0xFF != 1
+    FUNCTIONAL_COVERAGE.hit("stream_ring")
+
+
+@cocotb.test()
+async def stream_release_is_checked(dut):
+    """Releases for another session, or past the completed windows, are
+    refused; a repeat is accepted; ARM starts a new session."""
+    ela = await setup(dut)
+    host = StreamHost(ela)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await host.start(raw=True)
+    await ela.wait_sample(DEPTH * 3)
+    session, done = await host.completed()
+    assert done == NUM_SEGMENTS
+    await host.release((session + 1) & 0xFF, 1)
+    assert await host.released() == 0
+    assert await host.status() & 0x10
+    await host.release(session, done + 1)
+    assert await host.released() == 0
+    await host.release(session, 1)
+    assert await host.released() == 1
+    await host.release(session, 1)
+    assert await host.released() == 1
+    await ela.arm()
+    await ela.wait_jtag(20)
+    new_session, _ = await host.completed()
+    assert new_session == (session + 1) & 0xFF
+    status = await host.status()
+    assert status & 0x40, "STREAM_STATUS[6]: the state shown is from after the arm"
+    assert (status >> 8) & 0xFF == new_session, hex(status)
+    assert await host.released() == 0
+    assert not await host.status() & 0x10, "ARM clears the refused-release flag"
+    counter.cancel()
+
+
+@cocotb.test()
+async def stream_triggered_windows_keep_coming(dut):
+    """Triggered ring: more windows than segments, each with its trigger
+    sample at index PRETRIG."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+    host = StreamHost(ela)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    pre, post = 1, 2
+    await host.start(raw=False, pre=pre, post=post, value=0x00, mask=0x0F)
+    seen = []
+    while len(seen) < 2 * NUM_SEGMENTS + 1:
+        seen.extend(await host.next_windows(pre + post + 1))
+    counter.cancel()
+    assert [w[0] for w in seen] == list(range(len(seen)))
+    for seq, window, _gap in seen:
+        assert window[pre] & 0x0F == 0, f"window {seq} {window}"
+        assert counter_steps(window) == [1] * (pre + post), f"window {seq} {window}"
+    FUNCTIONAL_COVERAGE.hit("stream_ring")
+
+
+@cocotb.test()
+async def stream_off_keeps_segments_terminal(dut):
+    """Without STREAM_CTRL a segmented capture still stops after the last
+    segment, as before."""
+    ela = await setup(dut)
+    await ela.write(ADDR_STREAM_CTRL, 0)
+    await ela.configure_value_capture(pre=0, post=STREAM_SEG_DEPTH - 1, value=0, mask=0)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await ela.arm()
+    assert await ela.wait_done(400) & 0x4
+    counter.cancel()
+    assert await ela.read(ADDR_STREAM_STATUS) & 0x2 == 0
