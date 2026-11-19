@@ -1184,10 +1184,10 @@ The full per-configuration table — Slice LUTs, FFs, BRAM, and the
 
 Against the AMD/Xilinx ILA at the same width, depth and trigger
 features (ILA counted with its `dbg_hub`), the smallest fcapz build
-takes 52-59% of the smallest ILA's LUTs.  With matching trigger
-features fcapz takes 20-30% more LUTs for a basic or dual-comparator
-trigger and about the same for a sequenced one at 8 bits, and it grows
-faster with sample width.
+takes 52-59% of the smallest ILA's LUTs.  Without the sequencer, fcapz
+takes 20-30% more LUTs than the ILA for a simpler trigger.  With the
+sequencer it takes about the same at 8 bits, and it grows faster with
+sample width.
 See [the comparison](specs/architecture.md#against-the-amdxilinx-ila).
 
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables

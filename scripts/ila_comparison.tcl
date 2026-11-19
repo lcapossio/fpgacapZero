@@ -45,17 +45,17 @@ set cases {
         {TRIG_STAGES 1 STOR_QUAL 0 DUAL_COMPARE 0 REL_COMPARE 0 INPUT_PIPE 0
          EXT_TRIG_EN 0 DECIM_EN 0 TIMESTAMP_W 0 NUM_SEGMENTS 1
          SINGLE_CHAIN_BURST 0 BURST_EN 0 USER1_DATA_EN 1}
-        "fcapz minimum: one EQ/NEQ/edge comparator, slow USER1 readout"}
+        "fcapz minimum: one EQ-or-change comparator, slow USER1 readout"}
     {fcapz_basic fcapz
         {TRIG_STAGES 1 STOR_QUAL 0 DUAL_COMPARE 0 REL_COMPARE 1 INPUT_PIPE 0
          EXT_TRIG_EN 0 DECIM_EN 0 TIMESTAMP_W 0 NUM_SEGMENTS 4
          SINGLE_CHAIN_BURST 1}
-        "fcapz like ILA basic: one comparator with relational modes, 4 segments, fast readout"}
+        "fcapz like ILA basic: one comparator, 4 segments, fast readout (TRIG_STAGES=1: EQ or change only)"}
     {fcapz_dual fcapz
         {TRIG_STAGES 1 STOR_QUAL 1 DUAL_COMPARE 1 REL_COMPARE 1 INPUT_PIPE 1
          EXT_TRIG_EN 1 DECIM_EN 0 TIMESTAMP_W 0 NUM_SEGMENTS 4
          SINGLE_CHAIN_BURST 1}
-        "fcapz like ILA dual: 2 comparators, storage qualification, trigger in/out, no sequencer"}
+        "fcapz like ILA dual: storage qualification, trigger in/out, no sequencer (trigger EQ or change only)"}
     {fcapz_adv fcapz
         {TRIG_STAGES 4 STOR_QUAL 1 DUAL_COMPARE 1 REL_COMPARE 1 INPUT_PIPE 1
          EXT_TRIG_EN 1 DECIM_EN 0 TIMESTAMP_W 0 NUM_SEGMENTS 4

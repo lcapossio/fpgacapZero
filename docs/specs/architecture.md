@@ -112,9 +112,9 @@ LUTs / FFs:
 
 | Profile | fcapz 8b x 1024 | ILA + `dbg_hub` 8b x 1024 | fcapz 64b x 4096 | ILA + `dbg_hub` 64b x 4096 |
 |---|---:|---:|---:|---:|
-| fcapz minimum: one EQ/NEQ/edge comparator, slow USER1 readout, one segment | 559 / 785 | — | 715 / 1,019 | — |
-| Basic: one comparator with relational modes, 4 segments, fast readout (ILA: 1 comparator) | 1,365 / 1,929 | 1,078 / 1,775 | 1,460 / 2,188 | 1,218 / 2,050 |
-| Dual: 2 comparators, storage qualification, trigger in/out, input pipe (ILA: 2 comparators, capture control, basic trigger) | 1,438 / 2,130 | 1,172 / 1,920 | 1,715 / 2,647 | 1,341 / 2,363 |
+| fcapz minimum: one EQ-or-change comparator, slow USER1 readout, one segment | 559 / 785 | — | 715 / 1,019 | — |
+| Basic: one comparator, 4 segments, fast readout (ILA: 1 comparator) | 1,365 / 1,929 | 1,078 / 1,775 | 1,460 / 2,188 | 1,218 / 2,050 |
+| Dual: storage qualification, trigger in/out, input pipe (ILA: 2 comparators, capture control, basic trigger) | 1,438 / 2,130 | 1,172 / 1,920 | 1,715 / 2,647 | 1,341 / 2,363 |
 | Sequenced: 4-stage sequencer with 2 comparators per stage (ILA: advanced trigger, 8 comparators) | 2,888 / 3,477 | 2,985 / 4,466 | 4,473 / 5,009 | 3,325 / 5,581 |
 | ILA advanced trigger with 2 comparators | — | 2,773 / 3,902 | — | 2,938 / 4,345 |
 | fcapz sequenced plus decimation and 32-bit timestamps (no ILA equivalent; +1 / +4 BRAM) | 2,932 / 3,652 | — | 4,346 / 5,183 | — |
@@ -124,13 +124,19 @@ What it shows:
 - The smallest fcapz build takes 52-59% of the LUTs of the smallest
   ILA, which always has relational compares and a fast readout.  It is
   the build for a design that has little room left.
-- Feature for feature, fcapz takes 20-30% more LUTs than the ILA for a
-  basic or dual-comparator trigger, about the same for an 8-comparator
-  sequenced trigger at 8 bits, and fewer FFs there.
+- The basic and dual fcapz builds take 20-30% more LUTs than the ILA
+  and do less: without the sequencer (`TRIG_STAGES=1`) the fcapz
+  trigger compares only for equal or changed, while every ILA match
+  unit also has the relational modes.  Most of the extra area is the
+  segment and streaming logic and the 256-bit burst readout, not the
+  comparator.
+- With the sequencer, fcapz takes about the same LUTs as the ILA at 8
+  bits, and fewer FFs.
 - fcapz grows faster with sample width: each comparator keeps its
   value and mask in flip-flops and compares in LUTs, where the ILA loads
   SRL-based match units.  The 64-bit sequenced build is 35% larger in
-  LUTs than the ILA's.
+  LUTs than the ILA's, although its stage comparators match only the
+  low 32 bits of the sample, and the ILA's match all 64.
 - `dbg_hub` is paid once per design and shared by every ILA and VIO.
   The fcapz equivalent is inside each wrapper, or shared by every core
   behind one core manager (`fcapz_debug_multi`).
