@@ -20,6 +20,13 @@ from .discovery import discover_cores
 from .axi_decode import FAULT_FLAGS, decode_axi, looks_like_axi
 from .axi_layout import PROBE_MAPS, axi_probes
 from .axi_layout import sample_width as axi_sample_width
+from .capture_profile import (
+    capture_profile_from_config,
+    is_profile_path,
+    normalize_capture_profile,
+    read_capture_profile_file,
+    write_capture_profile_file,
+)
 from .eio import EioController
 from .ejtagaxi import EjtagAxiController
 from .ejtaguart import EjtagUartController
@@ -498,7 +505,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    for parser in [cfg, cap, stream]:
+    cprof = sub.add_parser(
+        "capture-profile",
+        help="Save, list, show or delete capture profiles (no board needed)",
+        description=(
+            "A capture profile holds every capture setting (trigger, sequencer, "
+            "pre/post-trigger, storage qualification, decimation, probes, ...). "
+            "NAME|FILE is a profile name in gui.toml [capture_profiles.NAME], or "
+            "a JSON file if it ends in .json or contains a path separator. Use "
+            "one with --capture-profile on configure, capture and stream."
+        ),
+    )
+    cprof_sub = cprof.add_subparsers(dest="profile_cmd", required=True)
+    cprof_save = cprof_sub.add_parser(
+        "save",
+        help="Save the capture options given here as a profile",
+        description=(
+            "Save the capture options on this command line (the same options as "
+            "`capture`) as a profile. With --capture-profile, start from that "
+            "profile and change only the options given."
+        ),
+    )
+    cprof_save.add_argument("ref", metavar="NAME|FILE", help="Profile name or .json file")
+    cprof_sub.add_parser("list", help="List the profiles in gui.toml")
+    cprof_show = cprof_sub.add_parser("show", help="Print a profile as JSON")
+    cprof_show.add_argument("ref", metavar="NAME|FILE", help="Profile name or .json file")
+    cprof_del = cprof_sub.add_parser("delete", help="Delete a profile from gui.toml")
+    cprof_del.add_argument("ref", metavar="NAME", help="Profile name")
+    # Parsers that take the capture options, by command (see _apply_capture_profile).
+    p.set_defaults(_capture_parsers={
+        "configure": cfg, "capture": cap, "stream": stream, "capture-profile": cprof_save,
+    })
+
+    for parser in [cfg, cap, stream, cprof_save]:
         parser.add_argument(
             "--pretrigger", type=int, default=8, metavar="N",
             help="Samples to keep before the trigger",
@@ -658,6 +697,16 @@ def build_parser() -> argparse.ArgumentParser:
             default=None,
             metavar="NAME",
             help="Use named probe list from gui.toml section [probe_profiles.NAME]",
+        )
+        parser.add_argument(
+            "--capture-profile",
+            default=None,
+            metavar="NAME|FILE",
+            help=(
+                "Start from a saved capture profile (gui.toml "
+                "[capture_profiles.NAME] or a .json file); options given on the "
+                "command line override it"
+            ),
         )
 
     cap.add_argument(
@@ -1109,8 +1158,140 @@ def _run_openocd_bridge(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def _gui_config_path(args: argparse.Namespace) -> Path:
+    from .gui.settings import default_gui_config_path
+
+    return args.gui_config if args.gui_config is not None else default_gui_config_path()
+
+
+def _read_capture_profile_ref(ref: str, args: argparse.Namespace) -> dict:
+    """Load the profile a ``NAME|FILE`` reference names (raises ValueError)."""
+    if is_profile_path(ref):
+        try:
+            return read_capture_profile_file(ref)
+        except OSError as exc:
+            raise ValueError(f"cannot read capture profile {ref}: {exc}") from None
+    from .gui.settings import load_gui_settings
+
+    gpath = _gui_config_path(args)
+    profiles = load_gui_settings(gpath).capture_profiles
+    if ref not in profiles:
+        known = ", ".join(sorted(profiles)) or "(none)"
+        raise ValueError(f"unknown capture profile {ref!r} in {gpath} (known: {known})")
+    return profiles[ref]
+
+
+def _apply_capture_profile(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str]
+) -> argparse.Namespace:
+    """Re-parse *argv* with the ``--capture-profile`` values as defaults.
+
+    Options given on the command line keep their values.  The profile's probes
+    are not used when --probes, --probe-file or --profile is given, nor its
+    sample clock with --probe-file (the probe file brings its own).
+    """
+    profile = _read_capture_profile_ref(args.capture_profile, args)
+    skip = ("probes", "sample_clock_hz", "trigger_sequence", "trigger_value_radix")
+    defaults = {key: value for key, value in profile.items() if key not in skip}
+    defaults["trigger_sequence"] = (
+        json.dumps(profile["trigger_sequence"]) if profile["trigger_sequence"] else None
+    )
+    if args.probe_file is None:
+        defaults["sample_clock_hz"] = profile["sample_clock_hz"]
+        if args.probes is None and args.profile is None and profile["probes"]:
+            defaults["probes"] = profile["probes"]
+    args._capture_parsers[args.cmd].set_defaults(**defaults)
+    return parser.parse_args(argv)
+
+
+def _apply_named_probe_profile(args: argparse.Namespace) -> str | None:
+    """``--profile NAME``: fill --probes from gui.toml; returns an error."""
+    profile_name = getattr(args, "profile", None)
+    if not profile_name:
+        return None
+    from .gui.settings import apply_probe_profile, load_gui_settings
+
+    return apply_probe_profile(
+        args,
+        profile_name=profile_name,
+        settings=load_gui_settings(_gui_config_path(args)),
+    )
+
+
+def _run_capture_profile(args: argparse.Namespace) -> int:
+    """``fcapz capture-profile save|list|show|delete`` (offline)."""
+    from .gui.settings import load_gui_settings, save_gui_settings
+
+    gpath = _gui_config_path(args)
+    if args.profile_cmd == "list":
+        profiles = load_gui_settings(gpath).capture_profiles
+        if not profiles:
+            print(f"no capture profiles in {gpath}")
+            return 0
+        for name in sorted(profiles):
+            prof = profiles[name]
+            stages = len(prof["trigger_sequence"])
+            print(
+                f"{name}\t{prof['trigger_mode']} value=0x{prof['trigger_value']:X} "
+                f"mask=0x{prof['trigger_mask']:X} pre={prof['pretrigger']} "
+                f"post={prof['posttrigger']}"
+                + (f" stages={stages}" if stages else "")
+            )
+        return 0
+    if args.profile_cmd == "show":
+        print(json.dumps(_read_capture_profile_ref(args.ref, args), indent=2))
+        return 0
+    if args.profile_cmd == "delete":
+        if is_profile_path(args.ref):
+            raise ValueError("delete takes a profile name, not a file")
+        gui = load_gui_settings(gpath)
+        if gui.capture_profiles.pop(args.ref, None) is None:
+            known = ", ".join(sorted(gui.capture_profiles)) or "(none)"
+            raise ValueError(f"unknown capture profile {args.ref!r} (known: {known})")
+        save_gui_settings(gui, gpath)
+        print(f"deleted capture profile {args.ref!r} from {gpath}")
+        return 0
+
+    # save
+    err = _apply_named_probe_profile(args)
+    if err:
+        raise ValueError(err)
+    try:
+        cfg = _build_config(args)
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError(str(exc)) from None
+    profile = normalize_capture_profile(capture_profile_from_config(cfg))
+    if is_profile_path(args.ref):
+        try:
+            write_capture_profile_file(args.ref, profile, name=Path(args.ref).stem)
+        except OSError as exc:
+            raise ValueError(f"cannot write capture profile {args.ref}: {exc}") from None
+        print(f"saved capture profile -> {args.ref}")
+        return 0
+    gui = load_gui_settings(gpath)
+    gui.capture_profiles[args.ref] = profile
+    save_gui_settings(gui, gpath)
+    print(f"saved capture profile {args.ref!r} -> {gpath}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "capture_profile", None):
+        try:
+            args = _apply_capture_profile(parser, args, argv)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.cmd == "capture-profile":
+        try:
+            return _run_capture_profile(args)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.cmd == "axi-decode":
         # Offline: no transport, no board.
         return _run_axi_decode(args)
@@ -1321,27 +1502,10 @@ def main() -> int:
             return 0
 
         if args.cmd in ("configure", "capture", "stream"):
-            profile_name = getattr(args, "profile", None)
-            if profile_name:
-                from .gui.settings import (
-                    apply_probe_profile,
-                    default_gui_config_path,
-                    load_gui_settings,
-                )
-
-                gpath = (
-                    args.gui_config
-                    if args.gui_config is not None
-                    else default_gui_config_path()
-                )
-                err = apply_probe_profile(
-                    args,
-                    profile_name=profile_name,
-                    settings=load_gui_settings(gpath),
-                )
-                if err:
-                    print(f"error: {err}", file=sys.stderr)
-                    return 2
+            err = _apply_named_probe_profile(args)
+            if err:
+                print(f"error: {err}", file=sys.stderr)
+                return 2
 
         if args.depth is None or args.sample_width is None:
             # Default to the selected core's real geometry rather than guessing.

@@ -570,3 +570,69 @@ def test_eio_poll_skips_a_tick_while_a_capture_holds_the_transport(qtbot: Any) -
     assert panel._poll_timer.isActive()
     assert panel._poll_enable.isChecked()
     panel._poll_timer.stop()
+
+
+@pytest.mark.gui
+def test_capture_profiles_save_restore_delete(qtbot: Any, tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from fcapz.gui.settings import load_gui_settings
+
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        ex.enter_context(
+            patch("fcapz.gui.app_window.default_gui_config_path", return_value=gui_path),
+        )
+        ex.enter_context(
+            patch("fcapz.gui.capture_panel.QInputDialog.getText", return_value=("fast", True)),
+        )
+        ex.enter_context(
+            patch(
+                "fcapz.gui.capture_panel.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+        )
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        cap = w._capture
+        cap.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        cap.apply_trigger_history_entry(
+            {"pretrigger": 3, "posttrigger": 9, "trigger_mode": "edge_detect",
+             "trigger_value": 5, "trigger_mask": 15, "trigger_holdoff": 7,
+             "probes": "a:2:0"},
+        )
+
+        qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        saved = load_gui_settings(gui_path).capture_profiles
+        assert list(saved) == ["fast"]
+        assert saved["fast"]["posttrigger"] == 9
+        assert saved["fast"]["trigger_holdoff"] == 7
+        assert saved["fast"]["probes"] == "a:2:0"
+        assert cap.selected_capture_profile() == "fast"
+
+        # Change the form, then pick the profile again: the form comes back.
+        cap.apply_trigger_history_entry(
+            {"pretrigger": 1, "posttrigger": 2, "trigger_holdoff": 0, "probes": ""},
+        )
+        cap.set_capture_profiles(load_gui_settings(gui_path).capture_profiles)
+        combo = cap._cap_profile_pick
+        combo.setCurrentIndex(combo.findData("fast"))
+        cfg = cap.build_capture_config()
+        assert (cfg.pretrigger, cfg.posttrigger, cfg.trigger_holdoff) == (3, 9, 7)
+        assert cfg.trigger.mode == "edge_detect"
+        assert [p.name for p in cfg.probes] == ["a"]
+
+        qtbot.mouseClick(_button_with_text(w, "Delete"), Qt.MouseButton.LeftButton)
+        assert load_gui_settings(gui_path).capture_profiles == {}
+        assert cap.selected_capture_profile() is None
+
+
+@pytest.mark.gui
+def test_settings_dialog_keeps_capture_profiles(qtbot: Any) -> None:
+    from fcapz.capture_profile import normalize_capture_profile
+    from fcapz.gui.settings_dialog import SettingsDialog
+
+    prof = normalize_capture_profile({"posttrigger": 3})
+    dlg = SettingsDialog(GuiSettings(capture_profiles={"p": prof}))
+    qtbot.addWidget(dlg)
+    assert dlg.merged_settings().capture_profiles == {"p": prof}

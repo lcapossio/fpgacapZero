@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -12,7 +13,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..analyzer import CaptureConfig
+from ..capture_profile import capture_profile_from_config, normalize_capture_profile
 from ..transport import OpenOcdTransport
+
+_log = logging.getLogger(__name__)
 
 _TRIGGER_HISTORY_MAX = 10
 
@@ -128,6 +132,8 @@ class GuiSettings:
     ui: UiSettings = field(default_factory=UiSettings)
     probe_profiles: dict[str, ProbeProfile] = field(default_factory=dict)
     trigger_history: list[dict[str, Any]] = field(default_factory=list)
+    #: Named full capture setups (see :mod:`fcapz.capture_profile`).
+    capture_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _loads_toml(raw: str) -> dict[str, Any]:
@@ -254,6 +260,15 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
             if probes:
                 profiles[str(name)] = ProbeProfile(name=str(name), probes=probes)
 
+    capture_profiles: dict[str, dict[str, Any]] = {}
+    craw = data.get("capture_profiles")
+    if isinstance(craw, dict):
+        for name, body in craw.items():
+            try:
+                capture_profiles[str(name)] = normalize_capture_profile(body)
+            except ValueError as exc:
+                _log.warning("gui.toml: skipping capture profile %r: %s", name, exc)
+
     hist = data.get("trigger_history")
     trigger_history: list[dict[str, Any]] = []
     if isinstance(hist, list):
@@ -280,6 +295,7 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         ui=ui,
         probe_profiles=profiles,
         trigger_history=trigger_history[:_TRIGGER_HISTORY_MAX],
+        capture_profiles=capture_profiles,
     )
 
 
@@ -321,6 +337,9 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
         },
         "probe_profiles": probe_blob,
         "trigger_history": list(settings.trigger_history),
+        "capture_profiles": {
+            name: dict(body) for name, body in settings.capture_profiles.items()
+        },
     }
 
 
@@ -350,49 +369,14 @@ def trigger_history_entry_from_config(
     *,
     trigger_value_radix: int | None = None,
 ) -> dict[str, Any]:
-    """Serialize capture/trigger fields for ``trigger_history`` in ``gui.toml``."""
-    ext = {0: "disabled", 1: "or", 2: "and"}.get(int(cfg.ext_trigger_mode), "disabled")
-    probes = (
-        ",".join(f"{p.name}:{p.width}:{p.lsb}" for p in cfg.probes) if cfg.probes else ""
-    )
-    out: dict[str, Any] = {
-        "pretrigger": int(cfg.pretrigger),
-        "posttrigger": int(cfg.posttrigger),
-        "trigger_mode": str(cfg.trigger.mode),
-        "trigger_value": int(cfg.trigger.value),
-        "trigger_mask": int(cfg.trigger.mask),
-        "sample_clock_hz": int(cfg.sample_clock_hz),
-        "channel": int(cfg.channel),
-        "decimation": int(cfg.decimation),
-        "probe_sel": int(cfg.probe_sel),
-        "ext_trigger_mode": ext,
-        "stor_qual_mode": int(cfg.stor_qual_mode),
-        "stor_qual_value": int(cfg.stor_qual_value),
-        "stor_qual_mask": int(cfg.stor_qual_mask),
-        "trigger_holdoff": int(cfg.trigger_holdoff),
-        "trigger_delay": int(cfg.trigger_delay),
-        "rle": bool(cfg.rle),
-        "post_clocks": int(cfg.post_clocks),
-        "probes": probes,
-        "trigger_sequence": [
-            {
-                "cmp_a": int(s.cmp_mode_a),
-                "cmp_b": int(s.cmp_mode_b),
-                "combine": int(s.combine),
-                "next_state": int(s.next_state),
-                "is_final": bool(s.is_final),
-                "count": int(s.count_target),
-                "value_a": int(s.value_a),
-                "mask_a": int(s.mask_a),
-                "value_b": int(s.value_b),
-                "mask_b": int(s.mask_b),
-            }
-            for s in (cfg.sequence or [])
-        ],
-    }
-    if trigger_value_radix is not None and trigger_value_radix in (2, 8, 10, 16):
-        out["trigger_value_radix"] = int(trigger_value_radix)
-    return out
+    """Serialize capture/trigger fields for ``trigger_history`` in ``gui.toml``.
+
+    A capture profile without ``startup_arm``: replaying a history entry
+    should not leave the core armed after every reset.
+    """
+    entry = capture_profile_from_config(cfg, trigger_value_radix=trigger_value_radix)
+    del entry["startup_arm"]
+    return entry
 
 
 def append_trigger_history(settings: GuiSettings, entry: Mapping[str, Any]) -> None:

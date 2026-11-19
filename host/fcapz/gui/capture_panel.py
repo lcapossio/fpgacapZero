@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -125,6 +126,10 @@ class CapturePanel(QGroupBox):
     """ELA capture parameters including optional hardware trigger sequencer stages."""
 
     ela_core_changed = Signal(int)
+    #: Save the current form as the named capture profile.
+    capture_profile_save_requested = Signal(str)
+    #: Delete the named capture profile.
+    capture_profile_delete_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("ELA capture", parent)
@@ -164,6 +169,23 @@ class CapturePanel(QGroupBox):
         self._preset = QComboBox()
         self._preset.addItem("— Trigger preset (from history) —", None)
         self._preset.currentIndexChanged.connect(self._on_preset_picked)
+
+        self._capture_profiles: dict[str, dict[str, Any]] = {}
+        self._cap_profile_pick = QComboBox()
+        self._cap_profile_pick.addItem("— Capture profile —", None)
+        self._cap_profile_pick.setToolTip(
+            "Saved capture setups (gui.toml [capture_profiles]): trigger, "
+            "sequencer, pre/post-trigger, advanced options and probes. "
+            "Shared with `fcapz --capture-profile NAME`."
+        )
+        self._cap_profile_pick.currentIndexChanged.connect(self._on_cap_profile_picked)
+        self._btn_cap_profile_save = QPushButton("Save…")
+        self._btn_cap_profile_save.setToolTip("Save the current capture settings as a profile")
+        self._btn_cap_profile_save.clicked.connect(self._on_cap_profile_save_clicked)
+        self._btn_cap_profile_delete = QPushButton("Delete")
+        self._btn_cap_profile_delete.setToolTip("Delete the selected capture profile")
+        self._btn_cap_profile_delete.setEnabled(False)
+        self._btn_cap_profile_delete.clicked.connect(self._on_cap_profile_delete_clicked)
 
         self._pre = QSpinBox()
         self._pre.setRange(0, 1_000_000)
@@ -352,6 +374,11 @@ class CapturePanel(QGroupBox):
         form_main.addRow("ELA core", self._ela_core)
         form_main.addRow("Probe profile", self._profile_pick)
         form_main.addRow("Trigger preset", self._preset)
+        row_cap_profile = QHBoxLayout()
+        row_cap_profile.addWidget(self._cap_profile_pick, 1)
+        row_cap_profile.addWidget(self._btn_cap_profile_save)
+        row_cap_profile.addWidget(self._btn_cap_profile_delete)
+        form_main.addRow("Capture profile", row_cap_profile)
         form_main.addRow("Pre-trigger samples", row_pre)
         form_main.addRow("Post-trigger samples", row_post)
         form_main.addRow("Trigger mode", self._trig_mode)
@@ -621,6 +648,30 @@ class CapturePanel(QGroupBox):
             for name in sorted(self._profiles):
                 self._profile_pick.addItem(name, name)
             self._profile_pick.setCurrentIndex(0)
+
+    def set_capture_profiles(
+        self, profiles: Mapping[str, Mapping[str, Any]], *, select: str | None = None
+    ) -> None:
+        """List the saved capture profiles; *select* one without applying it."""
+        self._capture_profiles = {name: dict(body) for name, body in profiles.items()}
+        with QSignalBlocker(self._cap_profile_pick):
+            self._cap_profile_pick.clear()
+            self._cap_profile_pick.addItem("— Capture profile —", None)
+            for name in sorted(self._capture_profiles):
+                self._cap_profile_pick.addItem(name, name)
+            idx = self._cap_profile_pick.findData(select) if select else 0
+            self._cap_profile_pick.setCurrentIndex(max(idx, 0))
+        self._btn_cap_profile_delete.setEnabled(self.selected_capture_profile() is not None)
+
+    def selected_capture_profile(self) -> str | None:
+        name = self._cap_profile_pick.currentData()
+        return None if name is None else str(name)
+
+    def apply_capture_profile(self, name: str) -> None:
+        """Fill the form from the named saved profile."""
+        body = self._capture_profiles.get(name)
+        if body is not None:
+            self.apply_trigger_history_entry(body)
 
     def set_trigger_history(self, entries: list[dict[str, Any]]) -> None:
         with QSignalBlocker(self._preset):
@@ -903,6 +954,42 @@ class CapturePanel(QGroupBox):
         prof = self._profiles.get(str(name))
         if prof is not None:
             self._probes.setText(prof.probes)
+
+    def _on_cap_profile_picked(self, _idx: int) -> None:
+        name = self.selected_capture_profile()
+        self._btn_cap_profile_delete.setEnabled(name is not None)
+        if name is not None:
+            self.apply_capture_profile(name)
+
+    def _on_cap_profile_save_clicked(self) -> None:
+        name, ok = QInputDialog.getText(
+            self,
+            "Save capture profile",
+            "Profile name:",
+            text=self.selected_capture_profile() or "",
+        )
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name in self._capture_profiles:
+            answer = QMessageBox.question(
+                self,
+                "Save capture profile",
+                f"Replace the capture profile {name!r}?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.capture_profile_save_requested.emit(name)
+
+    def _on_cap_profile_delete_clicked(self) -> None:
+        name = self.selected_capture_profile()
+        if name is None:
+            return
+        answer = QMessageBox.question(
+            self, "Delete capture profile", f"Delete the capture profile {name!r}?"
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.capture_profile_delete_requested.emit(name)
 
     def _on_preset_picked(self, _idx: int) -> None:
         data = self._preset.currentData()
