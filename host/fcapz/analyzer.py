@@ -205,6 +205,9 @@ _STATUS_ARMED = 1 << 0
 _STATUS_TRIGGERED = 1 << 1
 _STATUS_DONE = 1 << 2
 _STATUS_OVERFLOW = 1 << 3
+# The last CTRL ARM / RESET has not reached the sample clock yet (reads 0 on
+# cores without it).  The next ARM or RESET waits for it to clear.
+_STATUS_CMD_BUSY = 1 << 4
 # Capture FSM is "busy" (i.e. not idle) if any of armed/triggered/done is set.
 _STATUS_BUSY = _STATUS_ARMED | _STATUS_TRIGGERED | _STATUS_DONE
 
@@ -215,6 +218,11 @@ _CTRL_RESET = 1 << 1
 # reveals itself within a couple of sample clocks of reset deassert, so a short
 # bounded wait suffices before spending another reset.
 _FORCE_IDLE_SETTLE_S = 0.05
+
+# How long an ARM / RESET waits for the previous one to reach the sample
+# clock (STATUS[4]).  It goes ahead after that: a stopped sample clock never
+# takes it, and the write then behaves as on a core without the bit.
+_CTRL_CMD_SETTLE_S = 0.2
 
 _TRIG_VALUE_MATCH = 1 << 0
 _TRIG_EDGE_DETECT = 1 << 1
@@ -763,6 +771,28 @@ class Analyzer:
                 return
         self.transport.close()
 
+    def _wait_ctrl_cmd_idle(self) -> None:
+        """Wait until the core has taken the last CTRL ARM / RESET.
+
+        The core snapshots the settings on each ARM / RESET write, and the
+        sample side reads that snapshot when the command reaches it; a second
+        ARM / RESET before then would replace settings the first still needs
+        (STATUS[4] is set meanwhile).  Gives up after ``_CTRL_CMD_SETTLE_S``,
+        as with a stopped sample clock, and lets the write go ahead.
+        """
+        deadline = None
+        while self.transport.read_reg(_ADDR_STATUS) & _STATUS_CMD_BUSY:
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now + _CTRL_CMD_SETTLE_S
+            elif now >= deadline:
+                _log.debug(
+                    "previous ARM/RESET still in flight after %.1f s "
+                    "(sample clock stopped?); writing anyway",
+                    _CTRL_CMD_SETTLE_S,
+                )
+                return
+
     @_selected_transaction
     def reset(self) -> None:
         """Soft-reset the ELA capture state (CTRL reset bit).
@@ -773,6 +803,7 @@ class Analyzer:
         """
         self._armed_gen = None
         state = self._slot_state()
+        self._wait_ctrl_cmd_idle()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
         if state is not None:
             after = self._slot_state()
@@ -852,6 +883,7 @@ class Analyzer:
         for attempt in range(max(1, max_resets)):
             with self._selected():
                 self._armed_gen = None
+                self._wait_ctrl_cmd_idle()
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
             # so cap each attempt's wait and fall through to another reset.
@@ -1169,6 +1201,7 @@ class Analyzer:
         state = self._check_configured_state("at arm")
         self._armed_gen = None
         before = self._capture_gen()
+        self._wait_ctrl_cmd_idle()
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
         # Read before the slot check, so it covers this read too.
         after = None if before is None else self._capture_gen()

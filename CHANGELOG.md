@@ -136,8 +136,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   shift register, and the arm latch reads the trigger, qualification and
   sequencer settings straight from the ARM snapshot. On Artix-7 a 4-stage
   sequenced ELA takes about 830 fewer LUTs, and 300 (8-bit) to 740 (64-bit)
-  fewer FFs; other builds lose about 25 LUTs and 65-180 FFs. Behavior and
-  the register map are unchanged.
+  fewer FFs; other builds lose about 25 LUTs and 65-180 FFs. Since the
+  latch reads the snapshot, a new `STATUS[4]` is set while an ARM or RESET
+  write is still crossing to the sample clock, and the host waits for it
+  to clear before the next ARM or RESET (up to 0.2 s, then writes anyway).
+  Before, two such writes close together could arm with a mix of their
+  settings. Verilog and VHDL.
 
 - **FTDI: a failed USB transfer closes the channel for every transport on
   it.** Each refuses I/O until it connects again, which opens the channel

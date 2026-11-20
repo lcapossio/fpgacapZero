@@ -897,6 +897,60 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(imm2.trigger.mask, 0)
         self.assertEqual(imm2.pretrigger, 0)
 
+    def test_arm_and_reset_wait_for_the_previous_command(self):
+        """STATUS[4] (ARM / RESET in flight) holds the next ARM or RESET
+        write until it clears."""
+
+        class BusyTransport(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.busy_reads = 0
+                self.events: list[str] = []
+
+            def read_reg(self, addr):
+                value = super().read_reg(addr)
+                if addr == 0x0008:
+                    if self.busy_reads:
+                        self.busy_reads -= 1
+                        value |= 0x10
+                    self.events.append(f"status:{value >> 4 & 1}")
+                return value
+
+            def write_reg(self, addr, value):
+                if addr == 0x0004:
+                    self.events.append(f"ctrl:{value}")
+                super().write_reg(addr, value)
+
+        t = BusyTransport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        for action, ctrl in ((analyzer.reset, 2), (analyzer.arm, 1)):
+            t.busy_reads = 2
+            t.events.clear()
+            action()
+            ctrl_at = t.events.index(f"ctrl:{ctrl}")
+            self.assertEqual(
+                t.events[ctrl_at - 3:ctrl_at], ["status:1", "status:1", "status:0"]
+            )
+
+    def test_ctrl_command_wait_gives_up_on_a_stopped_sample_clock(self):
+        t = FakeTransport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        t.regs[0x0008] = 0x10
+        writes = []
+        real_write = t.write_reg
+
+        def record(addr, value):
+            writes.append((addr, value))
+            real_write(addr, value)
+
+        t.write_reg = record
+        with mock.patch("fcapz.analyzer._CTRL_CMD_SETTLE_S", 0.0):
+            analyzer.reset()
+        self.assertIn((0x0004, 2), writes)
+
     def test_status_reports_capture_bits(self):
         # A cheap poll (no sample transfer) so a client can tell "waiting for
         # trigger" from "reading back".
