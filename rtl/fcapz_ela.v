@@ -417,12 +417,14 @@ module fcapz_ela #(
     reg reset_toggle_sync1, reset_toggle_sync2, reset_toggle_sync3, reset_toggle_sync4;
 
     // Settings snapshot on ARM / RESET (*_hold, jtag_clk) and its sample_clk
-    // copy (*_stage), narrowed to the bits used on the sample side.
+    // copy (*_stage), narrowed to the bits used on the sample side.  The
+    // wide trigger, qualification and sequencer settings have no *_stage:
+    // only the arm latch reads them, straight from *_hold (see cdc_cfg).
     reg [LEN_W-1:0]    pretrig_len_hold,  pretrig_len_stage;
     reg [LEN_W-1:0]    posttrig_len_hold, posttrig_len_stage;
     reg [1:0]          trig_mode_hold,    trig_mode_stage;
-    reg [SAMPLE_W-1:0] trig_value_hold,   trig_value_stage;
-    reg [SAMPLE_W-1:0] trig_mask_hold,    trig_mask_stage;
+    reg [SAMPLE_W-1:0] trig_value_hold;
+    reg [SAMPLE_W-1:0] trig_mask_hold;
     reg [7:0]          chan_sel_hold,     chan_sel_stage;
     reg [7:0]          probe_sel_hold,   probe_sel_stage;
     reg [23:0]         decim_hold,       decim_stage;
@@ -436,18 +438,13 @@ module fcapz_ela #(
     // SQ_MODE 0 turns qualification off; 1..9 select compare mode 0..8
     // (EQ..CHANGED).  Other values turn it off too.
     wire sq_mode_on = HAS_STOR_QUAL && (sq_mode_stage != 4'd0) && (sq_mode_stage <= 4'd9);
-    reg [SAMPLE_W-1:0] sq_value_hold, sq_value_stage;
-    reg [SAMPLE_W-1:0] sq_mask_hold, sq_mask_stage;
+    reg [SAMPLE_W-1:0] sq_value_hold;
+    reg [SAMPLE_W-1:0] sq_mask_hold;
     reg [31:0]         seq_cfg_hold     [0:TRIG_STAGES-1];
-    reg [31:0]         seq_cfg_stage     [0:TRIG_STAGES-1];
     reg [SAMPLE_W-1:0] seq_value_a_hold [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_a_stage [0:TRIG_STAGES-1];
     reg [SAMPLE_W-1:0] seq_mask_a_hold  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_a_stage  [0:TRIG_STAGES-1];
     reg [SAMPLE_W-1:0] seq_value_b_hold [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_value_b_stage [0:TRIG_STAGES-1];
     reg [SAMPLE_W-1:0] seq_mask_b_hold  [0:TRIG_STAGES-1];
-    reg [SAMPLE_W-1:0] seq_mask_b_stage  [0:TRIG_STAGES-1];
 
     // ---- Channel mux (sample_clk domain) -----------------------------------
     reg [7:0] chan_sel;   // active channel, latched on arm
@@ -1441,14 +1438,17 @@ module fcapz_ela #(
         end
     end
 
+    // The wide settings (trigger, qualification and sequencer values, masks
+    // and stage configs) skip *_stage: only the arm latch reads them, on the
+    // arm pulse one clock after cfg_stage_en, and *_hold has not changed
+    // since the CTRL write that sent the arm toggle, so the latch takes them
+    // straight from *_hold.  A startup arm (no CTRL write) reads the reset
+    // values, like *_stage held.
     always @(posedge sample_clk or posedge sample_rst) begin : cdc_cfg
-        integer si;  // block-local: a shared one gets a driver per block
         if (sample_rst) begin
             pretrig_len_stage  <= 0;
             posttrig_len_stage <= 0;
             trig_mode_stage    <= 0;
-            trig_value_stage   <= 0;
-            trig_mask_stage    <= 0;
             chan_sel_stage     <= 0;
             probe_sel_stage   <= 0;
             decim_stage       <= 0;
@@ -1459,21 +1459,10 @@ module fcapz_ela #(
             rle_en_stage      <= 0;
             rle_post_clks_stage <= 0;
             sq_mode_stage     <= 0;
-            sq_value_stage    <= 0;
-            sq_mask_stage     <= 0;
-            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_cfg_stage[si]     <= 32'h0;
-                seq_value_a_stage[si] <= {SAMPLE_W{1'b0}};
-                seq_mask_a_stage[si]  <= {SAMPLE_W{1'b0}};
-                seq_value_b_stage[si] <= {SAMPLE_W{1'b0}};
-                seq_mask_b_stage[si]  <= {SAMPLE_W{1'b0}};
-            end
         end else if (cfg_stage_en) begin
             pretrig_len_stage <= pretrig_len_hold;
             posttrig_len_stage <= posttrig_len_hold;
             trig_mode_stage <= trig_mode_hold;
-            trig_value_stage <= trig_value_hold;
-            trig_mask_stage <= trig_mask_hold;
             chan_sel_stage <= chan_sel_hold;
             probe_sel_stage <= probe_sel_hold;
             decim_stage <= decim_hold;
@@ -1484,15 +1473,6 @@ module fcapz_ela #(
             rle_en_stage <= rle_en_hold;
             rle_post_clks_stage <= rle_post_clks_hold;
             sq_mode_stage <= sq_mode_hold;
-            sq_value_stage <= sq_value_hold;
-            sq_mask_stage <= sq_mask_hold;
-            for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_cfg_stage[si] <= seq_cfg_hold[si];
-                seq_value_a_stage[si] <= seq_value_a_hold[si];
-                seq_mask_a_stage[si] <= seq_mask_a_hold[si];
-                seq_value_b_stage[si] <= seq_value_b_hold[si];
-                seq_mask_b_stage[si] <= seq_mask_b_hold[si];
-            end
         end
     end
 
@@ -1654,22 +1634,22 @@ module fcapz_ela #(
         end else if (any_arm_pulse) begin
             pretrig_len      <= pretrig_len_stage;
             posttrig_len     <= posttrig_len_stage;
-            trig_value       <= trig_value_stage;
-            trig_mask        <= trig_mask_stage;
+            trig_value       <= trig_value_hold;
+            trig_mask        <= trig_mask_hold;
             // Stage-0 compare modes
-            if (HAS_SEQUENCER && seq_cfg_stage[0][9:0] != 10'd0) begin
-                trig_cmp_mode_a <= seq_cfg_stage[0][3:0];
-                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_stage[0][7:4] : 4'd0;
-                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_stage[0][9:8] : 2'd0;
+            if (HAS_SEQUENCER && seq_cfg_hold[0][9:0] != 10'd0) begin
+                trig_cmp_mode_a <= seq_cfg_hold[0][3:0];
+                trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_hold[0][7:4] : 4'd0;
+                trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_hold[0][9:8] : 2'd0;
             end else begin
                 trig_cmp_mode_a <= trig_mode_stage[1] ? 4'd8 : 4'd0;
                 trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 4'd8 : 4'd0;
                 trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 2'd3 : 2'd0;
             end
             trig_value_b     <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_value_b_stage[0] : {SAMPLE_W{1'b0}};
+                                 ? seq_value_b_hold[0] : {SAMPLE_W{1'b0}};
             trig_mask_b      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_mask_b_stage[0] : {SAMPLE_W{1'b1}};
+                                 ? seq_mask_b_hold[0] : {SAMPLE_W{1'b1}};
             // Channel select (clamped to valid range)
             chan_sel         <= chan_sel_next;
             // Probe mux select (clamped when enabled)
@@ -1677,8 +1657,8 @@ module fcapz_ela #(
             // Storage qualification
             sq_enable        <= sq_mode_on;
             sq_cmp_mode      <= sq_mode_on ? sq_mode_stage - 4'd1 : 4'h0;
-            sq_value         <= HAS_STOR_QUAL ? sq_value_stage : {SAMPLE_W{1'b0}};
-            sq_mask          <= HAS_STOR_QUAL ? sq_mask_stage : {SAMPLE_W{1'b0}};
+            sq_value         <= HAS_STOR_QUAL ? sq_value_hold : {SAMPLE_W{1'b0}};
+            sq_mask          <= HAS_STOR_QUAL ? sq_mask_hold : {SAMPLE_W{1'b0}};
             rle_active       <= rle_active_next;
             rle_post_clks    <= rle_post_clks_stage;
             post_clk_en      <= rle_active_next && (rle_post_clks_stage != {POST_CLK_W{1'b0}});
@@ -1691,22 +1671,22 @@ module fcapz_ela #(
             trig_delay       <= trig_delay_stage;
             // Sequencer stages
             for (si = 0; si < TRIG_STAGES; si = si + 1) begin
-                seq_mode_a[si]       <= HAS_SEQUENCER ? seq_cfg_stage[si][3:0] : 4'd0;
+                seq_mode_a[si]       <= HAS_SEQUENCER ? seq_cfg_hold[si][3:0] : 4'd0;
                 seq_mode_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_cfg_stage[si][7:4] : 4'd0;
+                                         ? seq_cfg_hold[si][7:4] : 4'd0;
                 seq_combine[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_cfg_stage[si][9:8] : 2'd0;
+                                         ? seq_cfg_hold[si][9:8] : 2'd0;
                 seq_next_state[si]   <= HAS_SEQUENCER
-                                         ? seq_cfg_stage[si][10 +: SEQ_STATE_W]
+                                         ? seq_cfg_hold[si][10 +: SEQ_STATE_W]
                                          : {SEQ_STATE_W{1'b0}};
-                seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_stage[si][12] : 1'b0;
-                seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_stage[si][31:16] : 16'h0;
-                seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_stage[si] : {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_stage[si] : {SAMPLE_W{1'b1}};
+                seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_hold[si][12] : 1'b0;
+                seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_hold[si][31:16] : 16'h0;
+                seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_hold[si] : {SAMPLE_W{1'b0}};
+                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_hold[si] : {SAMPLE_W{1'b1}};
                 seq_value_b[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_value_b_stage[si] : {SAMPLE_W{1'b0}};
+                                         ? seq_value_b_hold[si] : {SAMPLE_W{1'b0}};
                 seq_mask_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_mask_b_stage[si] : {SAMPLE_W{1'b1}};
+                                         ? seq_mask_b_hold[si] : {SAMPLE_W{1'b1}};
             end
         end
     end

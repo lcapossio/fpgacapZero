@@ -343,9 +343,7 @@ architecture rtl of fcapz_ela is
     -- (WIDE_TRIG).  For WIDE_TRIG=0 the upper bits are constant 0 and optimize
     -- away, leaving the legacy 32-bit behaviour bit-identical.
     signal trig_value_hold       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal trig_value_stage       : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal trig_mask_hold        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal trig_mask_stage        : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal pretrig_len            : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal posttrig_len           : unsigned(LEN_W - 1 downto 0) := (others => '0');
     signal cap_trig_value         : std_logic_vector(31 downto 0) := (others => '0');
@@ -393,19 +391,12 @@ architecture rtl of fcapz_ela is
     signal sq_mode_hold          : std_logic_vector(3 downto 0) := (others => '0');
     signal sq_mode_stage          : std_logic_vector(3 downto 0) := (others => '0');
     signal sq_value_hold         : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal sq_value_stage         : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal sq_mask_hold          : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal sq_mask_stage          : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
     signal seq_cfg_hold          : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_cfg_stage          : reg32_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_value_a_hold      : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_value_a_stage      : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_mask_a_hold       : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_mask_a_stage       : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_value_b_hold      : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_value_b_stage      : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_mask_b_hold       : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_mask_b_stage       : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
 
     signal arm_toggle_jtag   : std_logic := '0';
     signal reset_toggle_jtag : std_logic := '0';
@@ -1348,18 +1339,18 @@ begin
             if arm_now then
                 pretrig_len <= pretrig_len_stage;
                 posttrig_len <= posttrig_len_stage;
-                cap_trig_value <= low_u32(trig_value_stage);
-                cap_trig_mask <= low_u32(trig_mask_stage);
+                cap_trig_value <= low_u32(trig_value_hold);
+                cap_trig_mask <= low_u32(trig_mask_hold);
                 trig_delay <= trig_delay_stage;
                 -- trig_value/mask are already SAMPLE_W-wide (WIDE_TRIG); the
                 -- sync words carry the full comparator-A value/mask directly.
-                trig_value <= trig_value_stage;
-                trig_mask <= trig_mask_stage;
-                if TRIG_STAGES > 1 and seq_cfg_stage(0)(9 downto 0) /= "0000000000" then
-                    trig_cmp_mode_a <= seq_cfg_stage(0)(3 downto 0);
+                trig_value <= trig_value_hold;
+                trig_mask <= trig_mask_hold;
+                if TRIG_STAGES > 1 and seq_cfg_hold(0)(9 downto 0) /= "0000000000" then
+                    trig_cmp_mode_a <= seq_cfg_hold(0)(3 downto 0);
                     if DUAL_COMPARE /= 0 then
-                        trig_cmp_mode_b <= seq_cfg_stage(0)(7 downto 4);
-                        trig_combine <= seq_cfg_stage(0)(9 downto 8);
+                        trig_cmp_mode_b <= seq_cfg_hold(0)(7 downto 4);
+                        trig_combine <= seq_cfg_hold(0)(9 downto 8);
                     else
                         trig_cmp_mode_b <= (others => '0');
                         trig_combine <= (others => '0');
@@ -1379,8 +1370,8 @@ begin
                     end if;
                 end if;
                 if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
-                    trig_value_b <= seq_value_b_stage(0);
-                    trig_mask_b <= seq_mask_b_stage(0);
+                    trig_value_b <= seq_value_b_hold(0);
+                    trig_mask_b <= seq_mask_b_hold(0);
                 else
                     trig_value_b <= (others => '0');
                     trig_mask_b <= (others => '1');
@@ -1411,8 +1402,8 @@ begin
                     else
                         sq_cmp_mode <= (others => '0');
                     end if;
-                    sq_value <= sq_value_stage;
-                    sq_mask <= sq_mask_stage;
+                    sq_value <= sq_value_hold;
+                    sq_mask <= sq_mask_hold;
                 else
                     sq_enable <= '0';
                     sq_cmp_mode <= (others => '0');
@@ -1421,12 +1412,12 @@ begin
                 end if;
                 for i in 0 to TRIG_STAGES - 1 loop
                     if TRIG_STAGES > 1 then
-                        seq_mode_a(i) <= seq_cfg_stage(i)(3 downto 0);
-                        seq_next_state(i) <= seq_cfg_stage(i)(10 + SEQ_STATE_W - 1 downto 10);
-                        seq_is_final(i) <= seq_cfg_stage(i)(12);
-                        seq_count_target(i) <= unsigned(seq_cfg_stage(i)(31 downto 16));
-                        seq_value_a(i) <= seq_value_a_stage(i);
-                        seq_mask_a(i) <= seq_mask_a_stage(i);
+                        seq_mode_a(i) <= seq_cfg_hold(i)(3 downto 0);
+                        seq_next_state(i) <= seq_cfg_hold(i)(10 + SEQ_STATE_W - 1 downto 10);
+                        seq_is_final(i) <= seq_cfg_hold(i)(12);
+                        seq_count_target(i) <= unsigned(seq_cfg_hold(i)(31 downto 16));
+                        seq_value_a(i) <= seq_value_a_hold(i);
+                        seq_mask_a(i) <= seq_mask_a_hold(i);
                     else
                         seq_mode_a(i) <= (others => '0');
                         seq_next_state(i) <= (others => '0');
@@ -1436,10 +1427,10 @@ begin
                         seq_mask_a(i) <= (others => '1');
                     end if;
                     if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
-                        seq_mode_b(i) <= seq_cfg_stage(i)(7 downto 4);
-                        seq_combine(i) <= seq_cfg_stage(i)(9 downto 8);
-                        seq_value_b(i) <= seq_value_b_stage(i);
-                        seq_mask_b(i) <= seq_mask_b_stage(i);
+                        seq_mode_b(i) <= seq_cfg_hold(i)(7 downto 4);
+                        seq_combine(i) <= seq_cfg_hold(i)(9 downto 8);
+                        seq_value_b(i) <= seq_value_b_hold(i);
+                        seq_mask_b(i) <= seq_mask_b_hold(i);
                     else
                         seq_mode_b(i) <= (others => '0');
                         seq_combine(i) <= (others => '0');
@@ -2038,14 +2029,17 @@ begin
         end if;
     end process;
 
+    -- The wide settings (trigger, qualification and sequencer values, masks
+    -- and stage configs) have no *_stage: only the arm latch in p_capture
+    -- reads them, on the arm pulse one clock after cfg_stage_en, and *_hold
+    -- has not changed since the CTRL write that sent the arm toggle.
+    -- Mirrors rtl/fcapz_ela.v.
     p_config_stage : process(sample_clk, sample_rst)
     begin
         if sample_rst = '1' then
             pretrig_len_stage <= (others => '0');
             posttrig_len_stage <= (others => '0');
             trig_mode_stage <= (others => '0');
-            trig_value_stage <= (others => '0');
-            trig_mask_stage <= (others => '0');
             decim_stage <= (others => '0');
             trig_ext_stage <= std_logic_vector(to_unsigned(DEFAULT_TRIG_EXT mod 4, 2));
             probe_sel_stage <= 0;
@@ -2056,20 +2050,11 @@ begin
             rle_en_stage <= '0';
             rle_post_clks_stage <= (others => '0');
             sq_mode_stage <= (others => '0');
-            sq_value_stage <= (others => '0');
-            sq_mask_stage <= (others => '0');
-            seq_cfg_stage <= (others => (others => '0'));
-            seq_value_a_stage <= (others => (others => '0'));
-            seq_mask_a_stage <= (others => (others => '0'));
-            seq_value_b_stage <= (others => (others => '0'));
-            seq_mask_b_stage <= (others => (others => '0'));
         elsif rising_edge(sample_clk) then
             if cfg_stage_en = '1' then
                 pretrig_len_stage <= pretrig_len_hold;
                 posttrig_len_stage <= posttrig_len_hold;
                 trig_mode_stage <= trig_mode_hold;
-                trig_value_stage <= trig_value_hold;
-                trig_mask_stage <= trig_mask_hold;
                 decim_stage <= decim_hold;
                 trig_ext_stage <= trig_ext_hold;
                 probe_sel_stage <= probe_sel_hold;
@@ -2080,13 +2065,6 @@ begin
                 rle_en_stage <= rle_en_hold;
                 rle_post_clks_stage <= rle_post_clks_hold;
                 sq_mode_stage <= sq_mode_hold;
-                sq_value_stage <= sq_value_hold;
-                sq_mask_stage <= sq_mask_hold;
-                seq_cfg_stage <= seq_cfg_hold;
-                seq_value_a_stage <= seq_value_a_hold;
-                seq_mask_a_stage <= seq_mask_a_hold;
-                seq_value_b_stage <= seq_value_b_hold;
-                seq_mask_b_stage <= seq_mask_b_hold;
             end if;
         end if;
     end process;
