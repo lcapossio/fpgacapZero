@@ -510,7 +510,7 @@ module fcapz_ela_config_matrix_tb;
               ((rdata & 32'h10) != 0) && (((rdata >> 16) & 8'hFF) == 8'd4));
         read_combo(ADDR_COMPARE_CAPS, rdata);
         check("combo compare caps include relational and dual comparator",
-              rdata == 32'h007B_01FF);
+              rdata == 32'h00FB_01FF);
 
         probe_combo = 8'h00;
         write_combo(ADDR_CTRL, 32'h2);
