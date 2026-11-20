@@ -1364,6 +1364,27 @@ module fcapz_ela #(
         end
     end
 
+    // ---- CDC: ARM / RESET in flight (STATUS[4]) ---------------------------
+    // Set from a CTRL write with ARM or RESET until the sample side has taken
+    // the toggle (sync4) and that has come back to jtag_clk.  The *_hold
+    // snapshot must not change before then, since the arm latch reads it
+    // (see cdc_cfg), so a host waits for this bit to clear before writing
+    // the next ARM or RESET.  It stays set while sample_clk is stopped.
+    reg arm_ack_sync1, arm_ack_sync2, reset_ack_sync1, reset_ack_sync2;
+    always @(posedge jtag_clk or posedge jtag_rst) begin
+        if (jtag_rst) begin
+            arm_ack_sync1   <= 1'b0; arm_ack_sync2   <= 1'b0;
+            reset_ack_sync1 <= 1'b0; reset_ack_sync2 <= 1'b0;
+        end else begin
+            arm_ack_sync1   <= arm_toggle_sync4;
+            arm_ack_sync2   <= arm_ack_sync1;
+            reset_ack_sync1 <= reset_toggle_sync4;
+            reset_ack_sync2 <= reset_ack_sync1;
+        end
+    end
+    wire ctrl_cmd_busy = (arm_toggle_jtag ^ arm_ack_sync2) |
+                         (reset_toggle_jtag ^ reset_ack_sync2);
+
     // ---- CDC: config registers ---------------------------------------------
     // A CTRL write that arms or soft-resets snapshots the settings into
     // *_hold (jtag_clk), so a setting written after it does not reach that
@@ -1444,9 +1465,11 @@ module fcapz_ela #(
     // The wide settings (trigger, qualification and sequencer values, masks
     // and stage configs) skip *_stage: only the arm latch reads them, on the
     // arm pulse one clock after cfg_stage_en, and *_hold has not changed
-    // since the CTRL write that sent the arm toggle, so the latch takes them
-    // straight from *_hold.  A startup arm (no CTRL write) reads the reset
-    // values, like *_stage held.
+    // since the CTRL write that sent the arm toggle (a host does not write
+    // the next ARM or RESET while STATUS[4] is set), so the latch takes them
+    // straight from *_hold.  A startup arm after a full reset reads the
+    // reset values, like *_stage held; after a reset of sample_rst alone it
+    // reads the last snapshot, where *_stage held its reset values.
     always @(posedge sample_clk or posedge sample_rst) begin : cdc_cfg
         if (sample_rst) begin
             pretrig_len_stage  <= 0;
@@ -2303,7 +2326,8 @@ module fcapz_ela #(
             // trusting any other ELA register on this chain.
             ADDR_VERSION:     jtag_rdata_mux = `FCAPZ_ELA_VERSION_REG;
             ADDR_CTRL:        jtag_rdata_mux = jtag_ctrl;
-            ADDR_STATUS:      jtag_rdata_mux = {28'h0, overflow, rb_done_jtag, triggered, armed};
+            ADDR_STATUS:      jtag_rdata_mux = {27'h0, ctrl_cmd_busy, overflow, rb_done_jtag,
+                                                triggered, armed};
             ADDR_SAMPLE_W:    jtag_rdata_mux = SAMPLE_W;
             ADDR_DEPTH:       jtag_rdata_mux = DEPTH;
             ADDR_PRETRIG:     jtag_rdata_mux = jtag_pretrig_len;

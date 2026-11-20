@@ -130,13 +130,25 @@ A write with `arm` or `reset` set snapshots the capture settings for that
 capture (and, for `reset`, `STARTUP_ARM` for the re-arm). Settings written
 after it apply from the next arm or reset.
 
+Wait for `STATUS[4]` to clear before the next `ARM` or `RESET` write.
+A `STARTUP_ARM` arm after a reset of the sample clock domain alone (the
+JTAG side not reset) takes the trigger values and masks, the sequencer
+stages and the storage qualifier from the last `ARM` or `RESET` write, and
+the other settings (trigger mode, lengths, probe select, decimation)
+from their reset values. Write `ARM` or `RESET` after such a reset to get
+one consistent set.
+
 <a id="regmap-status"></a>
 ### STATUS
 - [0] `armed`
 - [1] `triggered`
 - [2] `done`
 - [3] `overflow`
-- [31:4] reserved
+- [4] `cmd_busy`: an `ARM` or `RESET` write has not yet reached the sample
+  clock domain and come back. The host waits for it to clear before the next
+  `ARM` or `RESET` write; a second write while it is set can arm with a mix of
+  the two writes' settings. It stays set while the sample clock is stopped.
+- [31:5] reserved
 
 <a id="regmap-trig-mode"></a>
 ### TRIG_MODE

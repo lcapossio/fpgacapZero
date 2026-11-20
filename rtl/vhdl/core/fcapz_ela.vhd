@@ -416,6 +416,12 @@ architecture rtl of fcapz_ela is
     signal reset_toggle_sync3 : std_logic := '0';
     signal reset_toggle_sync4 : std_logic := '0';
     signal arm_sync_pulse    : std_logic := '0';  -- an ARM reaches the capture
+    -- ARM / RESET in flight (STATUS[4]); see rtl/fcapz_ela.v ctrl_cmd_busy.
+    signal arm_ack_sync1     : std_logic := '0';
+    signal arm_ack_sync2     : std_logic := '0';
+    signal reset_ack_sync1   : std_logic := '0';
+    signal reset_ack_sync2   : std_logic := '0';
+    signal ctrl_cmd_busy     : std_logic;
     signal reset_sync_pulse  : std_logic := '0';  -- a soft reset reaches it
     signal cfg_stage_en      : std_logic := '0';  -- copy *_hold into *_stage
 
@@ -1267,6 +1273,27 @@ begin
     end process;
 
     arm_sync_pulse <= arm_toggle_sync3 xor arm_toggle_sync4;
+
+    -- ARM / RESET in flight: set from the CTRL write until the sample side
+    -- has taken the toggle and that has come back to jtag_clk.  A host
+    -- waits for it to clear before the next ARM or RESET, which would
+    -- overwrite the *_hold snapshot the arm latch still has to read.
+    p_ctrl_ack : process(jtag_clk, jtag_rst)
+    begin
+        if jtag_rst = '1' then
+            arm_ack_sync1 <= '0';
+            arm_ack_sync2 <= '0';
+            reset_ack_sync1 <= '0';
+            reset_ack_sync2 <= '0';
+        elsif rising_edge(jtag_clk) then
+            arm_ack_sync1 <= arm_toggle_sync4;
+            arm_ack_sync2 <= arm_ack_sync1;
+            reset_ack_sync1 <= reset_toggle_sync4;
+            reset_ack_sync2 <= reset_ack_sync1;
+        end if;
+    end process;
+    ctrl_cmd_busy <= (arm_toggle_jtag xor arm_ack_sync2) or
+                     (reset_toggle_jtag xor reset_ack_sync2);
     reset_sync_pulse <= reset_toggle_sync3 xor reset_toggle_sync4;
     cfg_stage_en <= (arm_toggle_sync2 xor arm_toggle_sync3) or
                     (reset_toggle_sync2 xor reset_toggle_sync3);
@@ -2568,7 +2595,7 @@ begin
         case addr is
             when ADDR_VERSION => r := FCAPZ_ELA_VERSION_REG;
             when ADDR_CTRL => r := jtag_ctrl;
-            when ADDR_STATUS => r := x"0000000" & overflow & rb_done_jtag & triggered & armed;
+            when ADDR_STATUS => r := "000" & x"000000" & ctrl_cmd_busy & overflow & rb_done_jtag & triggered & armed;
             when ADDR_SAMPLE_W => r := u32(SAMPLE_W);
             when ADDR_DEPTH => r := u32(DEPTH);
             when ADDR_PRETRIG => r := jtag_pretrig_len;
