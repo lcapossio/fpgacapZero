@@ -102,6 +102,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "randomized_value_capture",
             "edge_capture",
             "both_mode_fires_on_value_or_change",
+            "ctrl_cmd_busy_clears_after_the_arm",
             "overflow_and_reset",
             "oversize_length_is_reported_not_truncated",
             "oversize_length_sum_still_reports_overflow",

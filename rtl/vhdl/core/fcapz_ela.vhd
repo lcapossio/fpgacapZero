@@ -415,6 +415,7 @@ architecture rtl of fcapz_ela is
     signal reset_toggle_sync2 : std_logic := '0';
     signal reset_toggle_sync3 : std_logic := '0';
     signal reset_toggle_sync4 : std_logic := '0';
+    signal reset_toggle_sync5 : std_logic := '0';  -- reset taken, incl. startup arm
     signal arm_sync_pulse    : std_logic := '0';  -- an ARM reaches the capture
     -- ARM / RESET in flight (STATUS[4]); see rtl/fcapz_ela.v ctrl_cmd_busy.
     signal arm_ack_sync1     : std_logic := '0';
@@ -1275,7 +1276,9 @@ begin
     arm_sync_pulse <= arm_toggle_sync3 xor arm_toggle_sync4;
 
     -- ARM / RESET in flight: set from the CTRL write until the sample side
-    -- has taken the toggle and that has come back to jtag_clk.  A host
+    -- has taken the toggle and that has come back to jtag_clk: sync4 for
+    -- ARM, sync5 for RESET, whose startup arm reads *_hold one edge after
+    -- sync4.  A host
     -- waits for it to clear before the next ARM or RESET, which would
     -- overwrite the *_hold snapshot the arm latch still has to read.
     p_ctrl_ack : process(jtag_clk, jtag_rst)
@@ -1288,7 +1291,7 @@ begin
         elsif rising_edge(jtag_clk) then
             arm_ack_sync1 <= arm_toggle_sync4;
             arm_ack_sync2 <= arm_ack_sync1;
-            reset_ack_sync1 <= reset_toggle_sync4;
+            reset_ack_sync1 <= reset_toggle_sync5;
             reset_ack_sync2 <= reset_ack_sync1;
         end if;
     end process;
@@ -1309,6 +1312,7 @@ begin
             reset_toggle_sync2 <= '0';
             reset_toggle_sync3 <= '0';
             reset_toggle_sync4 <= '0';
+            reset_toggle_sync5 <= '0';
             startup_arm_pending <= bool_to_sl(STARTUP_ARM /= 0);
         elsif rising_edge(sample_clk) then
             arm_toggle_sync1 <= arm_toggle_jtag;
@@ -1319,6 +1323,7 @@ begin
             reset_toggle_sync2 <= reset_toggle_sync1;
             reset_toggle_sync3 <= reset_toggle_sync2;
             reset_toggle_sync4 <= reset_toggle_sync3;
+            reset_toggle_sync5 <= reset_toggle_sync4;
             if reset_sync_pulse = '1' then
                 startup_arm_pending <= startup_arm_stage;
             elsif startup_arm_pending = '1' then
@@ -2063,6 +2068,8 @@ begin
     -- and stage configs) have no *_stage: only the arm latch in p_capture
     -- reads them, on the arm pulse one clock after cfg_stage_en, and *_hold
     -- has not changed since the CTRL write that sent the arm toggle.
+    -- jtag_rst must not assert without sample_rst (every wrapper derives it
+    -- from sample_rst): it clears *_hold under an arm already on its way.
     -- Mirrors rtl/fcapz_ela.v.
     p_config_stage : process(sample_clk, sample_rst)
     begin

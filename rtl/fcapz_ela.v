@@ -415,6 +415,7 @@ module fcapz_ela #(
     // the settings (cfg_stage_en); sync3 ^ sync4 then pulses with them in place.
     reg arm_toggle_sync1, arm_toggle_sync2, arm_toggle_sync3, arm_toggle_sync4;
     reg reset_toggle_sync1, reset_toggle_sync2, reset_toggle_sync3, reset_toggle_sync4;
+    reg reset_toggle_sync5;  // reset taken, incl. its startup arm (STATUS[4])
 
     // Settings snapshot on ARM / RESET (*_hold, jtag_clk) and its sample_clk
     // copy (*_stage), narrowed to the bits used on the sample side.  The
@@ -1347,6 +1348,7 @@ module fcapz_ela #(
             arm_toggle_sync3   <= 1'b0; arm_toggle_sync4   <= 1'b0;
             reset_toggle_sync1 <= 1'b0; reset_toggle_sync2 <= 1'b0;
             reset_toggle_sync3 <= 1'b0; reset_toggle_sync4 <= 1'b0;
+            reset_toggle_sync5 <= 1'b0;
             startup_arm_pending <= (STARTUP_ARM != 0);
         end else begin
             arm_toggle_sync1   <= arm_toggle_jtag;
@@ -1357,6 +1359,7 @@ module fcapz_ela #(
             reset_toggle_sync2 <= reset_toggle_sync1;
             reset_toggle_sync3 <= reset_toggle_sync2;
             reset_toggle_sync4 <= reset_toggle_sync3;
+            reset_toggle_sync5 <= reset_toggle_sync4;
             if (reset_pulse)
                 startup_arm_pending <= startup_arm_stage;
             else if (startup_arm_pulse)
@@ -1366,7 +1369,9 @@ module fcapz_ela #(
 
     // ---- CDC: ARM / RESET in flight (STATUS[4]) ---------------------------
     // Set from a CTRL write with ARM or RESET until the sample side has taken
-    // the toggle (sync4) and that has come back to jtag_clk.  The *_hold
+    // the toggle and that has come back to jtag_clk: sync4 for ARM, whose
+    // latch takes *_hold on that edge, and sync5 for RESET, whose startup arm
+    // (startup_arm_pending) takes it one edge later.  The *_hold
     // snapshot must not change before then, since the arm latch reads it
     // (see cdc_cfg), so a host waits for this bit to clear before writing
     // the next ARM or RESET.  It stays set while sample_clk is stopped.
@@ -1378,7 +1383,7 @@ module fcapz_ela #(
         end else begin
             arm_ack_sync1   <= arm_toggle_sync4;
             arm_ack_sync2   <= arm_ack_sync1;
-            reset_ack_sync1 <= reset_toggle_sync4;
+            reset_ack_sync1 <= reset_toggle_sync5;
             reset_ack_sync2 <= reset_ack_sync1;
         end
     end
@@ -1470,6 +1475,8 @@ module fcapz_ela #(
     // straight from *_hold.  A startup arm after a full reset reads the
     // reset values, like *_stage held; after a reset of sample_rst alone it
     // reads the last snapshot, where *_stage held its reset values.
+    // jtag_rst must not assert without sample_rst (every wrapper derives it
+    // from sample_rst): it clears *_hold under an arm already on its way.
     always @(posedge sample_clk or posedge sample_rst) begin : cdc_cfg
         if (sample_rst) begin
             pretrig_len_stage  <= 0;

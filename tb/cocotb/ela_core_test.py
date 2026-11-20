@@ -1047,6 +1047,36 @@ async def trigger_delay_startup_and_holdoff(dut):
 
 
 @cocotb.test()
+async def ctrl_cmd_busy_clears_after_the_arm(dut):
+    """STATUS[4] (ARM / RESET in flight) must not clear before the command
+    has armed the core: for ARM, its arm latch; for RESET with STARTUP_ARM,
+    the startup arm one sample clock later.  A slow sample clock opens the
+    window where a host would otherwise replace the snapshot early."""
+    ela = await setup(dut, sample_period_ns=200)
+    await ela.configure_value_capture(pre=0, post=2, value=0xFF)
+    ela.dut.probe_in.value = 0
+    for ctrl, startup_arm in ((0x1, 0), (0x2, 1)):
+        await ela.write(ADDR_STARTUP_ARM, startup_arm)
+        await ela.write(ADDR_CTRL, 0x2)
+        for _ in range(200):
+            if not await ela.read(ADDR_STATUS) & 0x10:
+                break
+        await ela.write(ADDR_CTRL, ctrl)
+        status = await ela.read(ADDR_STATUS)
+        assert status & 0x10, f"STATUS[4] not set after CTRL 0x{ctrl:x}: 0x{status:x}"
+        for _ in range(200):
+            status = await ela.read(ADDR_STATUS)
+            if not status & 0x10:
+                break
+        else:
+            raise AssertionError(f"STATUS[4] stuck after CTRL 0x{ctrl:x}")
+        assert status & 0x1, (
+            f"STATUS[4] cleared before CTRL 0x{ctrl:x} armed: status=0x{status:x}"
+        )
+    await ela.write(ADDR_STARTUP_ARM, 0)
+
+
+@cocotb.test()
 async def input_pipe_captures(dut):
     ela = await setup(dut)
     await ela.write(ADDR_DECIM, 0)
