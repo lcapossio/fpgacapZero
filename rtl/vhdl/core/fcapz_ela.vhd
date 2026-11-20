@@ -1479,8 +1479,6 @@ begin
 
     p_jtag_regs : process(jtag_clk, jtag_rst)
         variable addr : natural;
-        variable seq_stage : natural;
-        variable seq_off : natural;
         variable wide_word : natural;
     begin
         if jtag_rst = '1' then
@@ -1643,28 +1641,31 @@ begin
                             burst_start_ptr_i <= std_logic_vector(to_unsigned(rb_start_ptr_jtag, PTR_W));
                         end if;
                     when others =>
-                        if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
-                            seq_stage := (addr - ADDR_SEQ_BASE) / SEQ_STRIDE;
-                            seq_off := (addr - ADDR_SEQ_BASE) mod SEQ_STRIDE;
-                            case seq_off is
-                                when 0 =>
+                        -- Sequencer stage registers, decoded against
+                        -- constant addresses: a runtime / and mod by the
+                        -- 20-byte stride synthesizes to a divider.
+                        if TRIG_STAGES > 1 then
+                            for st in 0 to TRIG_STAGES - 1 loop
+                                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE then
                                     if DUAL_COMPARE /= 0 then
-                                        jtag_seq_cfg(seq_stage) <= jtag_wdata;
+                                        jtag_seq_cfg(st) <= jtag_wdata;
                                     else
-                                        jtag_seq_cfg(seq_stage) <= jtag_wdata and x"FFFFFC0F";
+                                        jtag_seq_cfg(st) <= jtag_wdata and x"FFFFFC0F";
                                     end if;
-                                when 4 => jtag_seq_value_a(seq_stage) <= jtag_wdata;
-                                when 8 => jtag_seq_mask_a(seq_stage) <= jtag_wdata;
-                                when 12 =>
-                                    if DUAL_COMPARE /= 0 then
-                                        jtag_seq_value_b(seq_stage) <= jtag_wdata;
-                                    end if;
-                                when 16 =>
-                                    if DUAL_COMPARE /= 0 then
-                                        jtag_seq_mask_b(seq_stage) <= jtag_wdata;
-                                    end if;
-                                when others => null;
-                            end case;
+                                end if;
+                                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 4 then
+                                    jtag_seq_value_a(st) <= jtag_wdata;
+                                end if;
+                                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 8 then
+                                    jtag_seq_mask_a(st) <= jtag_wdata;
+                                end if;
+                                if DUAL_COMPARE /= 0 and addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 12 then
+                                    jtag_seq_value_b(st) <= jtag_wdata;
+                                end if;
+                                if DUAL_COMPARE /= 0 and addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 16 then
+                                    jtag_seq_mask_b(st) <= jtag_wdata;
+                                end if;
+                            end loop;
                         end if;
                 end case;
             end if;
@@ -2575,8 +2576,6 @@ begin
         variable addr : natural;
         variable r : std_logic_vector(31 downto 0);
         variable rd_start : natural;
-        variable seq_stage : natural;
-        variable seq_off : natural;
     begin
         addr := to_integer(unsigned(jtag_addr));
         r := (others => '0');
@@ -2691,25 +2690,29 @@ begin
                     r(POST_CLK_W - 1 downto 0) := jtag_rle_post_clks;
                 end if;
             when others =>
-                if TRIG_STAGES > 1 and addr >= ADDR_SEQ_BASE and addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE then
-                    seq_stage := (addr - ADDR_SEQ_BASE) / SEQ_STRIDE;
-                    seq_off := (addr - ADDR_SEQ_BASE) mod SEQ_STRIDE;
-                    case seq_off is
-                        when 0 => r := jtag_seq_cfg(seq_stage);
-                        when 4 => r := jtag_seq_value_a(seq_stage);
-                        when 8 => r := jtag_seq_mask_a(seq_stage);
-                        when 12 =>
+                -- Sequencer stage readback, constant address decode.
+                if TRIG_STAGES > 1 then
+                    for st in 0 to TRIG_STAGES - 1 loop
+                        if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE then
+                            r := jtag_seq_cfg(st);
+                        end if;
+                        if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 4 then
+                            r := jtag_seq_value_a(st);
+                        end if;
+                        if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 8 then
+                            r := jtag_seq_mask_a(st);
+                        end if;
+                        if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 12 and DUAL_COMPARE /= 0 then
+                            r := jtag_seq_value_b(st);
+                        end if;
+                        if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 16 then
                             if DUAL_COMPARE /= 0 then
-                                r := jtag_seq_value_b(seq_stage);
-                            end if;
-                        when 16 =>
-                            if DUAL_COMPARE /= 0 then
-                                r := jtag_seq_mask_b(seq_stage);
+                                r := jtag_seq_mask_b(st);
                             else
                                 r := x"FFFFFFFF";
                             end if;
-                        when others => null;
-                    end case;
+                        end if;
+                    end loop;
                 end if;
         end case;
 

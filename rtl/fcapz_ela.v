@@ -1171,21 +1171,27 @@ module fcapz_ela #(
                         burst_start     <= ~burst_start;
                     end
                     default: begin
-                        // Sequencer stage registers (5 regs x 4 bytes per stage)
-                        if (HAS_SEQUENCER &&
-                            jtag_addr >= ADDR_SEQ_BASE &&
-                            jtag_addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE) begin
-                            s = (jtag_addr - ADDR_SEQ_BASE) / SEQ_STRIDE;
-                            case ((jtag_addr - ADDR_SEQ_BASE) % SEQ_STRIDE)
-                                0:  jtag_seq_cfg[s]     <= HAS_DUAL_COMPARE
-                                                           ? jtag_wdata
-                                                           : (jtag_wdata & ~32'h0000_03F0);
-                                4:  jtag_seq_value_a[s] <= jtag_wdata;
-                                8:  jtag_seq_mask_a[s]  <= jtag_wdata;
-                                12: if (HAS_DUAL_COMPARE) jtag_seq_value_b[s] <= jtag_wdata;
-                                16: if (HAS_DUAL_COMPARE) jtag_seq_mask_b[s]  <= jtag_wdata;
-                                default: ;
-                            endcase
+                        // Sequencer stage registers (5 regs x 4 bytes per
+                        // stage), decoded against constant addresses: a
+                        // runtime / and % by the 20-byte stride synthesizes
+                        // to a divider and costs about a thousand LUTs.
+                        if (HAS_SEQUENCER) begin
+                            for (s = 0; s < TRIG_STAGES; s = s + 1) begin
+                                if (jtag_addr == ADDR_SEQ_BASE + s * SEQ_STRIDE)
+                                    jtag_seq_cfg[s] <= HAS_DUAL_COMPARE
+                                                       ? jtag_wdata
+                                                       : (jtag_wdata & ~32'h0000_03F0);
+                                if (jtag_addr == ADDR_SEQ_BASE + s * SEQ_STRIDE + 4)
+                                    jtag_seq_value_a[s] <= jtag_wdata;
+                                if (jtag_addr == ADDR_SEQ_BASE + s * SEQ_STRIDE + 8)
+                                    jtag_seq_mask_a[s] <= jtag_wdata;
+                                if (HAS_DUAL_COMPARE &&
+                                    jtag_addr == ADDR_SEQ_BASE + s * SEQ_STRIDE + 12)
+                                    jtag_seq_value_b[s] <= jtag_wdata;
+                                if (HAS_DUAL_COMPARE &&
+                                    jtag_addr == ADDR_SEQ_BASE + s * SEQ_STRIDE + 16)
+                                    jtag_seq_mask_b[s] <= jtag_wdata;
+                            end
                         end
                     end
                 endcase
@@ -2234,18 +2240,38 @@ module fcapz_ela #(
     end
 
     // ---- Register read mux -------------------------------------------------
-    integer seq_rd_stage, seq_rd_off;
-
-    wire seq_addr_hit = HAS_SEQUENCER && (jtag_addr >= ADDR_SEQ_BASE) &&
-                        (jtag_addr < ADDR_SEQ_BASE + TRIG_STAGES * SEQ_STRIDE);
-    wire [15:0] seq_addr_delta = jtag_addr - ADDR_SEQ_BASE;
-    wire [31:0] seq_rd_stage_w = seq_addr_hit ? (seq_addr_delta / SEQ_STRIDE) : 32'h0;
-    wire [31:0] seq_rd_off_w   = seq_addr_hit ? (seq_addr_delta % SEQ_STRIDE) : 32'h0;
-    wire [31:0] seq_cfg_r      = jtag_seq_cfg[seq_rd_stage_w];
-    wire [31:0] seq_value_a_r  = jtag_seq_value_a[seq_rd_stage_w];
-    wire [31:0] seq_mask_a_r   = jtag_seq_mask_a[seq_rd_stage_w];
-    wire [31:0] seq_value_b_r  = jtag_seq_value_b[seq_rd_stage_w];
-    wire [31:0] seq_mask_b_r   = jtag_seq_mask_b[seq_rd_stage_w];
+    // Sequencer stage readback: constant address decode, one-hot OR of the
+    // selected word (0 for an address that hits no stage register).  The
+    // generate keeps the always block out of builds without a sequencer,
+    // where it would read no signal and some simulators never run it.
+    wire [31:0] seq_rd_word;
+    generate
+        if (HAS_SEQUENCER) begin : g_seq_rd
+            integer seq_rd_i;
+            reg [31:0] seq_rd_r;
+            always @(*) begin
+                seq_rd_r = 32'h0;
+                for (seq_rd_i = 0; seq_rd_i < TRIG_STAGES; seq_rd_i = seq_rd_i + 1) begin
+                    if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE)
+                        seq_rd_r = seq_rd_r | jtag_seq_cfg[seq_rd_i];
+                    if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 4)
+                        seq_rd_r = seq_rd_r | jtag_seq_value_a[seq_rd_i];
+                    if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 8)
+                        seq_rd_r = seq_rd_r | jtag_seq_mask_a[seq_rd_i];
+                    if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 12)
+                        seq_rd_r = seq_rd_r
+                                   | (HAS_DUAL_COMPARE ? jtag_seq_value_b[seq_rd_i] : 32'h0);
+                    if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 16)
+                        seq_rd_r = seq_rd_r
+                                   | (HAS_DUAL_COMPARE ? jtag_seq_mask_b[seq_rd_i]
+                                                       : 32'hFFFF_FFFF);
+                end
+            end
+            assign seq_rd_word = seq_rd_r;
+        end else begin : g_no_seq_rd
+            assign seq_rd_word = 32'h0;
+        end
+    endgenerate
 
     function [31:0] sample_chunk_word;
         input [SAMPLE_W-1:0] sample;
@@ -2280,8 +2306,6 @@ module fcapz_ela #(
     always @(*) begin
         // defaults
         jtag_rdata_mux = 0;
-        seq_rd_stage = 0;
-        seq_rd_off = 0;
 
         case (jtag_addr)
             // VERSION layout (defined in rtl/fcapz_version.vh, generated
@@ -2354,20 +2378,7 @@ module fcapz_ela #(
                    rb_stream_flags_jtag[1], rb_stream_flags_jtag[0],
                    (jtag_rel_req != jtag_rel_ack_sync2)};
 
-            default: begin
-                if (seq_addr_hit) begin
-                    seq_rd_stage = seq_rd_stage_w;
-                    seq_rd_off   = seq_rd_off_w;
-                    case (seq_rd_off)
-                        0:  jtag_rdata_mux = seq_cfg_r;
-                        4:  jtag_rdata_mux = seq_value_a_r;
-                        8:  jtag_rdata_mux = seq_mask_a_r;
-                        12: jtag_rdata_mux = HAS_DUAL_COMPARE ? seq_value_b_r : 32'h0;
-                        16: jtag_rdata_mux = HAS_DUAL_COMPARE ? seq_mask_b_r : 32'hFFFF_FFFF;
-                        default: jtag_rdata_mux = 32'h0;
-                    endcase
-                end
-            end
+            default: jtag_rdata_mux = seq_rd_word;
         endcase
     end
 
