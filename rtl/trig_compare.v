@@ -17,7 +17,8 @@
 //   6 = RISING  masked bits: all-zero → non-zero
 //   7 = FALLING masked bits: non-zero → all-zero
 //   8 = CHANGED masked bits: any bit changed from previous
-//   9 = reserved
+//   9 = EQ or CHANGED (internal: the legacy TRIG_MODE "both"; not in
+//       COMPARE_CAPS, so hosts cannot select it)
 //
 // All relational compares are unsigned and operate on the masked values.
 
@@ -57,6 +58,7 @@ module trig_compare #(
             4'd6:    hit = zero_prev & ~zero_cur;     // RISING
             4'd7:    hit = ~zero_prev & zero_cur;     // FALLING
             4'd8:    hit = changed;                   // CHANGED
+            4'd9:    hit = eq | changed;              // EQ or CHANGED
             default: hit = 1'b0;
         endcase
     end

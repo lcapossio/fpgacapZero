@@ -1642,9 +1642,12 @@ module fcapz_ela #(
                 trig_cmp_mode_b <= HAS_DUAL_COMPARE ? seq_cfg_hold[0][7:4] : 4'd0;
                 trig_combine    <= HAS_DUAL_COMPARE ? seq_cfg_hold[0][9:8] : 2'd0;
             end else begin
-                trig_cmp_mode_a <= trig_mode_stage[1] ? 4'd8 : 4'd0;
-                trig_cmp_mode_b <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 4'd8 : 4'd0;
-                trig_combine    <= (HAS_DUAL_COMPARE && trig_mode_stage == 2'b11) ? 2'd3 : 2'd0;
+                // TRIG_MODE: 1 value_match (EQ), 2 edge_detect (CHANGED),
+                // 3 both (EQ or CHANGED, one comparator, same value/mask).
+                trig_cmp_mode_a <= (trig_mode_stage == 2'b11) ? 4'd9 :
+                                   trig_mode_stage[1] ? 4'd8 : 4'd0;
+                trig_cmp_mode_b <= 4'd0;
+                trig_combine    <= 2'd0;
             end
             trig_value_b     <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
                                  ? seq_value_b_hold[0] : {SAMPLE_W{1'b0}};

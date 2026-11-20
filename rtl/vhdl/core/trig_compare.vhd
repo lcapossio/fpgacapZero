@@ -58,6 +58,7 @@ begin
             when "0110" => hit <= '1' when zero_prev and not zero_cur else '0';
             when "0111" => hit <= '1' when not zero_prev and zero_cur else '0';
             when "1000" => hit <= '1' when changed else '0';
+            when "1001" => hit <= '1' when eq or changed else '0';
             when others => hit <= '0';
         end case;
     end process;

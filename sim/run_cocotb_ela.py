@@ -100,6 +100,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "burst_active_blocks_user1_data_window",
             "randomized_value_capture",
             "edge_capture",
+            "both_mode_fires_on_value_or_change",
             "overflow_and_reset",
             "oversize_length_is_reported_not_truncated",
             "oversize_length_sum_still_reports_overflow",
@@ -143,6 +144,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
         )
     ),
     CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
+    CocotbTarget("both_single_compare_pipe1", {"DUAL_COMPARE": 0, "INPUT_PIPE": 1},
+                 ("both_mode_fires_on_value_or_change", "edge_capture", "value_capture")),
     *(
         CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},
                      ("rearm_mid_capture_restarts_cleanly",))

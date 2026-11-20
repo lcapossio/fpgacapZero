@@ -421,6 +421,34 @@ async def edge_capture(dut):
 
 
 @cocotb.test()
+async def both_mode_fires_on_value_or_change(dut):
+    """TRIG_MODE 3 ("both") is value_match OR edge_detect, with or without
+    comparator B: a steady sample equal to the value triggers, and so does a
+    change under the mask while the value never matches."""
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_TRIG_MODE, 3)
+    await ela.write(ADDR_TRIG_VALUE, 0x5A)
+    await ela.write(ADDR_TRIG_MASK, 0xFF)
+    ela.dut.probe_in.value = 0x5A
+    await ela.wait_sample(4)
+    await ela.arm()
+    assert await ela.wait_done() & 0x4, "steady matching value did not trigger"
+
+    await ela.reset_core()
+    ela.dut.probe_in.value = 0x00
+    await ela.wait_sample(4)
+    await ela.arm()
+    await ela.wait_sample(20)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"steady non-matching value triggered, status=0x{status:x}"
+    ela.dut.probe_in.value = 0x01
+    assert await ela.wait_done() & 0x4, "change under the mask did not trigger"
+
+
+@cocotb.test()
 async def overflow_and_reset(dut):
     ela = await setup(dut)
     await ela.configure_value_capture(pre=8, post=8, value=5)

@@ -144,6 +144,8 @@ architecture rtl of fcapz_ela is
             when 6 => if zero_prev and not zero_cur then return '1'; end if;
             when 7 => if not zero_prev and zero_cur then return '1'; end if;
             when 8 => if mp /= mpp then return '1'; end if;
+            -- EQ or CHANGED: the legacy TRIG_MODE "both" (internal)
+            when 9 => if mp = mv or mp /= mpp then return '1'; end if;
             when others => null;
         end case;
         return '0';
@@ -1356,18 +1358,17 @@ begin
                         trig_combine <= (others => '0');
                     end if;
                 else
-                    if trig_mode_stage(1) = '1' then
+                    -- TRIG_MODE: 1 value_match (EQ), 2 edge_detect (CHANGED),
+                    -- 3 both (EQ or CHANGED, one comparator, same value/mask).
+                    if trig_mode_stage(1 downto 0) = "11" then
+                        trig_cmp_mode_a <= x"9";
+                    elsif trig_mode_stage(1) = '1' then
                         trig_cmp_mode_a <= x"8";
                     else
                         trig_cmp_mode_a <= x"0";
                     end if;
-                    if DUAL_COMPARE /= 0 and trig_mode_stage(1 downto 0) = "11" then
-                        trig_cmp_mode_b <= x"8";
-                        trig_combine <= "11";
-                    else
-                        trig_cmp_mode_b <= (others => '0');
-                        trig_combine <= (others => '0');
-                    end if;
+                    trig_cmp_mode_b <= (others => '0');
+                    trig_combine <= (others => '0');
                 end if;
                 if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
                     trig_value_b <= seq_value_b_hold(0);
