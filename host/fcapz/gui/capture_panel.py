@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import CaptureConfig, SequencerStage, TriggerConfig
+from ..capture_profile import is_profile_path
 from ..cli import _parse_probes
 from ..probes import load_probe_file, probes_to_arg
 from .collapsible_section import CollapsibleSection
@@ -257,7 +258,7 @@ class CapturePanel(QGroupBox):
 
         self._decim = QSpinBox()
         self._decim.setObjectName("fcapz_capture_decim")
-        self._decim.setRange(0, 65535)
+        self._decim.setRange(0, 0xFF_FFFF)  # DECIM is 24 bits
         self._decim.setValue(0)
 
         self._probe_sel = QSpinBox()
@@ -667,11 +668,63 @@ class CapturePanel(QGroupBox):
         name = self._cap_profile_pick.currentData()
         return None if name is None else str(name)
 
-    def apply_capture_profile(self, name: str) -> None:
-        """Fill the form from the named saved profile."""
+    def capture_profile_problem(self, body: Mapping[str, Any]) -> str | None:
+        """Why the form cannot hold *body* exactly for the connected core.
+
+        The form's spin boxes clamp and the sequencer table keeps only the
+        core's stages, so a profile is refused rather than loaded changed.
+        """
+        for key, spin in self._profile_spins():
+            if key not in body:
+                continue
+            try:
+                value = int(body[key])
+            except (TypeError, ValueError):
+                return f"{key} is not a number ({body[key]!r})"
+            if not spin.minimum() <= value <= spin.maximum():
+                return (
+                    f"{key} = {value} is outside {spin.minimum()}..{spin.maximum()} "
+                    "here"
+                )
+        seq = body.get("trigger_sequence")
+        if isinstance(seq, list) and len(seq) > self._hw_trig_stages:
+            return (
+                f"its trigger sequence has {len(seq)} stage(s), and the connected "
+                f"core takes {self._hw_trig_stages}"
+            )
+        return None
+
+    def _profile_spins(self) -> tuple[tuple[str, QSpinBox], ...]:
+        return (
+            ("pretrigger", self._pre),
+            ("posttrigger", self._post),
+            ("sample_clock_hz", self._clock_hz),
+            ("channel", self._channel),
+            ("decimation", self._decim),
+            ("probe_sel", self._probe_sel),
+            ("stor_qual_mode", self._stor_mode),
+            ("trigger_holdoff", self._trig_holdoff),
+            ("trigger_delay", self._trig_delay),
+            ("post_clocks", self._post_clocks),
+        )
+
+    def apply_capture_profile(self, name: str) -> bool:
+        """Fill the form from the named saved profile.
+
+        Returns ``False``, leaving the form alone, if the profile is unknown
+        or the form cannot hold it (:meth:`capture_profile_problem`).
+        """
         body = self._capture_profiles.get(name)
-        if body is not None:
-            self.apply_trigger_history_entry(body)
+        if body is None:
+            return False
+        problem = self.capture_profile_problem(body)
+        if problem is not None:
+            QMessageBox.warning(
+                self, "Capture profile", f"Cannot load the profile {name!r}: {problem}."
+            )
+            return False
+        self.apply_trigger_history_entry(body)
+        return True
 
     def set_trigger_history(self, entries: list[dict[str, Any]]) -> None:
         with QSignalBlocker(self._preset):
@@ -970,6 +1023,14 @@ class CapturePanel(QGroupBox):
         )
         name = name.strip()
         if not ok or not name:
+            return
+        if is_profile_path(name):
+            QMessageBox.warning(
+                self,
+                "Save capture profile",
+                f"{name!r} reads as a file to the CLI (--capture-profile): use a "
+                "name without '/', '\\' or a .json ending.",
+            )
             return
         if name in self._capture_profiles:
             answer = QMessageBox.question(

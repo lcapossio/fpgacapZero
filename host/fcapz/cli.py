@@ -94,10 +94,13 @@ def _uint16(value: str) -> int:
 
 
 def _parse_probes(spec: str) -> list[ProbeSpec]:
-    """Parse ``name:width:lsb,name:width:lsb,...`` into ProbeSpec list."""
+    """Parse ``name:width:lsb,name:width:lsb,...`` into ProbeSpec list.
+
+    Width and LSB are the last two ``:`` fields, so a name may hold ``:``.
+    """
     probes = []
     for part in spec.split(","):
-        fields = part.strip().split(":")
+        fields = part.strip().rsplit(":", 2)
         if len(fields) != 3:
             raise argparse.ArgumentTypeError(
                 f"invalid probe spec '{part}', expected name:width:lsb"

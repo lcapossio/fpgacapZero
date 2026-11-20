@@ -165,10 +165,14 @@ def normalize_capture_profile(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def parse_probe_spec(spec: str) -> list[ProbeSpec]:
-    """Parse ``name:width:lsb,...`` (the ``--probes`` syntax)."""
+    """Parse ``name:width:lsb,...`` (the ``--probes`` syntax).
+
+    Width and LSB are the last two ``:`` fields, so a name may hold ``:``
+    (``bus[7:0]:8:0``).
+    """
     probes: list[ProbeSpec] = []
     for part in spec.split(","):
-        fields = part.strip().split(":")
+        fields = part.strip().rsplit(":", 2)
         if len(fields) != 3 or not fields[0]:
             raise ValueError(f"invalid probe spec {part.strip()!r}, expected name:width:lsb")
         try:
@@ -181,6 +185,17 @@ def parse_probe_spec(spec: str) -> list[ProbeSpec]:
             raise ValueError(f"invalid probe spec {part.strip()!r}: width >= 1, lsb >= 0")
         probes.append(ProbeSpec(name=fields[0], width=width, lsb=lsb))
     return probes
+
+
+def _probe_spec(probes: list[ProbeSpec]) -> str:
+    """*probes* in the ``--probes`` syntax; refuses names it cannot carry."""
+    for p in probes:
+        if "," in p.name or p.name != p.name.strip() or not p.name:
+            raise ValueError(
+                f"probe name {p.name!r}: a capture profile cannot hold a probe "
+                "name that is empty, has a ',' or starts or ends with a space"
+            )
+    return ",".join(f"{p.name}:{p.width}:{p.lsb}" for p in probes)
 
 
 def capture_profile_from_config(
@@ -209,7 +224,7 @@ def capture_profile_from_config(
         "trigger_delay": int(cfg.trigger_delay),
         "rle": bool(cfg.rle),
         "post_clocks": int(cfg.post_clocks),
-        "probes": ",".join(f"{p.name}:{p.width}:{p.lsb}" for p in cfg.probes),
+        "probes": _probe_spec(cfg.probes),
         "trigger_sequence": [
             {
                 "cmp_a": int(s.cmp_mode_a),

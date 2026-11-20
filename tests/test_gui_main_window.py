@@ -628,6 +628,47 @@ def test_capture_profiles_save_restore_delete(qtbot: Any, tmp_path: Path) -> Non
 
 
 @pytest.mark.gui
+def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
+    from fcapz.capture_profile import normalize_capture_profile
+
+    with ExitStack() as ex:
+        warn = ex.enter_context(patch("fcapz.gui.capture_panel.QMessageBox.warning"))
+        ex.enter_context(
+            patch("fcapz.gui.capture_panel.QInputDialog.getText",
+                  return_value=("fast.json", True)),
+        )
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        cap = w._capture
+        cap.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "trig_stages": 2}
+        )
+        stage = {"cmp_a": 0, "value_a": 1, "mask_a": 255, "is_final": True}
+        cap.set_capture_profiles({
+            "slow": normalize_capture_profile({"decimation": 100_000}),
+            "long": normalize_capture_profile(
+                {"posttrigger": 5, "trigger_sequence": [stage, stage, stage]}
+            ),
+        })
+
+        # The full 24-bit decimation fits.
+        assert cap.apply_capture_profile("slow")
+        assert cap.build_capture_config().decimation == 100_000
+
+        # Three stages on a two-stage core: refused, form unchanged.
+        assert not cap.apply_capture_profile("long")
+        assert warn.call_count == 1
+        assert cap.build_capture_config().posttrigger != 5
+
+        # A name the CLI would read as a file is not saved.
+        saves: list[str] = []
+        cap.capture_profile_save_requested.connect(saves.append)
+        qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        assert saves == []
+        assert warn.call_count == 2
+
+
+@pytest.mark.gui
 def test_settings_dialog_keeps_capture_profiles(qtbot: Any) -> None:
     from fcapz.capture_profile import normalize_capture_profile
     from fcapz.gui.settings_dialog import SettingsDialog

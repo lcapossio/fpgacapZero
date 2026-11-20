@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
@@ -72,6 +73,21 @@ class FormatTests(unittest.TestCase):
             capture_profile_from_config(cfg), sample_width=96, depth=4096
         )
         self.assertEqual(back, cfg)
+
+    def test_probe_names_may_hold_colons(self):
+        cfg = dataclasses.replace(
+            _full_config(), probes=[ProbeSpec("bus[7:0]", 8, 0), ProbeSpec("u::s", 4, 8)]
+        )
+        back = capture_config_from_profile(
+            capture_profile_from_config(cfg), sample_width=96, depth=4096
+        )
+        self.assertEqual(back.probes, cfg.probes)
+
+    def test_probe_names_a_profile_cannot_hold_are_refused(self):
+        for name in ("a,b", " a", "a "):
+            cfg = dataclasses.replace(_full_config(), probes=[ProbeSpec(name, 4, 0)])
+            with self.assertRaisesRegex(ValueError, "probe name"):
+                capture_profile_from_config(cfg)
 
     def test_the_round_trip_goes_through_json(self):
         cfg = _full_config()
