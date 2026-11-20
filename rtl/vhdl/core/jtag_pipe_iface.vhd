@@ -84,7 +84,9 @@ architecture rtl of jtag_pipe_iface is
     constant SHIFT_CTR_W      : positive := fcapz_clog2(BURST_W + 1);
 
     signal sr                : std_logic_vector(BURST_W - 1 downto 0) := (others => '0');
-    signal cmd_sr            : std_logic_vector(48 downto 0) := (others => '0');
+    -- The command is the last 49 bits shifted in, which a register scan
+    -- (at least 49 shifts) leaves at the top of sr.
+    signal cmd_sr            : std_logic_vector(48 downto 0);
     signal staging           : std_logic_vector(BURST_W - 1 downto 0) := (others => '0');
     signal rd_off            : unsigned(SEG_PTR_W - 1 downto 0) := (others => '0');
     signal next_off          : unsigned(SEG_PTR_W - 1 downto 0) := (others => '0');
@@ -105,6 +107,7 @@ architecture rtl of jtag_pipe_iface is
     signal seg_base_of_ptr      : std_logic_vector(PTR_W - 1 downto 0);
     signal burst_ptr_off        : unsigned(SEG_PTR_W - 1 downto 0);
 begin
+    cmd_sr <= sr(BURST_W - 1 downto BURST_W - 49);
     assert is_power_of_two(SEG_DEPTH)
         report "jtag_pipe_iface: SEG_DEPTH must be a power of two"
         severity failure;
@@ -158,7 +161,6 @@ begin
     begin
         if arst = '1' then
             sr <= (others => '0');
-            cmd_sr <= (others => '0');
             staging <= (others => '0');
             rd_off <= (others => '0');
             next_off <= (others => '0');
@@ -180,7 +182,6 @@ begin
             if sel = '1' then
                 if capture = '1' then
                     shift_cnt <= (others => '0');
-                    cmd_sr <= (others => '0');
                     if (burst_start xor burst_start_seen) = '1' then
                         burst_start_seen <= burst_start;
                         burst_mode <= '1';
@@ -208,7 +209,6 @@ begin
                     end if;
                 elsif shift_en = '1' then
                     sr <= tdi & sr(BURST_W - 1 downto 1);
-                    cmd_sr <= tdi & cmd_sr(48 downto 1);
                     if shift_cnt /= to_unsigned(BURST_W, SHIFT_CTR_W) then
                         shift_cnt <= shift_cnt + to_unsigned(1, SHIFT_CTR_W);
                     end if;

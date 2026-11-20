@@ -98,7 +98,9 @@ module jtag_pipe_iface #(
     endgenerate
 
     reg [BURST_W-1:0] sr;
-    reg [48:0] cmd_sr;
+    // The command is the last 49 bits shifted in, which a register scan
+    // (at least 49 shifts) leaves at the top of sr.
+    wire [48:0] cmd_sr = sr[BURST_W-1 -: 49];
     reg [BURST_W-1:0] staging;
     reg [SEG_PTR_W-1:0] rd_off;
     reg [SEG_PTR_W-1:0] next_off;
@@ -191,7 +193,6 @@ module jtag_pipe_iface #(
     always @(posedge tck or posedge arst) begin
         if (arst) begin
             sr <= {BURST_W{1'b0}};
-            cmd_sr <= 49'h0;
             staging <= {BURST_W{1'b0}};
             rd_off <= {SEG_PTR_W{1'b0}};
             next_off <= {SEG_PTR_W{1'b0}};
@@ -213,7 +214,6 @@ module jtag_pipe_iface #(
             if (sel) begin
                 if (capture) begin
                     shift_cnt <= {SHIFT_CTR_W{1'b0}};
-                    cmd_sr <= 49'h0;
                     if (burst_start ^ burst_start_seen) begin
                         burst_start_seen <= burst_start;
                         burst_mode <= 1'b1;
@@ -236,7 +236,6 @@ module jtag_pipe_iface #(
                     end
                 end else if (shift_en) begin
                     sr <= {tdi, sr[BURST_W-1:1]};
-                    cmd_sr <= {tdi, cmd_sr[48:1]};
                     if (shift_cnt != BURST_SCAN_BITS)
                         shift_cnt <= shift_cnt + 1'b1;
                 end else if (update) begin
