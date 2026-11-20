@@ -254,6 +254,11 @@ Every field has a default; the only required ones are `pretrigger`,
 Asserts the ARM bit.  After this the ELA is recording into its
 circular buffer and waiting for the trigger.
 
+On a core with `STATUS[4]`, `arm()`, `reset()` and `force_idle()` first
+wait for the previous ARM or RESET to reach the sample clock domain. After
+0.5 s they raise `CommandPendingError` (a `RuntimeError`) without writing:
+the sample clock is stopped or held in reset.
+
 ### `wait_done(timeout=10.0, poll_interval=0.05) -> bool`
 
 Polls the STATUS register until DONE is asserted, or returns False

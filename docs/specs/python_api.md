@@ -143,7 +143,9 @@ Soft-reset the ELA capture state (CTRL reset bit).
 
 The core re-arms at once if the runtime STARTUP_ARM register is set
 (`CaptureConfig.startup_arm=True`); use `force_idle` when the
-next step needs a verified idle core.
+next step needs a verified idle core.  Raises
+`CommandPendingError` if the previous ARM or RESET never
+reaches the sample clock.
 
 #### `Analyzer.force_idle`
 
@@ -255,6 +257,8 @@ Raises `ManagerResetError` if the core's slot was reset since
 `CAPTURE_GEN` (`COMPARE_CAPS` bit 21), raises
 `CaptureChangedError` if another controller armed or reset the
 core at the same time; the capture read later must be this arm's.
+Raises `CommandPendingError` if the previous ARM or RESET never
+reaches the sample clock.
 
 #### `Analyzer.wait_done`
 

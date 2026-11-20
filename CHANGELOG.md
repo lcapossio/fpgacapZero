@@ -138,8 +138,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   sequenced ELA takes about 830 fewer LUTs, and 300 (8-bit) to 740 (64-bit)
   fewer FFs; other builds lose about 25 LUTs and 65-180 FFs. Since the
   latch reads the snapshot, a new `STATUS[4]` is set while an ARM or RESET
-  write is still crossing to the sample clock, and the host waits for it
-  to clear before the next ARM or RESET (up to 0.2 s, then writes anyway).
+  write is still crossing to the sample clock (for RESET, until its
+  startup arm has also happened), and the host waits for it to clear
+  before the next ARM or RESET. After 0.5 s it raises
+  `CommandPendingError` without writing (the sample clock is stopped).
   Before, two such writes close together could arm with a mix of their
   settings. Verilog and VHDL.
 

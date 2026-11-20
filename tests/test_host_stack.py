@@ -934,7 +934,7 @@ class AnalyzerTests(unittest.TestCase):
                 t.events[ctrl_at - 3:ctrl_at], ["status:1", "status:1", "status:0"]
             )
 
-    def test_ctrl_command_wait_gives_up_on_a_stopped_sample_clock(self):
+    def test_ctrl_command_wait_refuses_on_a_stopped_sample_clock(self):
         t = FakeTransport()
         analyzer = Analyzer(t)
         analyzer.connect()
@@ -947,9 +947,13 @@ class AnalyzerTests(unittest.TestCase):
             real_write(addr, value)
 
         t.write_reg = record
+        from fcapz.analyzer import CommandPendingError
+
         with mock.patch("fcapz.analyzer._CTRL_CMD_SETTLE_S", 0.0):
-            analyzer.reset()
-        self.assertIn((0x0004, 2), writes)
+            with self.assertRaises(CommandPendingError):
+                analyzer.reset()
+        # A second toggle would cancel the pending one: nothing is written.
+        self.assertNotIn(0x0004, [addr for addr, _ in writes])
 
     def test_status_reports_capture_bits(self):
         # A cheap poll (no sample transfer) so a client can tell "waiting for

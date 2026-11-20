@@ -220,9 +220,10 @@ _CTRL_RESET = 1 << 1
 _FORCE_IDLE_SETTLE_S = 0.05
 
 # How long an ARM / RESET waits for the previous one to reach the sample
-# clock (STATUS[4]).  It goes ahead after that: a stopped sample clock never
-# takes it, and the write then behaves as on a core without the bit.
-_CTRL_CMD_SETTLE_S = 0.2
+# clock (STATUS[4]) before raising CommandPendingError.  It never writes over
+# a pending command: a second ARM toggle would cancel the first, and either
+# would replace the settings snapshot the first still needs.
+_CTRL_CMD_SETTLE_S = 0.5
 
 _TRIG_VALUE_MATCH = 1 << 0
 _TRIG_EDGE_DETECT = 1 << 1
@@ -490,6 +491,12 @@ def _last_entry_clocks(result: CaptureResult) -> int:
     if runs and len(runs) == len(result.samples):
         return int(runs[-1])
     return 1
+
+
+class CommandPendingError(RuntimeError):
+    """The previous ARM or RESET has not reached the sample clock domain
+    (``STATUS[4]`` still set), so the next one is not written: usually the
+    sample clock is stopped or held in reset.  Retry once it runs."""
 
 
 class CaptureChangedError(RuntimeError):
@@ -777,8 +784,10 @@ class Analyzer:
         The core snapshots the settings on each ARM / RESET write, and the
         sample side reads that snapshot when the command reaches it; a second
         ARM / RESET before then would replace settings the first still needs
-        (STATUS[4] is set meanwhile).  Gives up after ``_CTRL_CMD_SETTLE_S``,
-        as with a stopped sample clock, and lets the write go ahead.
+        (STATUS[4] is set meanwhile), and a second toggle of the same kind
+        would cancel the first.  Raises :class:`CommandPendingError` after
+        ``_CTRL_CMD_SETTLE_S``, as with a stopped sample clock, without
+        writing.
         """
         deadline = None
         while self.transport.read_reg(_ADDR_STATUS) & _STATUS_CMD_BUSY:
@@ -786,12 +795,11 @@ class Analyzer:
             if deadline is None:
                 deadline = now + _CTRL_CMD_SETTLE_S
             elif now >= deadline:
-                _log.debug(
-                    "previous ARM/RESET still in flight after %.1f s "
-                    "(sample clock stopped?); writing anyway",
-                    _CTRL_CMD_SETTLE_S,
+                raise CommandPendingError(
+                    f"the previous ARM/RESET has not reached the sample clock "
+                    f"after {_CTRL_CMD_SETTLE_S:.1f} s (STATUS[4] still set): "
+                    "is the sample clock running and out of reset?"
                 )
-                return
 
     @_selected_transaction
     def reset(self) -> None:
@@ -799,7 +807,9 @@ class Analyzer:
 
         The core re-arms at once if the runtime STARTUP_ARM register is set
         (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
-        next step needs a verified idle core.
+        next step needs a verified idle core.  Raises
+        :class:`CommandPendingError` if the previous ARM or RESET never
+        reaches the sample clock.
         """
         self._armed_gen = None
         state = self._slot_state()
@@ -1197,6 +1207,8 @@ class Analyzer:
         ``CAPTURE_GEN`` (``COMPARE_CAPS`` bit 21), raises
         :class:`CaptureChangedError` if another controller armed or reset the
         core at the same time; the capture read later must be this arm's.
+        Raises :class:`CommandPendingError` if the previous ARM or RESET never
+        reaches the sample clock.
         """
         state = self._check_configured_state("at arm")
         self._armed_gen = None
