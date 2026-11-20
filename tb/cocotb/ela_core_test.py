@@ -1324,6 +1324,27 @@ async def config_user1_disabled(dut):
 
 
 @cocotb.test()
+async def sequencer_mode9_never_fires(dut):
+    """Compare mode 9 (EQ or CHANGED) belongs to the single-stage comparator
+    behind TRIG_MODE 3.  A sequencer stage written with it by a raw register
+    write never fires, even with a zero mask (everything equal)."""
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1009)   # final stage, A only, mode 9
+    await ela.write(ADDR_SEQ_BASE + 4, 0)
+    await ela.write(ADDR_SEQ_BASE + 8, 0)
+    ela.dut.probe_in.value = 0
+    await ela.arm()
+    for value in (0, 0, 1, 2, 2, 3):
+        ela.dut.probe_in.value = value
+        await ela.wait_sample(4)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"sequencer mode 9 fired, status=0x{status:x}"
+
+
+@cocotb.test()
 async def config_rel_compare(dut):
     ela = await setup(dut)
     assert await ela.read(ADDR_COMPARE_CAPS) == 0x007A_01FF

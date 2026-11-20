@@ -17,14 +17,15 @@
 //   6 = RISING  masked bits: all-zero → non-zero
 //   7 = FALLING masked bits: non-zero → all-zero
 //   8 = CHANGED masked bits: any bit changed from previous
-//   9 = EQ or CHANGED (internal: the legacy TRIG_MODE "both"; not in
-//       COMPARE_CAPS, so hosts cannot select it)
+//   9 = EQ or CHANGED, only with BOTH_MODE=1 (the legacy TRIG_MODE "both"
+//       on the single-stage comparator); otherwise never fires, like 10-15
 //
 // All relational compares are unsigned and operate on the masked values.
 
 module trig_compare #(
     parameter W = 8,
-    parameter REL_COMPARE = 0
+    parameter REL_COMPARE = 0,
+    parameter BOTH_MODE = 0
 ) (
     input  wire [W-1:0] probe,      // current sample
     input  wire [W-1:0] probe_prev, // previous sample
@@ -58,7 +59,7 @@ module trig_compare #(
             4'd6:    hit = zero_prev & ~zero_cur;     // RISING
             4'd7:    hit = ~zero_prev & zero_cur;     // FALLING
             4'd8:    hit = changed;                   // CHANGED
-            4'd9:    hit = eq | changed;              // EQ or CHANGED
+            4'd9:    hit = (BOTH_MODE != 0) && (eq | changed);  // EQ or CHANGED
             default: hit = 1'b0;
         endcase
     end

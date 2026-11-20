@@ -819,7 +819,10 @@ module fcapz_ela #(
 
     // Simple trigger: uses stage-0 comparators (backward compatible)
     wire simple_hit_a_raw, simple_hit_b_raw;
-    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE)) u_simple_a (
+    // BOTH_MODE: TRIG_MODE 3 maps comparator A to mode 9 (EQ or CHANGED).
+    // Only this comparator has it; a sequencer stage written with mode 9
+    // never fires.
+    trig_compare #(.W(SAMPLE_W), .REL_COMPARE(REL_COMPARE), .BOTH_MODE(1)) u_simple_a (
         .probe(active_probe), .probe_prev(probe_prev),
         .value(trig_value), .mask(trig_mask),
         .mode(trig_cmp_mode_a), .hit(simple_hit_a_raw)

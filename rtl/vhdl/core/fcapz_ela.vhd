@@ -120,7 +120,8 @@ architecture rtl of fcapz_ela is
         probe_prev : std_logic_vector;
         value      : std_logic_vector;
         mask       : std_logic_vector;
-        mode       : std_logic_vector(3 downto 0)
+        mode       : std_logic_vector(3 downto 0);
+        both_mode  : boolean := false
     ) return std_logic is
         variable mp        : unsigned(probe'range);
         variable mv        : unsigned(value'range);
@@ -144,8 +145,9 @@ architecture rtl of fcapz_ela is
             when 6 => if zero_prev and not zero_cur then return '1'; end if;
             when 7 => if not zero_prev and zero_cur then return '1'; end if;
             when 8 => if mp /= mpp then return '1'; end if;
-            -- EQ or CHANGED: the legacy TRIG_MODE "both" (internal)
-            when 9 => if mp = mv or mp /= mpp then return '1'; end if;
+            -- EQ or CHANGED: the legacy TRIG_MODE "both", single-stage
+            -- comparator A only (rtl/trig_compare.v BOTH_MODE)
+            when 9 => if both_mode and (mp = mv or mp /= mpp) then return '1'; end if;
             when others => null;
         end case;
         return '0';
@@ -1105,7 +1107,7 @@ begin
                 );
             end if;
         else
-            hit_a := cmp_hit(compare_probe, probe_prev, trig_value, trig_mask, trig_cmp_mode_a);
+            hit_a := cmp_hit(compare_probe, probe_prev, trig_value, trig_mask, trig_cmp_mode_a, true);
             hit_b := '0';
             if DUAL_COMPARE /= 0 then
                 hit_b := cmp_hit(compare_probe, probe_prev, trig_value_b, trig_mask_b, trig_cmp_mode_b);

@@ -73,6 +73,7 @@ SEQUENCER_TESTS = (
     "sequencer_counts_first_hit_after_holdoff",
     "sequencer_next_stage_ignores_previous_stage_match",
     "sequencer_matches_cycle_reference",
+    "sequencer_mode9_never_fires",
 )
 
 RLE_TESTS = (

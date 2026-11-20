@@ -8,7 +8,8 @@ use ieee.numeric_std.all;
 entity trig_compare is
     generic (
         W           : positive := 8;
-        REL_COMPARE : integer := 0
+        REL_COMPARE : integer := 0;
+        BOTH_MODE   : integer := 0
     );
     port (
         probe      : in  std_logic_vector(W - 1 downto 0);
@@ -58,7 +59,7 @@ begin
             when "0110" => hit <= '1' when zero_prev and not zero_cur else '0';
             when "0111" => hit <= '1' when not zero_prev and zero_cur else '0';
             when "1000" => hit <= '1' when changed else '0';
-            when "1001" => hit <= '1' when eq or changed else '0';
+            when "1001" => hit <= '1' when BOTH_MODE /= 0 and (eq or changed) else '0';
             when others => hit <= '0';
         end case;
     end process;
