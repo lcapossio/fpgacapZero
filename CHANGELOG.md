@@ -130,6 +130,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **ELA: smaller sequencer and register interface.** The sequencer
+  registers are decoded against fixed addresses instead of through a
+  divider, the single-chain pipe takes the register command from its data
+  shift register, and the arm latch reads the trigger, qualification and
+  sequencer settings straight from the ARM snapshot. On Artix-7 a 4-stage
+  sequenced ELA takes about 830 fewer LUTs, and 300 (8-bit) to 740 (64-bit)
+  fewer FFs; other builds lose about 25 LUTs and 65-180 FFs. Behavior and
+  the register map are unchanged.
+
 - **FTDI: a failed USB transfer closes the channel for every transport on
   it.** Each refuses I/O until it connects again, which opens the channel
   afresh; before, only the transport that saw the failure (and only during
@@ -145,6 +154,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `fcapz.rpc`, with the warning on `fcapz.web`).
 
 ### Fixed
+
+- **ELA: trigger mode `both` fired on a change only.** Without the
+  sequencer (`TRIG_STAGES=1`), `TRIG_MODE` 3 set both comparators to
+  "changed", so a steady sample equal to the trigger value never
+  triggered. It is now value match OR change, as documented, on one
+  comparator, so it works with `DUAL_COMPARE=0` too. Verilog and VHDL.
 
 - **FTDI: a cancel could be lost across a reconnect.** `cancel()` bumped
   the cancel counter without a lock, so racing the detach of a reconnect
