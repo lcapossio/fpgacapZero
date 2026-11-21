@@ -1250,7 +1250,9 @@ def _run_capture_profile(args: argparse.Namespace) -> int:
         if is_profile_path(args.ref):
             raise ValueError("delete takes a profile name, not a file")
         gui = load_gui_settings(gpath)
-        if gui.capture_profiles.pop(args.ref, None) is None:
+        found = gui.capture_profiles.pop(args.ref, None) is not None
+        found |= gui.unreadable_capture_profiles.pop(args.ref, None) is not None
+        if not found:
             known = ", ".join(sorted(gui.capture_profiles)) or "(none)"
             raise ValueError(f"unknown capture profile {args.ref!r} (known: {known})")
         save_gui_settings(gui, gpath)
@@ -1258,6 +1260,8 @@ def _run_capture_profile(args: argparse.Namespace) -> int:
         return 0
 
     # save
+    if not args.ref.strip():
+        raise ValueError("a capture profile needs a non-empty name")
     err = _apply_named_probe_profile(args)
     if err:
         raise ValueError(err)
@@ -1275,6 +1279,7 @@ def _run_capture_profile(args: argparse.Namespace) -> int:
         return 0
     gui = load_gui_settings(gpath)
     gui.capture_profiles[args.ref] = profile
+    gui.unreadable_capture_profiles.pop(args.ref, None)
     save_gui_settings(gui, gpath)
     print(f"saved capture profile {args.ref!r} -> {gpath}")
     return 0
@@ -1284,7 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
-    if getattr(args, "capture_profile", None):
+    if getattr(args, "capture_profile", None) is not None:
         try:
             args = _apply_capture_profile(parser, args, argv)
         except ValueError as exc:

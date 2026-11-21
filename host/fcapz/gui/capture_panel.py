@@ -697,6 +697,13 @@ class CapturePanel(QGroupBox):
                 )
         if body.get("startup_arm"):
             return "it turns startup arm on, which the GUI does not set"
+        if body.get("decimation") and not self._hw_has_decimation:
+            return "it uses decimation, which the connected core does not have"
+        ext = str(body.get("ext_trigger_mode", "disabled")).lower()
+        if ext != "disabled" and not self._hw_has_ext_trigger:
+            return "it uses the external trigger, which the connected core does not have"
+        if body.get("stor_qual_mode") and not self._hw_has_storage_qual:
+            return "it uses storage qualification, which the connected core does not have"
         if body.get("rle") and not self._rle.isEnabled():
             return "it uses run-length capture, which the connected core does not have"
         seq = body.get("trigger_sequence")
@@ -1037,9 +1044,13 @@ class CapturePanel(QGroupBox):
 
     def _on_cap_profile_picked(self, _idx: int) -> None:
         name = self.selected_capture_profile()
+        if name is not None and not self.apply_capture_profile(name):
+            # Refused: the form still holds other settings, so show none
+            # picked (and let the same profile be picked again later).
+            with QSignalBlocker(self._cap_profile_pick):
+                self._cap_profile_pick.setCurrentIndex(0)
+            name = None
         self._btn_cap_profile_delete.setEnabled(name is not None)
-        if name is not None:
-            self.apply_capture_profile(name)
 
     def _on_cap_profile_save_clicked(self) -> None:
         name, ok = QInputDialog.getText(

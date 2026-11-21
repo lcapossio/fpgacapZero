@@ -672,6 +672,12 @@ def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
         assert warn.call_count == 3
         assert cap.build_capture_config().posttrigger != 5
 
+        # Picked from the list, a refused profile is not left selected.
+        combo = cap._cap_profile_pick
+        combo.setCurrentIndex(combo.findData("boot"))
+        assert cap.selected_capture_profile() is None
+        assert warn.call_count == 4
+
         # count 0 (no count check) is kept, not raised to 1.
         assert cap.apply_capture_profile("uncounted")
         assert cap.build_capture_config().sequence[0].count_target == 0
@@ -681,7 +687,17 @@ def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
         cap.capture_profile_save_requested.connect(saves.append)
         qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
         assert saves == []
-        assert warn.call_count == 4
+        assert warn.call_count == 5
+
+        # A feature the core lacks: the form would hold a value it cannot use.
+        cap.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "trig_stages": 2,
+             "has_ext_trigger": False}
+        )
+        cap.set_capture_profiles(
+            {"ext": normalize_capture_profile({"ext_trigger_mode": "or"})}
+        )
+        assert not cap.apply_capture_profile("ext")
 
 
 @pytest.mark.gui

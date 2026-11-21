@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
-from ..capture_profile import capture_profile_from_config
+from ..capture_profile import capture_profile_from_config, normalize_capture_profile
 from ..eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
@@ -1190,14 +1190,18 @@ class MainWindow(QMainWindow):
     def _on_capture_profile_save(self, name: str) -> None:
         try:
             cfg = self._capture.build_capture_config()
-            profile = capture_profile_from_config(
-                cfg, trigger_value_radix=self._capture.trigger_value_radix()
+            # Normalized as on load, so what is saved also loads back.
+            profile = normalize_capture_profile(
+                capture_profile_from_config(
+                    cfg, trigger_value_radix=self._capture.trigger_value_radix()
+                )
             )
         except ValueError as exc:
             QMessageBox.warning(self, "Save capture profile", str(exc))
             return
         gui = load_gui_settings(self._config_path)
         gui.capture_profiles[name] = profile
+        gui.unreadable_capture_profiles.pop(name, None)
         save_gui_settings(gui, self._config_path)
         self._capture.set_capture_profiles(gui.capture_profiles, select=name)
         self.statusBar().showMessage(f"Saved capture profile {name!r}")
@@ -1205,6 +1209,7 @@ class MainWindow(QMainWindow):
     def _on_capture_profile_delete(self, name: str) -> None:
         gui = load_gui_settings(self._config_path)
         gui.capture_profiles.pop(name, None)
+        gui.unreadable_capture_profiles.pop(name, None)
         save_gui_settings(gui, self._config_path)
         self._capture.set_capture_profiles(gui.capture_profiles)
         self.statusBar().showMessage(f"Deleted capture profile {name!r}")

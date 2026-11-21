@@ -269,6 +269,7 @@ class SettingsDialog(QDialog):
             probe_profiles=profiles,
             trigger_history=list(self._base.trigger_history),
             capture_profiles=dict(self._base.capture_profiles),
+            unreadable_capture_profiles=dict(self._base.unreadable_capture_profiles),
         )
 
 

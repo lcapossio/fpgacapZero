@@ -134,6 +134,10 @@ class GuiSettings:
     trigger_history: list[dict[str, Any]] = field(default_factory=list)
     #: Named full capture setups (see :mod:`fcapz.capture_profile`).
     capture_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``[capture_profiles.*]`` tables this version could not read, kept as
+    #: written so a save does not delete them; a valid profile of the same
+    #: name replaces one, and deleting that name drops it.
+    unreadable_capture_profiles: dict[str, Any] = field(default_factory=dict)
 
 
 def _loads_toml(raw: str) -> dict[str, Any]:
@@ -261,6 +265,7 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
                 profiles[str(name)] = ProbeProfile(name=str(name), probes=probes)
 
     capture_profiles: dict[str, dict[str, Any]] = {}
+    unreadable: dict[str, Any] = {}
     craw = data.get("capture_profiles")
     if isinstance(craw, dict):
         for name, body in craw.items():
@@ -268,6 +273,7 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
                 capture_profiles[str(name)] = normalize_capture_profile(body)
             except ValueError as exc:
                 _log.warning("gui.toml: skipping capture profile %r: %s", name, exc)
+                unreadable[str(name)] = body
 
     hist = data.get("trigger_history")
     trigger_history: list[dict[str, Any]] = []
@@ -296,6 +302,7 @@ def gui_settings_from_mapping(data: Mapping[str, Any]) -> GuiSettings:
         probe_profiles=profiles,
         trigger_history=trigger_history[:_TRIGGER_HISTORY_MAX],
         capture_profiles=capture_profiles,
+        unreadable_capture_profiles=unreadable,
     )
 
 
@@ -338,7 +345,8 @@ def gui_settings_to_mapping(settings: GuiSettings) -> dict[str, Any]:
         "probe_profiles": probe_blob,
         "trigger_history": list(settings.trigger_history),
         "capture_profiles": {
-            name: dict(body) for name, body in settings.capture_profiles.items()
+            **settings.unreadable_capture_profiles,
+            **{name: dict(body) for name, body in settings.capture_profiles.items()},
         },
     }
 

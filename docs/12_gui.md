@@ -223,8 +223,17 @@ profiles with `--capture-profile NAME` and manages them with
 [chapter 10](10_cli_reference.md#capture-profile)).  Unlike the
 trigger presets, which keep the last ten captures by themselves,
 profiles stay until you delete them.  The panel has no **startup arm**
-setting, so a profile saved here has it off, and one saved by the CLI
-with `--startup-arm` keeps it only for the CLI.
+setting, so a profile saved here has it off.
+
+A profile loads exactly or not at all: the panel refuses one it cannot
+show unchanged for the connected core, with a message saying why. That
+covers startup arm on (a CLI profile saved with `--startup-arm`), a
+feature the core lacks (decimation, external trigger, storage
+qualification, run-length capture), more sequencer stages than it has,
+and values outside a field's range. Names ending in `.json` or holding
+`/` or `\` are refused on **Save…**, since the CLI reads them as files.
+A profile in `gui.toml` that this version cannot read is skipped (with
+a warning in the log) but kept in the file.
 
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
 **Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).

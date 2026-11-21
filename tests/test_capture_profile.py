@@ -136,6 +136,13 @@ class FormatTests(unittest.TestCase):
             "stage key": {"trigger_sequence": [{"cmp": 1}]},
             "stage list": {"trigger_sequence": {"cmp_a": 1}},
             "radix": {"trigger_value_radix": 3},
+            "sample clock": {"sample_clock_hz": 0},
+            "decimation range": {"decimation": 0x100_0000},
+            "post clocks without rle": {"post_clocks": 5},
+            "stage compare mode": {"trigger_sequence": [{"cmp_a": 9}]},
+            "stage combine": {"trigger_sequence": [{"combine": 4}]},
+            "stage next": {"trigger_sequence": [{"next_state": 4}]},
+            "stage count": {"trigger_sequence": [{"count": 0x10000}]},
         }
         for label, data in cases.items():
             with self.subTest(label), self.assertRaises(ValueError):
@@ -226,6 +233,23 @@ class GuiTomlTests(unittest.TestCase):
             loaded = load_gui_settings(self.path).capture_profiles
         self.assertEqual(list(loaded), ["good"])
         self.assertIn("bad", logs.output[0])
+
+    def test_an_unreadable_profile_survives_a_save_until_replaced_or_deleted(self):
+        self.path.write_text(
+            "[capture_profiles.good]\nposttrigger = 3\n"
+            "[capture_profiles.newer]\nfuture_key = 1\n",
+            encoding="utf-8",
+        )
+        with self.assertLogs("fcapz.gui.settings", "WARNING"):
+            gui = load_gui_settings(self.path)
+        save_gui_settings(gui, self.path)
+        self.assertIn("future_key", self.path.read_text(encoding="utf-8"))
+        # A valid profile of the same name replaces it.
+        gui.capture_profiles["newer"] = normalize_capture_profile({"posttrigger": 7})
+        save_gui_settings(gui, self.path)
+        loaded = load_gui_settings(self.path)
+        self.assertEqual(loaded.capture_profiles["newer"]["posttrigger"], 7)
+        self.assertEqual(loaded.unreadable_capture_profiles, {})
 
 
 class CliTests(unittest.TestCase):
@@ -341,6 +365,18 @@ class CliTests(unittest.TestCase):
         self.assertIn("unknown capture profile", err)
         code, out, _ = self._run("capture-profile", "list")
         self.assertIn("no capture profiles", out)
+        code, _, err = self._run("capture-profile", "save", "  ")
+        self.assertEqual(code, 2)
+        self.assertIn("non-empty name", err)
+        code, _, err = self._run("capture", "--out", "x", "--capture-profile", "")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown capture profile", err)
+
+    def test_delete_drops_an_unreadable_profile(self):
+        self.gui.write_text("[capture_profiles.newer]\nfuture_key = 1\n", encoding="utf-8")
+        code, out, _ = self._run("capture-profile", "delete", "newer")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("newer", self.gui.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

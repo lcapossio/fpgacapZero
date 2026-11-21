@@ -74,6 +74,9 @@ _STAGE_FIELDS: dict[str, tuple[str, Any]] = {
 
 _UINT16_KEYS = ("trigger_holdoff", "trigger_delay")
 
+#: Largest value of each sequencer stage field (its SEQ_CFG bits).
+_STAGE_MAX = {"cmp_a": 8, "cmp_b": 8, "combine": 3, "next_state": 3, "count": 0xFFFF}
+
 
 def _coerce(where: str, kind: str, raw: Any) -> Any:
     if kind == "bool":
@@ -138,6 +141,12 @@ def normalize_capture_profile(data: Mapping[str, Any]) -> dict[str, Any]:
     for key in _UINT16_KEYS:
         if out[key] > 0xFFFF:
             raise ValueError(f"{key}: must be 0..65535, got {out[key]}")
+    if out["sample_clock_hz"] < 1:
+        raise ValueError("sample_clock_hz: must be >= 1")
+    if out["decimation"] > 0xFF_FFFF:
+        raise ValueError(f"decimation: must be 0..16777215, got {out['decimation']}")
+    if out["post_clocks"] and not out["rle"]:
+        raise ValueError("post_clocks: needs rle (run-length capture)")
     if out["probes"]:
         parse_probe_spec(out["probes"])  # raises on a malformed spec
 
@@ -150,10 +159,14 @@ def normalize_capture_profile(data: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(stage, Mapping):
             raise ValueError(f"{where}: expected a mapping")
         _check_keys(where, stage, tuple(_STAGE_FIELDS))
-        stages.append({
+        fields = {
             key: _coerce(f"{where}.{key}", kind, stage[key]) if key in stage else default
             for key, (kind, default) in _STAGE_FIELDS.items()
-        })
+        }
+        for key, top in _STAGE_MAX.items():
+            if fields[key] > top:
+                raise ValueError(f"{where}.{key}: must be 0..{top}, got {fields[key]}")
+        stages.append(fields)
     out["trigger_sequence"] = stages
 
     if "trigger_value_radix" in data:
