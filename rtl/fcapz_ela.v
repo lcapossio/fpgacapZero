@@ -1379,12 +1379,19 @@ module fcapz_ela #(
     // after a reset of the sample side (with or without JTAG), STATUS[4]
     // stays set until that arm has happened.
     reg arm_ack_sync1, arm_ack_sync2, reset_ack_sync1, reset_ack_sync2;
+    // The startup_pend pair starts where startup_arm_pending starts, so the
+    // bit is set from the first jtag_clk after reset, not two edges later.
     reg startup_pend_sync1, startup_pend_sync2;
+    initial begin
+        startup_pend_sync1 = (STARTUP_ARM != 0);
+        startup_pend_sync2 = (STARTUP_ARM != 0);
+    end
     always @(posedge jtag_clk or posedge jtag_rst) begin
         if (jtag_rst) begin
             arm_ack_sync1   <= 1'b0; arm_ack_sync2   <= 1'b0;
             reset_ack_sync1 <= 1'b0; reset_ack_sync2 <= 1'b0;
-            startup_pend_sync1 <= 1'b0; startup_pend_sync2 <= 1'b0;
+            startup_pend_sync1 <= (STARTUP_ARM != 0);
+            startup_pend_sync2 <= (STARTUP_ARM != 0);
         end else begin
             arm_ack_sync1   <= arm_toggle_sync4;
             arm_ack_sync2   <= arm_ack_sync1;

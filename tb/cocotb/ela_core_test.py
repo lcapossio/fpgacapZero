@@ -1101,7 +1101,7 @@ async def boot_startup_arm_holds_status4(dut):
     dut.sample_rst.value = 0
     await ela.wait_jtag(2)
     dut.jtag_rst.value = 0
-    await ela.wait_jtag(4)
+    # Read at once: the bit must be set from the first jtag_clk after reset.
     for _ in range(3):
         status = await ela.read(ADDR_STATUS)
         assert status & 0x10, f"STATUS[4] clear before the startup arm: 0x{status:x}"
