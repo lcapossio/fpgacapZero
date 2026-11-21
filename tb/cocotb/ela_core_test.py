@@ -1077,6 +1077,48 @@ async def ctrl_cmd_busy_clears_after_the_arm(dut):
 
 
 @cocotb.test()
+async def boot_startup_arm_holds_status4(dut):
+    """A STARTUP_ARM=1 core leaves reset with a startup arm still to come,
+    which reads the *_hold snapshot: STATUS[4] stays set until it happens,
+    even while the sample clock has not started."""
+    if env_int("ELA_PARAM_STARTUP_ARM", 0) == 0:
+        return
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, unit="ns").start())
+    dut.sample_clk.value = 0
+    dut.sample_rst.value = 1
+    dut.jtag_rst.value = 1
+    dut.probe_in.value = 0
+    dut.trigger_in.value = 0
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
+    dut.burst_rd_addr.value = 0
+    ela = ElaDriver(dut)
+    await ela.wait_jtag(4)
+    dut.sample_rst.value = 0
+    await ela.wait_jtag(2)
+    dut.jtag_rst.value = 0
+    await ela.wait_jtag(4)
+    for _ in range(3):
+        status = await ela.read(ADDR_STATUS)
+        assert status & 0x10, f"STATUS[4] clear before the startup arm: 0x{status:x}"
+        assert not status & 0x1
+    cocotb.start_soon(Clock(dut.sample_clk, 10, unit="ns").start())
+    for _ in range(50):
+        status = await ela.read(ADDR_STATUS)
+        if not status & 0x10:
+            break
+    else:
+        raise AssertionError("STATUS[4] stuck after the sample clock started")
+    # The reset trigger mask matches anything, so the arm may have triggered
+    # and finished already: armed, triggered or done all show it happened.
+    assert status & 0x7, f"STATUS[4] cleared before the startup arm: 0x{status:x}"
+
+
+@cocotb.test()
 async def input_pipe_captures(dut):
     ela = await setup(dut)
     await ela.write(ADDR_DECIM, 0)

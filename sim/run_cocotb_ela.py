@@ -182,6 +182,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
          "segment_restart_keeps_the_first_sample", "rearm_mid_capture_restarts_cleanly"),
     ),
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
+    CocotbTarget("startup_arm_boot", {"STARTUP_ARM": 1},
+                 ("boot_startup_arm_holds_status4",)),
     CocotbTarget("decim_anchor", {"DECIM_EN": 1},
                  ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
     *(

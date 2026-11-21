@@ -145,7 +145,8 @@ one consistent set.
 - [2] `done`
 - [3] `overflow`
 - [4] `cmd_busy`: an `ARM` or `RESET` write has not yet reached the sample
-  clock domain and come back. The host waits for it to clear before the next
+  clock domain and come back, or a startup arm (after a reset, with
+  `STARTUP_ARM`) has not happened yet. The host waits for it to clear before the next
   `ARM` or `RESET` write; a second write while it is set can arm with a mix of
   the two writes' settings. It stays set while the sample clock is stopped.
 - [31:5] reserved

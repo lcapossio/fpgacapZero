@@ -422,6 +422,8 @@ architecture rtl of fcapz_ela is
     signal arm_ack_sync2     : std_logic := '0';
     signal reset_ack_sync1   : std_logic := '0';
     signal reset_ack_sync2   : std_logic := '0';
+    signal startup_pend_sync1 : std_logic := '0';  -- startup arm still to come
+    signal startup_pend_sync2 : std_logic := '0';
     signal ctrl_cmd_busy     : std_logic;
     signal reset_sync_pulse  : std_logic := '0';  -- a soft reset reaches it
     signal cfg_stage_en      : std_logic := '0';  -- copy *_hold into *_stage
@@ -1288,15 +1290,21 @@ begin
             arm_ack_sync2 <= '0';
             reset_ack_sync1 <= '0';
             reset_ack_sync2 <= '0';
+            startup_pend_sync1 <= '0';
+            startup_pend_sync2 <= '0';
         elsif rising_edge(jtag_clk) then
             arm_ack_sync1 <= arm_toggle_sync4;
             arm_ack_sync2 <= arm_ack_sync1;
             reset_ack_sync1 <= reset_toggle_sync5;
             reset_ack_sync2 <= reset_ack_sync1;
+            startup_pend_sync1 <= startup_arm_pending;
+            startup_pend_sync2 <= startup_pend_sync1;
         end if;
     end process;
+    -- A startup arm also reads *_hold, so a pending one keeps the bit set.
     ctrl_cmd_busy <= (arm_toggle_jtag xor arm_ack_sync2) or
-                     (reset_toggle_jtag xor reset_ack_sync2);
+                     (reset_toggle_jtag xor reset_ack_sync2) or
+                     startup_pend_sync2;
     reset_sync_pulse <= reset_toggle_sync3 xor reset_toggle_sync4;
     cfg_stage_en <= (arm_toggle_sync2 xor arm_toggle_sync3) or
                     (reset_toggle_sync2 xor reset_toggle_sync3);
