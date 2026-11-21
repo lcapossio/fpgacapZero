@@ -233,7 +233,8 @@ qualification, run-length capture), more sequencer stages than it has,
 and values outside a field's range. Names ending in `.json` or holding
 `/` or `\` are refused on **Save…**, since the CLI reads them as files.
 A profile in `gui.toml` that this version cannot read is skipped (with
-a warning in the log) but kept in the file.
+a warning in the log) but kept in the file. **Save…** asks before it
+replaces a profile of the same name, including one of these.
 
 Main **toolbar** (always visible): **Connect**, **Disconnect**, **Configure**, **Arm**,
 **Trigger Immediate**, **Stop**, **Auto re-arm** (checkbox beside **Stop**).

@@ -1200,6 +1200,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save capture profile", str(exc))
             return
         gui = load_gui_settings(self._config_path)
+        # Checked against gui.toml now: the list may predate a CLI save, and
+        # does not show profiles this version cannot read.
+        if name in gui.unreadable_capture_profiles:
+            question = (
+                f"gui.toml holds a capture profile {name!r} this version cannot "
+                "read. Replace it?"
+            )
+        elif name in gui.capture_profiles:
+            question = f"Replace the capture profile {name!r}?"
+        else:
+            question = None
+        if question is not None:
+            answer = QMessageBox.question(self, "Save capture profile", question)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         gui.capture_profiles[name] = profile
         gui.unreadable_capture_profiles.pop(name, None)
         save_gui_settings(gui, self._config_path)

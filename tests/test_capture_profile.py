@@ -95,6 +95,12 @@ class FormatTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "probe name"):
                 capture_profile_from_config(cfg)
 
+    def test_a_bad_ext_trigger_mode_is_refused_not_saved_as_disabled(self):
+        for mode in (3, -1, True):
+            cfg = dataclasses.replace(_full_config(), ext_trigger_mode=mode)
+            with self.assertRaisesRegex(ValueError, "ext_trigger_mode"):
+                capture_profile_from_config(cfg)
+
     def test_the_round_trip_goes_through_json(self):
         cfg = _full_config()
         blob = json.loads(json.dumps(capture_profile_from_config(cfg)))

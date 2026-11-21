@@ -628,6 +628,65 @@ def test_capture_profiles_save_restore_delete(qtbot: Any, tmp_path: Path) -> Non
 
 
 @pytest.mark.gui
+def test_saving_over_a_profile_asks_first(qtbot: Any, tmp_path: Path) -> None:
+    """Replace is asked against gui.toml as it is now: a profile this
+    version cannot read, or one saved by the CLI since, is not lost unasked."""
+    from PySide6.QtWidgets import QMessageBox
+
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        ex.enter_context(
+            patch("fcapz.gui.app_window.default_gui_config_path", return_value=gui_path),
+        )
+        name = ex.enter_context(patch("fcapz.gui.capture_panel.QInputDialog.getText"))
+        ask = ex.enter_context(
+            patch(
+                "fcapz.gui.app_window.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.No,
+            ),
+        )
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        w._capture.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        gui_path.write_text(
+            "[capture_profiles.newer]\nfuture_key = 1\n"
+            "[capture_profiles.cli]\nposttrigger = 3\n",
+            encoding="utf-8",
+        )
+        for taken in ("newer", "cli"):
+            name.return_value = (taken, True)
+            qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        assert ask.call_count == 2
+        assert "cannot read" in ask.call_args_list[0].args[2]
+        text = gui_path.read_text(encoding="utf-8")
+        assert "future_key" in text and "posttrigger = 3" in text
+
+        ask.return_value = QMessageBox.StandardButton.Yes
+        name.return_value = ("newer", True)
+        qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        assert "future_key" not in gui_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.gui
+def test_disconnect_drops_the_last_cores_limits(qtbot: Any) -> None:
+    w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+    qtbot.addWidget(w)
+    cap = w._capture
+    cap.set_hw_probe_info(
+        {"sample_width": 8, "depth": 1024, "num_channels": 1, "num_segments": 4}
+    )
+    assert cap._post.maximum() == 255 and cap._channel.maximum() == 0
+    for disconnect in (cap.clear_hw, lambda: cap.set_hw_probe_info(None)):
+        cap.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "num_segments": 4}
+        )
+        disconnect()
+        assert cap._post.maximum() == 1_000_000
+        assert cap._pre.maximum() == 1_000_000
+        assert cap._channel.maximum() == 15
+
+
+@pytest.mark.gui
 def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
     from fcapz.capture_profile import normalize_capture_profile
 

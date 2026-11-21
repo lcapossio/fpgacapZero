@@ -49,6 +49,9 @@ _SEQ_PROFILE_LIMITS = (
 # Keep background/text from the active theme so dark/light palettes stay readable.
 _PREPOST_SPIN_INVALID_STYLE = "QSpinBox { border: 2px solid #e57373; border-radius: 3px; }"
 _PREPOST_SPIN_NORMAL_STYLE = ""
+# Spin box limits with no core connected.
+_PREPOST_NO_CORE_MAX = 1_000_000
+_CHANNEL_NO_CORE_MAX = 15
 
 _TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
     ("Hex", 16),
@@ -198,10 +201,10 @@ class CapturePanel(QGroupBox):
         self._btn_cap_profile_delete.clicked.connect(self._on_cap_profile_delete_clicked)
 
         self._pre = QSpinBox()
-        self._pre.setRange(0, 1_000_000)
+        self._pre.setRange(0, _PREPOST_NO_CORE_MAX)
         self._pre.setValue(8)
         self._post = QSpinBox()
-        self._post.setRange(0, 1_000_000)
+        self._post.setRange(0, _PREPOST_NO_CORE_MAX)
         self._post.setValue(16)
         self._pre.valueChanged.connect(self._on_pre_post_changed)
         self._post.valueChanged.connect(self._on_pre_post_changed)
@@ -262,7 +265,7 @@ class CapturePanel(QGroupBox):
         self._clock_hz.setValue(100_000_000)
 
         self._channel = QSpinBox()
-        self._channel.setRange(0, 15)
+        self._channel.setRange(0, _CHANNEL_NO_CORE_MAX)
         self._channel.setValue(0)
 
         self._decim = QSpinBox()
@@ -469,6 +472,8 @@ class CapturePanel(QGroupBox):
         self._hw_num_segments = 1
         self._hw_rle_w = 0
         self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
+        self._hw_has_dual_compare = True
+        self._channel.setMaximum(_CHANNEL_NO_CORE_MAX)
         self._ui_busy = False
         self.set_managed_ela_slots([], current=0)
         self._btn_stop.setEnabled(False)
@@ -508,6 +513,11 @@ class CapturePanel(QGroupBox):
     def _refresh_pre_post_validity(self) -> None:
         lim = self._pre_post_depth_limit()
         if lim is None:
+            # No core: drop the last core's limits.
+            with QSignalBlocker(self._pre):
+                self._pre.setMaximum(_PREPOST_NO_CORE_MAX)
+            with QSignalBlocker(self._post):
+                self._post.setMaximum(_PREPOST_NO_CORE_MAX)
             self._pre.setStyleSheet(_PREPOST_SPIN_NORMAL_STYLE)
             self._post.setStyleSheet(_PREPOST_SPIN_NORMAL_STYLE)
             self._btn_pre_max.setEnabled(False)
@@ -1070,14 +1080,8 @@ class CapturePanel(QGroupBox):
                 "name without '/', '\\' or a .json ending.",
             )
             return
-        if name in self._capture_profiles:
-            answer = QMessageBox.question(
-                self,
-                "Save capture profile",
-                f"Replace the capture profile {name!r}?",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        # The main window asks before replacing a profile: it checks gui.toml
+        # as it is now, with profiles this list cannot show.
         self.capture_profile_save_requested.emit(name)
 
     def _on_cap_profile_delete_clicked(self) -> None:
@@ -1135,6 +1139,8 @@ class CapturePanel(QGroupBox):
             self._hw_num_segments = 1
             self._hw_rle_w = 0
             self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
+            self._hw_has_dual_compare = True
+            self._channel.setMaximum(_CHANNEL_NO_CORE_MAX)
             self.set_managed_ela_slots([], current=0)
             self._btn_stop.setEnabled(False)
             self._hw_label.setText(

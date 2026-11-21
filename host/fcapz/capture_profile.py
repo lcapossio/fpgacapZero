@@ -211,6 +211,14 @@ def _probe_spec(probes: list[ProbeSpec]) -> str:
     return ",".join(f"{p.name}:{p.width}:{p.lsb}" for p in probes)
 
 
+def _ext_trigger_name(mode: Any) -> str:
+    if isinstance(mode, bool) or not isinstance(mode, int) or not (
+        0 <= mode < len(EXT_TRIGGER_MODES)
+    ):
+        raise ValueError(f"ext_trigger_mode: expected 0, 1 or 2, got {mode!r}")
+    return EXT_TRIGGER_MODES[mode]
+
+
 def capture_profile_from_config(
     cfg: CaptureConfig,
     *,
@@ -227,8 +235,7 @@ def capture_profile_from_config(
         "channel": int(cfg.channel),
         "decimation": int(cfg.decimation),
         "probe_sel": int(cfg.probe_sel),
-        "ext_trigger_mode": EXT_TRIGGER_MODES[int(cfg.ext_trigger_mode)]
-        if 0 <= int(cfg.ext_trigger_mode) < len(EXT_TRIGGER_MODES) else "disabled",
+        "ext_trigger_mode": _ext_trigger_name(cfg.ext_trigger_mode),
         "stor_qual_mode": int(cfg.stor_qual_mode),
         "stor_qual_value": int(cfg.stor_qual_value),
         "stor_qual_mask": int(cfg.stor_qual_mask),
