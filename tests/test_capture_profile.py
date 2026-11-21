@@ -83,6 +83,12 @@ class FormatTests(unittest.TestCase):
         )
         self.assertEqual(back.probes, cfg.probes)
 
+    def test_parsed_probe_names_drop_edge_spaces(self):
+        from fcapz.capture_profile import parse_probe_spec
+
+        self.assertEqual(parse_probe_spec("signal :8:0")[0].name, "signal")
+        self.assertEqual(cli._parse_probes(" signal :8:0")[0].name, "signal")
+
     def test_probe_names_a_profile_cannot_hold_are_refused(self):
         for name in ("a,b", " a", "a "):
             cfg = dataclasses.replace(_full_config(), probes=[ProbeSpec(name, 4, 0)])

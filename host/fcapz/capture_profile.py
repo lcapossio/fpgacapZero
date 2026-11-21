@@ -183,7 +183,7 @@ def parse_probe_spec(spec: str) -> list[ProbeSpec]:
             ) from None
         if width < 1 or lsb < 0:
             raise ValueError(f"invalid probe spec {part.strip()!r}: width >= 1, lsb >= 0")
-        probes.append(ProbeSpec(name=fields[0], width=width, lsb=lsb))
+        probes.append(ProbeSpec(name=fields[0].strip(), width=width, lsb=lsb))
     return probes
 
 

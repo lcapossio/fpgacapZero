@@ -649,6 +649,11 @@ def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
             "long": normalize_capture_profile(
                 {"posttrigger": 5, "trigger_sequence": [stage, stage, stage]}
             ),
+            "boot": normalize_capture_profile({"posttrigger": 5, "startup_arm": True}),
+            "runs": normalize_capture_profile({"posttrigger": 5, "rle": True}),
+            "uncounted": normalize_capture_profile(
+                {"trigger_sequence": [dict(stage, count=0)]}
+            ),
         })
 
         # The full 24-bit decimation fits.
@@ -660,12 +665,23 @@ def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
         assert warn.call_count == 1
         assert cap.build_capture_config().posttrigger != 5
 
+        # Settings the form cannot hold here: startup arm, and run-length
+        # capture on a core without it.
+        assert not cap.apply_capture_profile("boot")
+        assert not cap.apply_capture_profile("runs")
+        assert warn.call_count == 3
+        assert cap.build_capture_config().posttrigger != 5
+
+        # count 0 (no count check) is kept, not raised to 1.
+        assert cap.apply_capture_profile("uncounted")
+        assert cap.build_capture_config().sequence[0].count_target == 0
+
         # A name the CLI would read as a file is not saved.
         saves: list[str] = []
         cap.capture_profile_save_requested.connect(saves.append)
         qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
         assert saves == []
-        assert warn.call_count == 2
+        assert warn.call_count == 4
 
 
 @pytest.mark.gui

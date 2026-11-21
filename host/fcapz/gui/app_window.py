@@ -1190,13 +1190,14 @@ class MainWindow(QMainWindow):
     def _on_capture_profile_save(self, name: str) -> None:
         try:
             cfg = self._capture.build_capture_config()
+            profile = capture_profile_from_config(
+                cfg, trigger_value_radix=self._capture.trigger_value_radix()
+            )
         except ValueError as exc:
             QMessageBox.warning(self, "Save capture profile", str(exc))
             return
         gui = load_gui_settings(self._config_path)
-        gui.capture_profiles[name] = capture_profile_from_config(
-            cfg, trigger_value_radix=self._capture.trigger_value_radix()
-        )
+        gui.capture_profiles[name] = profile
         save_gui_settings(gui, self._config_path)
         self._capture.set_capture_profiles(gui.capture_profiles, select=name)
         self.statusBar().showMessage(f"Saved capture profile {name!r}")
@@ -1209,14 +1210,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Deleted capture profile {name!r}")
 
     def _persist_trigger_snapshot(self, cfg: CaptureConfig) -> None:
-        gui = load_gui_settings(self._config_path)
-        append_trigger_history(
-            gui,
-            trigger_history_entry_from_config(
+        try:
+            entry = trigger_history_entry_from_config(
                 cfg,
                 trigger_value_radix=self._capture.trigger_value_radix(),
-            ),
-        )
+            )
+        except ValueError as exc:
+            # Optional: a capture that history cannot hold still completes.
+            self.statusBar().showMessage(f"Not added to the trigger history: {exc}")
+            return
+        gui = load_gui_settings(self._config_path)
+        append_trigger_history(gui, entry)
         save_gui_settings(gui, self._config_path)
         self._capture.set_trigger_history(gui.trigger_history)
 

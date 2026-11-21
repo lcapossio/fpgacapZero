@@ -36,6 +36,15 @@ from ..probes import load_probe_file, probes_to_arg
 from .collapsible_section import CollapsibleSection
 from .settings import ProbeProfile
 
+# Sequencer stage fields a profile may set, with the table widgets' ranges.
+_SEQ_PROFILE_LIMITS = (
+    ("cmp_a", 8),
+    ("cmp_b", 8),
+    ("combine", 3),
+    ("next_state", 3),
+    ("count", 0xFFFF),
+)
+
 # Pre/post + 1 must fit in usable depth; invalid pair → both spin boxes get a red outline.
 # Keep background/text from the active theme so dark/light palettes stay readable.
 _PREPOST_SPIN_INVALID_STYLE = "QSpinBox { border: 2px solid #e57373; border-radius: 3px; }"
@@ -686,12 +695,30 @@ class CapturePanel(QGroupBox):
                     f"{key} = {value} is outside {spin.minimum()}..{spin.maximum()} "
                     "here"
                 )
+        if body.get("startup_arm"):
+            return "it turns startup arm on, which the GUI does not set"
+        if body.get("rle") and not self._rle.isEnabled():
+            return "it uses run-length capture, which the connected core does not have"
         seq = body.get("trigger_sequence")
-        if isinstance(seq, list) and len(seq) > self._hw_trig_stages:
+        if not isinstance(seq, list):
+            return None
+        if len(seq) > self._hw_trig_stages:
             return (
                 f"its trigger sequence has {len(seq)} stage(s), and the connected "
                 f"core takes {self._hw_trig_stages}"
             )
+        for n, stage in enumerate(seq, 1):
+            if not isinstance(stage, Mapping):
+                return f"sequencer stage {n} is not a table"
+            for key, top in _SEQ_PROFILE_LIMITS:
+                if key not in stage:
+                    continue
+                try:
+                    value = int(stage[key])
+                except (TypeError, ValueError):
+                    return f"sequencer stage {n} {key} is not a number"
+                if not 0 <= value <= top:
+                    return f"sequencer stage {n} {key} = {value} is outside 0..{top}"
         return None
 
     def _profile_spins(self) -> tuple[tuple[str, QSpinBox], ...]:
@@ -882,7 +909,7 @@ class CapturePanel(QGroupBox):
         nxt.setRange(0, 3)
         fin = QCheckBox()
         cnt = QSpinBox()
-        cnt.setRange(1, 65535)
+        cnt.setRange(0, 65535)  # 0 skips the count check
         cnt.setValue(1)
         va = QLineEdit("0")
         ma = QLineEdit("0xFFFFFFFF")
@@ -936,7 +963,7 @@ class CapturePanel(QGroupBox):
             w.setChecked(bool(ent.get("is_final", False)))
         w = self._seq_table.cellWidget(row, _SEQ_COL_COUNT)
         if isinstance(w, QSpinBox):
-            w.setValue(max(1, min(65535, int(ent.get("count", 1)))))
+            w.setValue(max(0, min(65535, int(ent.get("count", 1)))))
         for col, key, default in (
             (_SEQ_COL_VAL_A, "value_a", "0"),
             (_SEQ_COL_MASK_A, "mask_a", "0xFFFFFFFF"),

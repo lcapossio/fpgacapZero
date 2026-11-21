@@ -105,7 +105,9 @@ def _parse_probes(spec: str) -> list[ProbeSpec]:
             raise argparse.ArgumentTypeError(
                 f"invalid probe spec '{part}', expected name:width:lsb"
             )
-        probes.append(ProbeSpec(name=fields[0], width=int(fields[1]), lsb=int(fields[2])))
+        probes.append(
+            ProbeSpec(name=fields[0].strip(), width=int(fields[1]), lsb=int(fields[2]))
+        )
     return probes
 
 
