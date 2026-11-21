@@ -346,6 +346,7 @@ async def trig_compare_light(dut):
         (0x20, 0x10, 0x10, 0xFF, 3, 0),
         (0x10, 0x10, 0x10, 0xFF, 4, 0),
         (0x10, 0x10, 0x10, 0xFF, 5, 0),
+        (0x12, 0x10, 0x12, 0xFF, 9, 0),  # EQ-or-CHANGED needs BOTH_MODE=1
     )
     for probe, prev, value, mask, mode, expected in cases:
         dut.probe.value = probe
@@ -369,6 +370,7 @@ async def trig_compare_full(dut):
         (0x20, 0x10, 0x10, 0xFF, 3, 1),
         (0x10, 0x10, 0x10, 0xFF, 4, 1),
         (0x10, 0x10, 0x10, 0xFF, 5, 1),
+        (0x12, 0x10, 0x12, 0xFF, 9, 0),  # EQ-or-CHANGED needs BOTH_MODE=1
     )
     for probe, prev, value, mask, mode, expected in cases:
         dut.probe.value = probe

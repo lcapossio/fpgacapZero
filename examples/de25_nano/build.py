@@ -35,6 +35,23 @@ VARIANTS = {
 }
 
 
+def timing_failures(sof: Path) -> list[str]:
+    """The negative-slack lines of the STA summary next to *sof*: one per
+    failing analysis (setup, hold, recovery, removal, per clock)."""
+    summary = sof.with_suffix(".sta.summary")
+    if not summary.is_file():
+        return [f"no timing summary at {summary}"]
+    failures = []
+    kind = ""
+    for line in summary.read_text(encoding="utf-8", errors="replace").splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "Type":
+            kind = value.strip()
+        elif key.strip() == "Slack" and float(value) < 0:
+            failures.append(f"{kind}: slack {value.strip()} ns")
+    return failures
+
+
 def find_quartus_sh(explicit: str | None) -> str:
     if explicit:
         return explicit
@@ -71,6 +88,12 @@ def main() -> int:
     if not bitfile.is_file():
         print(f"[build.py] build reported success but bitfile missing: {bitfile}", file=sys.stderr)
         return 4
+    failures = timing_failures(bitfile)
+    if failures:
+        print(f"[build.py] {bitfile.name} misses timing:", file=sys.stderr)
+        for failure in failures:
+            print(f"[build.py]   {failure}", file=sys.stderr)
+        return 5
     print(f"[build.py] success: {bitfile}")
     return 0
 

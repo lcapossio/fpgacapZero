@@ -205,6 +205,9 @@ _STATUS_ARMED = 1 << 0
 _STATUS_TRIGGERED = 1 << 1
 _STATUS_DONE = 1 << 2
 _STATUS_OVERFLOW = 1 << 3
+# The last CTRL ARM / RESET has not reached the sample clock yet (reads 0 on
+# cores without it).  The next ARM or RESET waits for it to clear.
+_STATUS_CMD_BUSY = 1 << 4
 # Capture FSM is "busy" (i.e. not idle) if any of armed/triggered/done is set.
 _STATUS_BUSY = _STATUS_ARMED | _STATUS_TRIGGERED | _STATUS_DONE
 
@@ -215,6 +218,12 @@ _CTRL_RESET = 1 << 1
 # reveals itself within a couple of sample clocks of reset deassert, so a short
 # bounded wait suffices before spending another reset.
 _FORCE_IDLE_SETTLE_S = 0.05
+
+# How long an ARM / RESET waits for the previous one to reach the sample
+# clock (STATUS[4]) before raising CommandPendingError.  It never writes over
+# a pending command: a second ARM toggle would cancel the first, and either
+# would replace the settings snapshot the first still needs.
+_CTRL_CMD_SETTLE_S = 0.5
 
 _TRIG_VALUE_MATCH = 1 << 0
 _TRIG_EDGE_DETECT = 1 << 1
@@ -482,6 +491,12 @@ def _last_entry_clocks(result: CaptureResult) -> int:
     if runs and len(runs) == len(result.samples):
         return int(runs[-1])
     return 1
+
+
+class CommandPendingError(RuntimeError):
+    """The previous ARM or RESET has not reached the sample clock domain
+    (``STATUS[4]`` still set), so the next one is not written: usually the
+    sample clock is stopped or held in reset.  Retry once it runs."""
 
 
 class CaptureChangedError(RuntimeError):
@@ -763,16 +778,42 @@ class Analyzer:
                 return
         self.transport.close()
 
+    def _wait_ctrl_cmd_idle(self) -> None:
+        """Wait until the core has taken the last CTRL ARM / RESET.
+
+        The core snapshots the settings on each ARM / RESET write, and the
+        sample side reads that snapshot when the command reaches it; a second
+        ARM / RESET before then would replace settings the first still needs
+        (STATUS[4] is set meanwhile), and a second toggle of the same kind
+        would cancel the first.  Raises :class:`CommandPendingError` after
+        ``_CTRL_CMD_SETTLE_S``, as with a stopped sample clock, without
+        writing.
+        """
+        deadline = None
+        while self.transport.read_reg(_ADDR_STATUS) & _STATUS_CMD_BUSY:
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now + _CTRL_CMD_SETTLE_S
+            elif now >= deadline:
+                raise CommandPendingError(
+                    f"the previous ARM/RESET has not reached the sample clock "
+                    f"after {_CTRL_CMD_SETTLE_S:.1f} s (STATUS[4] still set): "
+                    "is the sample clock running and out of reset?"
+                )
+
     @_selected_transaction
     def reset(self) -> None:
         """Soft-reset the ELA capture state (CTRL reset bit).
 
         The core re-arms at once if the runtime STARTUP_ARM register is set
         (``CaptureConfig.startup_arm=True``); use :meth:`force_idle` when the
-        next step needs a verified idle core.
+        next step needs a verified idle core.  Raises
+        :class:`CommandPendingError` if the previous ARM or RESET never
+        reaches the sample clock.
         """
-        self._armed_gen = None
         state = self._slot_state()
+        self._wait_ctrl_cmd_idle()
+        self._armed_gen = None
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
         if state is not None:
             after = self._slot_state()
@@ -851,6 +892,7 @@ class Analyzer:
         attempt = 0
         for attempt in range(max(1, max_resets)):
             with self._selected():
+                self._wait_ctrl_cmd_idle()
                 self._armed_gen = None
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
@@ -859,10 +901,16 @@ class Analyzer:
             while True:
                 with self._selected():
                     last_status = read_status(_ADDR_STATUS)
-                if (last_status & _STATUS_BUSY) == 0:
+                # STATUS[4] too: a RESET (or its startup arm) still on its
+                # way would change the state after this read.
+                if (last_status & (_STATUS_BUSY | _STATUS_CMD_BUSY)) == 0:
                     return
                 now = time.monotonic()
-                if now >= attempt_deadline or now >= deadline:
+                if now >= deadline:
+                    break
+                # Only a core that took the RESET and re-armed gets another;
+                # one sent while STATUS[4] is set would cancel this one.
+                if now >= attempt_deadline and not last_status & _STATUS_CMD_BUSY:
                     break
                 time.sleep(poll_interval)
             if time.monotonic() >= deadline:
@@ -872,7 +920,8 @@ class Analyzer:
             f"last STATUS=0x{last_status & 0xFFFFFFFF:08x} "
             f"(armed={bool(last_status & _STATUS_ARMED)}, "
             f"triggered={bool(last_status & _STATUS_TRIGGERED)}, "
-            f"done={bool(last_status & _STATUS_DONE)}). "
+            f"done={bool(last_status & _STATUS_DONE)}, "
+            f"cmd_busy={bool(last_status & _STATUS_CMD_BUSY)}). "
             f"If the core keeps re-arming, the runtime STARTUP_ARM register is "
             f"still set -- call configure() (startup_arm=False) before force_idle()."
         )
@@ -1165,10 +1214,13 @@ class Analyzer:
         ``CAPTURE_GEN`` (``COMPARE_CAPS`` bit 21), raises
         :class:`CaptureChangedError` if another controller armed or reset the
         core at the same time; the capture read later must be this arm's.
+        Raises :class:`CommandPendingError` if the previous ARM or RESET never
+        reaches the sample clock.
         """
         state = self._check_configured_state("at arm")
-        self._armed_gen = None
         before = self._capture_gen()
+        self._wait_ctrl_cmd_idle()
+        self._armed_gen = None
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
         # Read before the slot check, so it covers this read too.
         after = None if before is None else self._capture_gen()
@@ -2250,8 +2302,20 @@ class Analyzer:
         stream_gen: int | None = None
         try:
             with self._selected():
+                # Refuse before turning the ring on, and arm in the same
+                # selection, so no other command comes between them.  The
+                # slot check comes first, so the ring write cannot go to
+                # another slot.  If the arm finds a command still pending,
+                # turn the ring back off rather than leave it on for a later
+                # arm; after a ManagerResetError the slot is someone else's.
+                self._check_configured_state("before streaming")
+                self._wait_ctrl_cmd_idle()
                 self.transport.write_reg(_ADDR_STREAM_CTRL, ctrl)
-            self.arm()
+                try:
+                    self.arm()
+                except CommandPendingError:
+                    self.transport.write_reg(_ADDR_STREAM_CTRL, 0)
+                    raise
             owned = True
             # This stream's arm, kept: a later arm() on this analyzer moves
             # _armed_gen, and that capture is not this stream's to stop.

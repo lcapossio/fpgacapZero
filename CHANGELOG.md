@@ -9,6 +9,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Resource comparison against the AMD/Xilinx ILA.**
+  `scripts/ila_comparison.tcl` builds fcapz and the Vivado ILA (with its
+  `dbg_hub`) at matching widths, depths and trigger features; the results
+  are in `docs/specs/architecture.md`.
+- **Capture profiles.** Save a whole capture setup (trigger,
+  sequencer, pre/post-trigger, storage qualification, decimation,
+  holdoff, delay, run-length capture, probes) under a name in
+  `gui.toml` or as a JSON file, and restore it later. The GUI's
+  capture panel has a **Capture profile** row (**Save…**, **Delete**);
+  the CLI loads one with `--capture-profile NAME|FILE` on `configure`,
+  `capture` and `stream` (options on the command line still win) and
+  manages them with `fcapz capture-profile save|list|show|delete`,
+  which needs no board. Python: `save_capture_profile()` and
+  `load_capture_profile()`.
 - **Continuous capture.** A segmented ELA (`NUM_SEGMENTS > 1`) can now
   run as a ring that never ends: after its last segment it wraps to
   segment 0 and keeps capturing into every segment the host has read and
@@ -116,6 +130,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **ELA: smaller sequencer and register interface.** The sequencer
+  registers are decoded against fixed addresses instead of through a
+  divider, the single-chain pipe takes the register command from its data
+  shift register, and the arm latch reads the trigger, qualification and
+  sequencer settings straight from the ARM snapshot. On Artix-7 a 4-stage
+  sequenced ELA takes about 830 fewer LUTs, and 300 (8-bit) to 740 (64-bit)
+  fewer FFs; other builds lose about 25 LUTs and 65-180 FFs. Since the
+  latch reads the snapshot, a new `STATUS[4]` is set while an ARM or RESET
+  write is still crossing to the sample clock, or while a startup arm
+  (after a soft or hard reset, with `STARTUP_ARM`) has yet to happen, and
+  the host waits for it to clear
+  before the next ARM or RESET. After 0.5 s it raises
+  `CommandPendingError` without writing (for example, the sample clock is
+  stopped).
+  Before, two such writes close together could arm with a mix of their
+  settings. Verilog and VHDL.
+
 - **FTDI: a failed USB transfer closes the channel for every transport on
   it.** Each refuses I/O until it connects again, which opens the channel
   afresh; before, only the transport that saw the failure (and only during
@@ -131,6 +162,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `fcapz.rpc`, with the warning on `fcapz.web`).
 
 ### Fixed
+
+- **ELA: trigger mode `both` fired on a change only.** Without the
+  sequencer (`TRIG_STAGES=1`), `TRIG_MODE` 3 set both comparators to
+  "changed", so a steady sample equal to the trigger value never
+  triggered. It is now value match OR change, as documented, on one
+  comparator, so it works with `DUAL_COMPARE=0` too. Verilog and VHDL.
+
+- **ELA: the Arty example missed timing at 150 MHz.** The continuous-capture
+  wait compared a 24-bit window count on every sample clock, in the path of
+  the capture enables. The count never exceeds `NUM_SEGMENTS`, so its low
+  bits are now enough. The Arty builds meet timing again (Verilog worst
+  slack +0.28 ns, VHDL +0.20 ns, from -0.14 and -0.60 ns), and the Arty and
+  DE25-Nano build scripts now fail when timing is missed. Verilog and VHDL.
 
 - **FTDI: a cancel could be lost across a reconnect.** `cancel()` bumped
   the cancel counter without a lock, so racing the detach of a reconnect

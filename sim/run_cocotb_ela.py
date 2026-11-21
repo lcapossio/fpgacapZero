@@ -73,6 +73,7 @@ SEQUENCER_TESTS = (
     "sequencer_counts_first_hit_after_holdoff",
     "sequencer_next_stage_ignores_previous_stage_match",
     "sequencer_matches_cycle_reference",
+    "sequencer_mode9_never_fires",
 )
 
 RLE_TESTS = (
@@ -100,6 +101,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "burst_active_blocks_user1_data_window",
             "randomized_value_capture",
             "edge_capture",
+            "both_mode_fires_on_value_or_change",
+            "ctrl_cmd_busy_clears_after_the_arm",
             "overflow_and_reset",
             "oversize_length_is_reported_not_truncated",
             "oversize_length_sum_still_reports_overflow",
@@ -133,6 +136,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
         CocotbTarget(name, params,
                      ("stream_caps_and_registers", "stream_raw_blocks_are_gapless",
                       "stream_waits_for_release_and_counts_loss",
+                      "stream_waits_again_after_many_laps",
                       "stream_release_is_checked",
                       "stream_triggered_windows_keep_coming",
                       "stream_off_keeps_segments_terminal"))
@@ -143,6 +147,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
         )
     ),
     CocotbTarget("rearm_pipe0", {}, ("rearm_mid_capture_restarts_cleanly",)),
+    CocotbTarget("both_single_compare_pipe1", {"DUAL_COMPARE": 0, "INPUT_PIPE": 1},
+                 ("both_mode_fires_on_value_or_change", "edge_capture", "value_capture")),
     *(
         CocotbTarget(f"rearm_sq_pipe{pipe}", {"STOR_QUAL": 1, "INPUT_PIPE": pipe},
                      ("rearm_mid_capture_restarts_cleanly",))
@@ -177,6 +183,8 @@ TARGETS: tuple[CocotbTarget, ...] = (
          "segment_restart_keeps_the_first_sample", "rearm_mid_capture_restarts_cleanly"),
     ),
     CocotbTarget("full_depth", {"DEPTH": 8}, ("full_depth_capture",)),
+    CocotbTarget("startup_arm_boot", {"STARTUP_ARM": 1},
+                 ("boot_startup_arm_holds_status4",)),
     CocotbTarget("decim_anchor", {"DECIM_EN": 1},
                  ("decimated_trigger_anchor", "early_pretrigger_waits_for_fill")),
     *(

@@ -179,6 +179,13 @@ set_property SCOPED_TO_CELLS microblaze_0 [get_files -quiet mb_fw.elf]
 launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
+# ── Timing must be met: a bitfile that misses it is not copied ─
+set wns [get_property STATS.WNS [get_runs impl_1]]
+set whs [get_property STATS.WHS [get_runs impl_1]]
+if {$wns < 0 || $whs < 0} {
+    error "impl_1 misses timing (WNS $wns ns, WHS $whs ns), so no bitfile was copied; see ${project_name}.runs/impl_1/*_timing_summary_routed.rpt"
+}
+
 # ── Copy bitfile to example directory ─────────────────────────
 file copy -force \
     $project_dir/${project_name}.runs/impl_1/arty_a7_top.bit \
