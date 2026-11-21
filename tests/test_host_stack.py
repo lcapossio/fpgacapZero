@@ -955,6 +955,38 @@ class AnalyzerTests(unittest.TestCase):
         # A second toggle would cancel the pending one: nothing is written.
         self.assertNotIn(0x0004, [addr for addr, _ in writes])
 
+    def test_force_idle_waits_for_the_reset_to_arrive(self):
+        """force_idle is not idle while STATUS[4] still shows its RESET on
+        the way: the core's state can still change."""
+
+        class PendingReset(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.pending = 0
+                self.seen: list[int] = []
+
+            def write_reg(self, addr, value):
+                if addr == 0x0004 and value == 2:
+                    self.pending = 3
+                super().write_reg(addr, value)
+
+            def read_reg(self, addr):
+                value = super().read_reg(addr)
+                if addr == 0x0008:
+                    value &= ~0x7
+                    if self.pending:
+                        self.pending -= 1
+                        value |= 0x10
+                    self.seen.append(value)
+                return value
+
+        t = PendingReset()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        analyzer.force_idle(poll_interval=0.0)
+        self.assertEqual(t.pending, 0)
+        self.assertFalse(t.seen[-1] & 0x10)
+
     def test_a_refused_command_keeps_the_armed_capture(self):
         from fcapz.analyzer import CommandPendingError
 
@@ -3842,6 +3874,19 @@ class StreamSegmentsTests(unittest.TestCase):
             with self.assertRaises(CommandPendingError):
                 next(analyzer.stream_segments(count=1))
         self.assertNotIn(0x0094, [addr for addr, _ in t.writes])
+
+    def test_a_refused_arm_turns_the_ring_back_off(self):
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        from fcapz.transport import ManagerResetError
+
+        with mock.patch.object(
+            analyzer, "arm", side_effect=ManagerResetError("slot reset")
+        ):
+            with self.assertRaises(ManagerResetError):
+                next(analyzer.stream_segments(count=1))
+        ring_writes = [v for a, v in t.writes if a == 0x0094]
+        self.assertEqual(ring_writes[-2:], [0x1, 0x0])
 
     def test_windows_come_in_order_and_are_released(self):
         t = _RingTransport()

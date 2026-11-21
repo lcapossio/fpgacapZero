@@ -901,7 +901,9 @@ class Analyzer:
             while True:
                 with self._selected():
                     last_status = read_status(_ADDR_STATUS)
-                if (last_status & _STATUS_BUSY) == 0:
+                # STATUS[4] too: a RESET (or its startup arm) still on its
+                # way would change the state after this read.
+                if (last_status & (_STATUS_BUSY | _STATUS_CMD_BUSY)) == 0:
                     return
                 now = time.monotonic()
                 if now >= attempt_deadline or now >= deadline:
@@ -914,7 +916,8 @@ class Analyzer:
             f"last STATUS=0x{last_status & 0xFFFFFFFF:08x} "
             f"(armed={bool(last_status & _STATUS_ARMED)}, "
             f"triggered={bool(last_status & _STATUS_TRIGGERED)}, "
-            f"done={bool(last_status & _STATUS_DONE)}). "
+            f"done={bool(last_status & _STATUS_DONE)}, "
+            f"cmd_busy={bool(last_status & _STATUS_CMD_BUSY)}). "
             f"If the core keeps re-arming, the runtime STARTUP_ARM register is "
             f"still set -- call configure() (startup_arm=False) before force_idle()."
         )
@@ -2295,11 +2298,17 @@ class Analyzer:
         stream_gen: int | None = None
         try:
             with self._selected():
-                # Refuse before turning the ring on, so a pending command
-                # (CommandPendingError) does not leave it on for a later arm.
+                # Refuse before turning the ring on, and arm in the same
+                # selection, so no other command comes between them.  If the
+                # arm is refused (a pending command, a reset slot), turn the
+                # ring back off rather than leave it on for a later arm.
                 self._wait_ctrl_cmd_idle()
                 self.transport.write_reg(_ADDR_STREAM_CTRL, ctrl)
-            self.arm()
+                try:
+                    self.arm()
+                except (CommandPendingError, ManagerResetError):
+                    self.transport.write_reg(_ADDR_STREAM_CTRL, 0)
+                    raise
             owned = True
             # This stream's arm, kept: a later arm() on this analyzer moves
             # _armed_gen, and that capture is not this stream's to stop.
