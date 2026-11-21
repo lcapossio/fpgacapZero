@@ -906,7 +906,11 @@ class Analyzer:
                 if (last_status & (_STATUS_BUSY | _STATUS_CMD_BUSY)) == 0:
                     return
                 now = time.monotonic()
-                if now >= attempt_deadline or now >= deadline:
+                if now >= deadline:
+                    break
+                # Only a core that took the RESET and re-armed gets another;
+                # one sent while STATUS[4] is set would cancel this one.
+                if now >= attempt_deadline and not last_status & _STATUS_CMD_BUSY:
                     break
                 time.sleep(poll_interval)
             if time.monotonic() >= deadline:
@@ -2299,14 +2303,17 @@ class Analyzer:
         try:
             with self._selected():
                 # Refuse before turning the ring on, and arm in the same
-                # selection, so no other command comes between them.  If the
-                # arm is refused (a pending command, a reset slot), turn the
-                # ring back off rather than leave it on for a later arm.
+                # selection, so no other command comes between them.  The
+                # slot check comes first, so the ring write cannot go to
+                # another slot.  If the arm finds a command still pending,
+                # turn the ring back off rather than leave it on for a later
+                # arm; after a ManagerResetError the slot is someone else's.
+                self._check_configured_state("before streaming")
                 self._wait_ctrl_cmd_idle()
                 self.transport.write_reg(_ADDR_STREAM_CTRL, ctrl)
                 try:
                     self.arm()
-                except (CommandPendingError, ManagerResetError):
+                except CommandPendingError:
                     self.transport.write_reg(_ADDR_STREAM_CTRL, 0)
                     raise
             owned = True

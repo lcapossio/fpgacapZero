@@ -987,6 +987,39 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(t.pending, 0)
         self.assertFalse(t.seen[-1] & 0x10)
 
+    def test_force_idle_sends_no_second_reset_while_the_first_is_on_its_way(self):
+        """On a slow sample clock the RESET can take longer than one
+        attempt's wait: force_idle keeps waiting for it rather than send
+        another, which would replace it."""
+
+        class SlowReset(FakeTransport):
+            def __init__(self):
+                super().__init__()
+                self.pending = 0
+                self.resets = 0
+
+            def write_reg(self, addr, value):
+                if addr == 0x0004 and value == 2:
+                    self.resets += 1
+                    self.pending = 5
+                super().write_reg(addr, value)
+
+            def read_reg(self, addr):
+                value = super().read_reg(addr)
+                if addr == 0x0008:
+                    value &= ~0x7
+                    if self.pending:
+                        self.pending -= 1
+                        value |= 0x10
+                return value
+
+        t = SlowReset()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        with mock.patch("fcapz.analyzer._FORCE_IDLE_SETTLE_S", 0.0):
+            analyzer.force_idle(poll_interval=0.0)
+        self.assertEqual(t.resets, 1)
+
     def test_a_refused_command_keeps_the_armed_capture(self):
         from fcapz.analyzer import CommandPendingError
 
@@ -3876,17 +3909,39 @@ class StreamSegmentsTests(unittest.TestCase):
         self.assertNotIn(0x0094, [addr for addr, _ in t.writes])
 
     def test_a_refused_arm_turns_the_ring_back_off(self):
+        from fcapz.analyzer import CommandPendingError
+
         t = _RingTransport()
         analyzer = self._analyzer(t)
-        from fcapz.transport import ManagerResetError
-
         with mock.patch.object(
-            analyzer, "arm", side_effect=ManagerResetError("slot reset")
+            analyzer, "arm", side_effect=CommandPendingError("still pending")
         ):
-            with self.assertRaises(ManagerResetError):
+            with self.assertRaises(CommandPendingError):
                 next(analyzer.stream_segments(count=1))
         ring_writes = [v for a, v in t.writes if a == 0x0094]
         self.assertEqual(ring_writes[-2:], [0x1, 0x0])
+
+    def test_a_manager_change_leaves_the_slot_alone(self):
+        """After a ManagerResetError the active slot may be another
+        controller's: no ring write goes there, before or after the arm."""
+        from fcapz.transport import ManagerResetError
+
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        t.writes.clear()
+        with mock.patch.object(
+            analyzer, "_check_configured_state", side_effect=ManagerResetError("moved")
+        ):
+            with self.assertRaises(ManagerResetError):
+                next(analyzer.stream_segments(count=1))
+        self.assertNotIn(0x0094, [addr for addr, _ in t.writes])
+
+        with mock.patch.object(
+            analyzer, "arm", side_effect=ManagerResetError("moved during arm")
+        ):
+            with self.assertRaises(ManagerResetError):
+                next(analyzer.stream_segments(count=1))
+        self.assertEqual([v for a, v in t.writes if a == 0x0094], [0x1])
 
     def test_windows_come_in_order_and_are_released(self):
         t = _RingTransport()
