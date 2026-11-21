@@ -618,7 +618,14 @@ module fcapz_ela #(
     reg        jtag_rel_req, jtag_rel_ack_sync1, jtag_rel_ack_sync2;
     reg        rel_req_sync1, rel_req_sync2, rel_req_sync3, rel_ack_sample;
     reg        stream_rel_err;               // a release was refused since arm
-    wire [23:0] stream_owned = stream_w - stream_r;
+    // stream_w - stream_r stays in 0..NUM_SEGMENTS: both clear together,
+    // stream_w advances only while stream_hold is clear, and a release
+    // takes back at most stream_owned.  Its low SEG_IDX_W + 1 bits are
+    // therefore exact, and keep a 24-bit subtract out of the capture
+    // enables (stream_hold).
+    localparam STREAM_OWNED_W = SEG_IDX_W + 1;
+    wire [STREAM_OWNED_W-1:0] stream_owned =
+        stream_w[STREAM_OWNED_W-1:0] - stream_r[STREAM_OWNED_W-1:0];
     wire stream_hold = HAS_SEGMENTS && stream_on && armed && !done &&
                        (stream_owned >= NUM_SEGMENTS);
     // Published copies (completed-capture snapshot, then jtag_clk).

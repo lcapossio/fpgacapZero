@@ -599,7 +599,10 @@ architecture rtl of fcapz_ela is
     signal stream_lost            : unsigned(31 downto 0) := (others => '0');  -- raw: samples, ring: cycles
     signal stream_bank_gap        : std_logic := '0';  -- the current segment starts after a wait
     signal stream_seg_gap         : std_logic_vector(NUM_SEGMENTS - 1 downto 0) := (others => '0');
-    signal stream_owned           : unsigned(23 downto 0) := (others => '0');
+    -- Low bits of stream_w - stream_r, exact since it stays in
+    -- 0..NUM_SEGMENTS (see rtl/fcapz_ela.v stream_owned).
+    constant STREAM_OWNED_W       : positive := SEG_IDX_W + 1;
+    signal stream_owned           : unsigned(STREAM_OWNED_W-1 downto 0) := (others => '0');
     signal stream_hold            : std_logic := '0';
     signal stream_flags           : std_logic_vector(3 downto 0) := (others => '0');  -- {rel_err, hold, raw, on}
     signal stream_event_sample    : std_logic := '0';
@@ -847,7 +850,8 @@ begin
                                      stream_session /= stream_session_d or
                                      stream_lost /= stream_lost_d or
                                      stream_flags /= stream_flags_d) else '0';
-    stream_owned <= stream_w - stream_r;
+    stream_owned <= stream_w(STREAM_OWNED_W-1 downto 0) -
+                    stream_r(STREAM_OWNED_W-1 downto 0);
     stream_hold <= '1' when NUM_SEGMENTS > 1 and stream_on = '1' and armed = '1' and done = '0' and
                             stream_owned >= NUM_SEGMENTS else '0';
     mem_we_a <= '1' when (done = '0' and triggered = '0' and

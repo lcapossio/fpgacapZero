@@ -169,6 +169,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   triggered. It is now value match OR change, as documented, on one
   comparator, so it works with `DUAL_COMPARE=0` too. Verilog and VHDL.
 
+- **ELA: the Arty example missed timing at 150 MHz.** The continuous-capture
+  wait compared a 24-bit window count on every sample clock, in the path of
+  the capture enables. The count never exceeds `NUM_SEGMENTS`, so its low
+  bits are now enough. The Arty builds meet timing again (Verilog worst
+  slack +0.28 ns, VHDL +0.20 ns, from -0.14 and -0.60 ns), and the Arty and
+  DE25-Nano build scripts now fail when timing is missed. Verilog and VHDL.
+
 - **FTDI: a cancel could be lost across a reconnect.** `cancel()` bumped
   the cancel counter without a lock, so racing the detach of a reconnect
   it could store a stale count and erase a later cancel. Each bump is now

@@ -136,6 +136,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
         CocotbTarget(name, params,
                      ("stream_caps_and_registers", "stream_raw_blocks_are_gapless",
                       "stream_waits_for_release_and_counts_loss",
+                      "stream_waits_again_after_many_laps",
                       "stream_release_is_checked",
                       "stream_triggered_windows_keep_coming",
                       "stream_off_keeps_segments_terminal"))

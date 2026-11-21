@@ -2743,6 +2743,38 @@ async def stream_waits_for_release_and_counts_loss(dut):
 
 
 @cocotb.test()
+async def stream_waits_again_after_many_laps(dut):
+    """The ring's fill count wraps with the window counters: after several
+    laps it still waits with every segment unread, refuses a release past
+    the completed windows, and resumes on a release."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+    host = StreamHost(ela)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await host.start(raw=True)
+    while host.read_seq < 5 * NUM_SEGMENTS + 1:
+        await host.next_windows(STREAM_SEG_DEPTH)
+    read = host.read_seq
+    await ela.wait_sample(DEPTH * 4)
+    session, done = await host.completed()
+    assert done == read + NUM_SEGMENTS, (read, done)
+    assert await host.status() & 0x8, "not waiting with every segment full"
+    await host.release(session, done + 1)
+    assert await host.released() == read, "a release past the completed windows was taken"
+    await host.release(session, read + 1)
+    assert await host.released() == read + 1
+    for _ in range(400):
+        _, done = await host.completed()
+        if done == read + NUM_SEGMENTS + 1:
+            break
+        await ela.wait_sample(2)
+    assert done == read + NUM_SEGMENTS + 1, done
+    await ela.wait_sample(DEPTH)
+    assert (await host.completed())[1] == done, "one release made room for one window"
+    counter.cancel()
+
+
+@cocotb.test()
 async def stream_release_is_checked(dut):
     """Releases for another session, or past the completed windows, are
     refused; a repeat is accepted; ARM starts a new session."""
