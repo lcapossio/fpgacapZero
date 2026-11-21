@@ -811,9 +811,9 @@ class Analyzer:
         :class:`CommandPendingError` if the previous ARM or RESET never
         reaches the sample clock.
         """
-        self._armed_gen = None
         state = self._slot_state()
         self._wait_ctrl_cmd_idle()
+        self._armed_gen = None
         self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
         if state is not None:
             after = self._slot_state()
@@ -892,8 +892,8 @@ class Analyzer:
         attempt = 0
         for attempt in range(max(1, max_resets)):
             with self._selected():
-                self._armed_gen = None
                 self._wait_ctrl_cmd_idle()
+                self._armed_gen = None
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,
             # so cap each attempt's wait and fall through to another reset.
@@ -1211,9 +1211,9 @@ class Analyzer:
         reaches the sample clock.
         """
         state = self._check_configured_state("at arm")
-        self._armed_gen = None
         before = self._capture_gen()
         self._wait_ctrl_cmd_idle()
+        self._armed_gen = None
         self.transport.write_reg(_ADDR_CTRL, _CTRL_ARM)
         # Read before the slot check, so it covers this read too.
         after = None if before is None else self._capture_gen()
@@ -2295,6 +2295,9 @@ class Analyzer:
         stream_gen: int | None = None
         try:
             with self._selected():
+                # Refuse before turning the ring on, so a pending command
+                # (CommandPendingError) does not leave it on for a later arm.
+                self._wait_ctrl_cmd_idle()
                 self.transport.write_reg(_ADDR_STREAM_CTRL, ctrl)
             self.arm()
             owned = True

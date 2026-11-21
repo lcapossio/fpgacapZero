@@ -955,6 +955,21 @@ class AnalyzerTests(unittest.TestCase):
         # A second toggle would cancel the pending one: nothing is written.
         self.assertNotIn(0x0004, [addr for addr, _ in writes])
 
+    def test_a_refused_command_keeps_the_armed_capture(self):
+        from fcapz.analyzer import CommandPendingError
+
+        t = FakeTransport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        analyzer.configure(self._make_cfg())
+        t.regs[0x0008] = 0x10
+        with mock.patch("fcapz.analyzer._CTRL_CMD_SETTLE_S", 0.0):
+            for action in (analyzer.reset, analyzer.arm, analyzer.force_idle):
+                analyzer._armed_gen = 7
+                with self.assertRaises(CommandPendingError):
+                    action()
+                self.assertEqual(analyzer._armed_gen, 7, action.__name__)
+
     def test_status_reports_capture_bits(self):
         # A cheap poll (no sample transfer) so a client can tell "waiting for
         # trigger" from "reading back".
@@ -3815,6 +3830,18 @@ class StreamSegmentsTests(unittest.TestCase):
         t.stream_ctrl = 0x3
         self._analyzer(t)
         self.assertEqual(t.stream_ctrl, 0)
+
+    def test_a_pending_command_leaves_the_ring_off(self):
+        from fcapz.analyzer import CommandPendingError
+
+        t = _RingTransport()
+        analyzer = self._analyzer(t)
+        t.writes.clear()
+        t.regs[0x0008] = t.regs.get(0x0008, 0) | 0x10
+        with mock.patch("fcapz.analyzer._CTRL_CMD_SETTLE_S", 0.0):
+            with self.assertRaises(CommandPendingError):
+                next(analyzer.stream_segments(count=1))
+        self.assertNotIn(0x0094, [addr for addr, _ in t.writes])
 
     def test_windows_come_in_order_and_are_released(self):
         t = _RingTransport()

@@ -141,7 +141,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   write is still crossing to the sample clock (for RESET, until its
   startup arm has also happened), and the host waits for it to clear
   before the next ARM or RESET. After 0.5 s it raises
-  `CommandPendingError` without writing (the sample clock is stopped).
+  `CommandPendingError` without writing (for example, the sample clock is
+  stopped).
   Before, two such writes close together could arm with a mix of their
   settings. Verilog and VHDL.
 
