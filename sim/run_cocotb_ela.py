@@ -97,6 +97,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
             "identity_registers",
             "features_registers",
             "register_roundtrip",
+            "value_mask_registers_read_back_32_bits",
             "value_capture",
             "burst_active_blocks_user1_data_window",
             "randomized_value_capture",
@@ -198,11 +199,19 @@ TARGETS: tuple[CocotbTarget, ...] = (
     ),
     CocotbTarget("sequencer2_single_compare", {"TRIG_STAGES": 2, "INPUT_PIPE": 1,
                                                 "DUAL_COMPARE": 0},
-                 ("sequencer_matches_cycle_reference",)),
+                 ("sequencer_matches_cycle_reference",
+                  "value_mask_registers_read_back_32_bits")),
+    *(
+        CocotbTarget(f"cfg_readback_seq4_sq_ram{ram}",
+                     {"TRIG_STAGES": 4, "STOR_QUAL": 1, "READBACK_RAM": ram},
+                     ("value_mask_registers_read_back_32_bits",))
+        for ram in (0, 1)
+    ),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
     CocotbTarget("wide48_seq", {"SAMPLE_W": 48, "DEPTH": 16, "TRIG_STAGES": 2,
                                  "INPUT_PIPE": 1, "REL_COMPARE": 1},
-                 ("narrow_comparators_ignore_upper_bits",)),
+                 ("narrow_comparators_ignore_upper_bits",
+                  "value_mask_registers_read_back_32_bits")),
     # 256 x 2048: the timestamp window base (0x10100) is past 0xFFFF.
     CocotbTarget("deep_wide_timestamp", {"SAMPLE_W": 256, "DEPTH": 2048, "TIMESTAMP_W": 32},
                  ("deep_timestamp_base_does_not_alias_data",

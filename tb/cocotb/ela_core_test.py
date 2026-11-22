@@ -357,6 +357,41 @@ async def register_roundtrip(dut):
 
 
 @cocotb.test()
+async def value_mask_registers_read_back_32_bits(dut):
+    """Every comparator value / mask register reads back its reset value and
+    then all 32 written bits, whatever SAMPLE_W, without aliasing another
+    (below 32 bits the upper bits are kept in a small memory)."""
+    ela = await setup(dut)
+    regs = {ADDR_TRIG_VALUE: 0, ADDR_TRIG_MASK: 0xFFFF_FFFF}
+    if STOR_QUAL:
+        regs.update({ADDR_SQ_VALUE: 0, ADDR_SQ_MASK: 0})
+    fixed = {}
+    if TRIG_STAGES > 1:
+        for s in range(TRIG_STAGES):
+            base = ADDR_SEQ_BASE + s * 20
+            regs.update({base + 4: 0, base + 8: 0xFFFF_FFFF})
+            if DUAL_COMPARE:
+                regs.update({base + 12: 0, base + 16: 0xFFFF_FFFF})
+            else:
+                fixed.update({base + 12: 0, base + 16: 0xFFFF_FFFF})
+    for addr, want in {**regs, **fixed}.items():
+        got = await ela.read(addr)
+        assert got == want, f"reset {addr:#06x}: {got:#010x}, want {want:#010x}"
+    # TRIG_MASK (reset all ones) stays unwritten: the written-since-reset
+    # bit is per entry, so it must keep reading its reset value.
+    untouched = ADDR_TRIG_MASK
+    written = {untouched: regs[untouched]}
+    for i, addr in enumerate(regs):
+        if addr == untouched:
+            continue
+        written[addr] = (0x9E37_79B9 * (i + 1)) & 0xFFFF_FFFF
+        await ela.write(addr, written[addr])
+    for addr, want in {**written, **fixed}.items():
+        got = await ela.read(addr)
+        assert got == want, f"{addr:#06x}: {got:#010x}, want {want:#010x}"
+
+
+@cocotb.test()
 async def value_capture(dut):
     ela = await setup(dut)
     await ela.configure_value_capture(pre=2, post=3, value=8)

@@ -139,6 +139,7 @@ begin
             ELA_REL_COMPARES => ELA_REL_COMPARES,
             ELA_DUAL_COMPARES => ELA_DUAL_COMPARES,
             ELA_USER1_DATA_ENS => ELA_USER1_DATA_ENS,
+            READBACK_RAM => 0,  -- no async-read LUT RAM on Efinix
             EIO_IN_WS => EIO_IN_WS,
             EIO_OUT_WS => EIO_OUT_WS
         )

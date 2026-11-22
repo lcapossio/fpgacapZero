@@ -63,6 +63,7 @@ module fcapz_debug_multi #(
     parameter [ELA_PORT_COUNT*32-1:0] ELA_REL_COMPARES = {ELA_PORT_COUNT{(REL_COMPARE + 32'd0)}},
     parameter [ELA_PORT_COUNT*32-1:0] ELA_DUAL_COMPARES = {ELA_PORT_COUNT{(DUAL_COMPARE + 32'd0)}},
     parameter [ELA_PORT_COUNT*32-1:0] ELA_USER1_DATA_ENS = {ELA_PORT_COUNT{(USER1_DATA_EN + 32'd0)}},
+    parameter READBACK_RAM = 1,     // fcapz_ela READBACK_RAM; 0 on iCE40 / Efinix
     parameter [((NUM_EIOS > 0) ? NUM_EIOS : 1)*32-1:0] EIO_IN_WS =
         {((NUM_EIOS > 0) ? NUM_EIOS : 1){(EIO_IN_W + 32'd0)}},
     parameter [((NUM_EIOS > 0) ? NUM_EIOS : 1)*32-1:0] EIO_OUT_WS =
@@ -184,7 +185,7 @@ module fcapz_debug_multi #(
         .ELA_PROBE_MUX_WS(ELA_PROBE_MUX_WS), .ELA_STARTUP_ARMS(ELA_STARTUP_ARMS),
         .ELA_DEFAULT_TRIG_EXTS(ELA_DEFAULT_TRIG_EXTS),
         .ELA_REL_COMPARES(ELA_REL_COMPARES), .ELA_DUAL_COMPARES(ELA_DUAL_COMPARES),
-        .ELA_USER1_DATA_ENS(ELA_USER1_DATA_ENS),
+        .ELA_USER1_DATA_ENS(ELA_USER1_DATA_ENS), .READBACK_RAM(READBACK_RAM),
         .EIO_IN_WS(EIO_IN_WS), .EIO_OUT_WS(EIO_OUT_WS)
     ) u_core (
         .ela_sample_clk(ela_sample_clk),

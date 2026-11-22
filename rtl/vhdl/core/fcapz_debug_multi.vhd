@@ -59,6 +59,7 @@ entity fcapz_debug_multi is
         ELA_REL_COMPARES      : std_logic_vector(ELA_PORT_COUNT * 32 - 1 downto 0) := fcapz_repeat_u32(ELA_PORT_COUNT, REL_COMPARE);
         ELA_DUAL_COMPARES     : std_logic_vector(ELA_PORT_COUNT * 32 - 1 downto 0) := fcapz_repeat_u32(ELA_PORT_COUNT, DUAL_COMPARE);
         ELA_USER1_DATA_ENS    : std_logic_vector(ELA_PORT_COUNT * 32 - 1 downto 0) := fcapz_repeat_u32(ELA_PORT_COUNT, USER1_DATA_EN);
+        READBACK_RAM     : natural := 1;  -- fcapz_ela READBACK_RAM; 0 on iCE40 / Efinix
         EIO_IN_WS        : std_logic_vector(fcapz_nonzero_width(NUM_EIOS) * 32 - 1 downto 0) := fcapz_repeat_u32(fcapz_nonzero_width(NUM_EIOS), EIO_IN_W);
         EIO_OUT_WS       : std_logic_vector(fcapz_nonzero_width(NUM_EIOS) * 32 - 1 downto 0) := fcapz_repeat_u32(fcapz_nonzero_width(NUM_EIOS), EIO_OUT_W)
     );
@@ -177,7 +178,7 @@ begin
             ELA_PROBE_MUX_WS => ELA_PROBE_MUX_WS, ELA_STARTUP_ARMS => ELA_STARTUP_ARMS,
             ELA_DEFAULT_TRIG_EXTS => ELA_DEFAULT_TRIG_EXTS,
             ELA_REL_COMPARES => ELA_REL_COMPARES, ELA_DUAL_COMPARES => ELA_DUAL_COMPARES,
-            ELA_USER1_DATA_ENS => ELA_USER1_DATA_ENS,
+            ELA_USER1_DATA_ENS => ELA_USER1_DATA_ENS, READBACK_RAM => READBACK_RAM,
             EIO_IN_WS => EIO_IN_WS, EIO_OUT_WS => EIO_OUT_WS
         )
         port map (

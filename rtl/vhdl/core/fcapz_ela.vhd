@@ -39,7 +39,11 @@ entity fcapz_ela is
         DUAL_COMPARE     : natural  := 1;
         USER1_DATA_EN    : natural  := 1;
         RLE_W            : natural  := 0;   -- 0 = no run-length capture, 1..16 = run-count width
-        WIDE_TRIG        : natural  := 0
+        WIDE_TRIG        : natural  := 0;
+        -- 1 = readback-only upper bits of the value/mask registers (SAMPLE_W < 32)
+        -- in a small inferred RAM (with the sequencer); 0 = in flops.  Use 0 on families without
+        -- async-read LUT RAM (iCE40, Efinix).
+        READBACK_RAM     : natural  := 1
     );
     port (
         sample_clk       : in  std_logic;
@@ -529,6 +533,33 @@ architecture rtl of fcapz_ela is
     signal aux_rle_b         : std_logic_vector(AUX_DATA_W - 1 downto 0);
     signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
+
+    -- Readback-only upper bits of the value / mask registers (SAMPLE_W < 32,
+    -- with the sequencer): one small inferred memory plus a written-since-reset
+    -- bit per entry.  Mirrors the Verilog core; READBACK_RAM = 0 keeps flops.
+    -- Entries: 0 TRIG_VALUE, 1 TRIG_MASK, 2 SQ_VALUE, 3 SQ_MASK, then per
+    -- sequencer stage s: 4+4s VALUE_A, +1 MASK_A, +2 VALUE_B, +3 MASK_B.
+    constant HAS_CFG_HI : boolean := SAMPLE_W < 32 and READBACK_RAM /= 0 and TRIG_STAGES > 1;
+    constant CFG_HI_W   : positive := maximum(1, 32 - SAMPLE_W);
+    constant CFG_HI_N   : positive := 4 + 4 * TRIG_STAGES;
+    type cfg_hi_mem_t is array (0 to CFG_HI_N - 1) of std_logic_vector(CFG_HI_W - 1 downto 0);
+    signal cfg_hi_mem  : cfg_hi_mem_t;
+    signal cfg_hi_set  : std_logic_vector(CFG_HI_N - 1 downto 0) := (others => '0');
+    signal cfg_hi_hit  : std_logic;
+    signal cfg_hi_idx  : natural range 0 to CFG_HI_N - 1;
+    signal cfg_hi_word : std_logic_vector(31 downto 0);
+
+    function cfg_lo_mask_f return std_logic_vector is
+        variable m : std_logic_vector(31 downto 0) := (others => '1');
+    begin
+        if HAS_CFG_HI then
+            m := (others => '0');
+            m(SAMPLE_W - 1 downto 0) := (others => '1');
+        end if;
+        return m;
+    end function;
+    -- The flops keep only the low bits once the upper ones read from memory.
+    constant CFG_LO_MASK : std_logic_vector(31 downto 0) := cfg_lo_mask_f;
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
     signal mem_we_a          : std_logic := '0';
     signal mem_we_a_q        : std_logic := '0';
@@ -2623,6 +2654,85 @@ begin
         end if;
     end process;
 
+    p_cfg_hi_dec : process(all)
+        variable addr : natural;
+    begin
+        addr := to_integer(unsigned(jtag_addr));
+        cfg_hi_hit <= '0';
+        cfg_hi_idx <= 0;
+        if addr = ADDR_TRIG_VALUE then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 0;
+        end if;
+        if addr = ADDR_TRIG_MASK then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 1;
+        end if;
+        if STOR_QUAL /= 0 and addr = ADDR_SQ_VALUE then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 2;
+        end if;
+        if STOR_QUAL /= 0 and addr = ADDR_SQ_MASK then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 3;
+        end if;
+        if TRIG_STAGES > 1 then
+            for st in 0 to TRIG_STAGES - 1 loop
+                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 4 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 4 + 4 * st;
+                end if;
+                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 8 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 5 + 4 * st;
+                end if;
+                if DUAL_COMPARE /= 0 and addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 12 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 6 + 4 * st;
+                end if;
+                if DUAL_COMPARE /= 0 and addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 16 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 7 + 4 * st;
+                end if;
+            end loop;
+        end if;
+    end process;
+
+    g_cfg_hi : if HAS_CFG_HI generate
+        p_cfg_hi_mem : process(jtag_clk)
+        begin
+            if rising_edge(jtag_clk) then
+                if jtag_wr_en = '1' and cfg_hi_hit = '1' then
+                    cfg_hi_mem(cfg_hi_idx) <= jtag_wdata(31 downto SAMPLE_W);
+                end if;
+            end if;
+        end process;
+
+        p_cfg_hi_set : process(jtag_clk, jtag_rst)
+        begin
+            if jtag_rst = '1' then
+                cfg_hi_set <= (others => '0');
+            elsif rising_edge(jtag_clk) then
+                if jtag_wr_en = '1' and cfg_hi_hit = '1' then
+                    cfg_hi_set(cfg_hi_idx) <= '1';
+                end if;
+            end if;
+        end process;
+
+        -- Reset values: masks all ones, except SQ_MASK (0); values 0.
+        p_cfg_hi_rd : process(all)
+            variable rd : std_logic_vector(CFG_HI_W - 1 downto 0);
+        begin
+            if cfg_hi_set(cfg_hi_idx) = '1' then
+                rd := cfg_hi_mem(cfg_hi_idx);
+            elsif cfg_hi_idx mod 2 = 1 and cfg_hi_idx /= 3 then
+                rd := (others => '1');
+            else
+                rd := (others => '0');
+            end if;
+            cfg_hi_word <= (others => '0');
+            if cfg_hi_hit = '1' then
+                cfg_hi_word(31 downto SAMPLE_W) <= rd;
+            end if;
+        end process;
+    end generate;
+
+    g_no_cfg_hi : if not HAS_CFG_HI generate
+        cfg_hi_word <= (others => '0');
+    end generate;
+
     p_read_mux : process(all)
         variable addr : natural;
         variable r : std_logic_vector(31 downto 0);
@@ -2645,11 +2755,13 @@ begin
             when ADDR_POSTTRIG => r := jtag_posttrig_len;
             when ADDR_CAPTURE_LEN => r := u32(rb_window_len_jtag);
             when ADDR_TRIG_MODE => r := jtag_trig_mode;
-            when ADDR_TRIG_VALUE => r := jtag_trig_value;
-            when ADDR_TRIG_MASK => r := jtag_trig_mask;
+            when ADDR_TRIG_VALUE => r := (jtag_trig_value and CFG_LO_MASK) or cfg_hi_word;
+            when ADDR_TRIG_MASK => r := (jtag_trig_mask and CFG_LO_MASK) or cfg_hi_word;
             when ADDR_SQ_MODE => r := jtag_sq_mode when STOR_QUAL /= 0 else x"00000000";
-            when ADDR_SQ_VALUE => r := jtag_sq_value when STOR_QUAL /= 0 else x"00000000";
-            when ADDR_SQ_MASK => r := jtag_sq_mask when STOR_QUAL /= 0 else x"00000000";
+            when ADDR_SQ_VALUE =>
+                r := (jtag_sq_value and CFG_LO_MASK) or cfg_hi_word when STOR_QUAL /= 0 else x"00000000";
+            when ADDR_SQ_MASK =>
+                r := (jtag_sq_mask and CFG_LO_MASK) or cfg_hi_word when STOR_QUAL /= 0 else x"00000000";
             when ADDR_FEATURES => r := FEATURES;
             when ADDR_CHAN_SEL => r := u32(jtag_chan_sel) when NUM_CHANNELS > 1 else x"00000000";
             when ADDR_NUM_CHAN => r := u32(NUM_CHANNELS);
@@ -2748,17 +2860,17 @@ begin
                             r := jtag_seq_cfg(st);
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 4 then
-                            r := jtag_seq_value_a(st);
+                            r := (jtag_seq_value_a(st) and CFG_LO_MASK) or cfg_hi_word;
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 8 then
-                            r := jtag_seq_mask_a(st);
+                            r := (jtag_seq_mask_a(st) and CFG_LO_MASK) or cfg_hi_word;
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 12 and DUAL_COMPARE /= 0 then
-                            r := jtag_seq_value_b(st);
+                            r := (jtag_seq_value_b(st) and CFG_LO_MASK) or cfg_hi_word;
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 16 then
                             if DUAL_COMPARE /= 0 then
-                                r := jtag_seq_mask_b(st);
+                                r := (jtag_seq_mask_b(st) and CFG_LO_MASK) or cfg_hi_word;
                             else
                                 r := x"FFFFFFFF";
                             end if;

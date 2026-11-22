@@ -168,7 +168,8 @@ module fcapz_ela_efinix #(
         .PROBE_MUX_W(PROBE_MUX_W), .STARTUP_ARM(STARTUP_ARM),
         .DEFAULT_TRIG_EXT(DEFAULT_TRIG_EXT), .REL_COMPARE(REL_COMPARE),
         .DUAL_COMPARE(DUAL_COMPARE), .USER1_DATA_EN(USER1_DATA_EN),
-        .RLE_W(RLE_W)
+        .RLE_W(RLE_W),
+        .READBACK_RAM(0)  // no async-read LUT RAM on Efinix
     ) u_ela (
         .sample_clk(sample_clk), .sample_rst(sample_rst),
         .probe_in(probe_in),
