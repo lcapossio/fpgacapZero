@@ -213,6 +213,7 @@ it and should use `reset`/`arm` directly.
 **Raises:**
 
 - `RuntimeError`: if the core is still busy after `max_resets` resets (e.g. `STARTUP_ARM` is still enabled because `configure` was not called first).
+- `CommandPendingError`: (a `RuntimeError`) if a previous ARM / RESET has not reached the sample clock within `timeout` (at most `_CTRL_CMD_SETTLE_S`); no further reset is written.
 
 #### `Analyzer.configure`
 

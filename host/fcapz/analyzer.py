@@ -224,6 +224,7 @@ _FORCE_IDLE_SETTLE_S = 0.05
 # a pending command: a second ARM toggle would cancel the first, and either
 # would replace the settings snapshot the first still needs.
 _CTRL_CMD_SETTLE_S = 0.5
+_CTRL_CMD_POLL_S = 0.001
 
 _TRIG_VALUE_MATCH = 1 << 0
 _TRIG_EDGE_DETECT = 1 << 1
@@ -778,7 +779,7 @@ class Analyzer:
                 return
         self.transport.close()
 
-    def _wait_ctrl_cmd_idle(self) -> None:
+    def _wait_ctrl_cmd_idle(self, deadline: float | None = None) -> None:
         """Wait until the core has taken the last CTRL ARM / RESET.
 
         The core snapshots the settings on each ARM / RESET write, and the
@@ -786,20 +787,24 @@ class Analyzer:
         ARM / RESET before then would replace settings the first still needs
         (STATUS[4] is set meanwhile), and a second toggle of the same kind
         would cancel the first.  Raises :class:`CommandPendingError` after
-        ``_CTRL_CMD_SETTLE_S``, as with a stopped sample clock, without
-        writing.
+        ``_CTRL_CMD_SETTLE_S``, or at the monotonic *deadline* if that comes
+        first, as with a stopped sample clock, without writing.
         """
-        deadline = None
+        start = limit = None
         while self.transport.read_reg(_ADDR_STATUS) & _STATUS_CMD_BUSY:
             now = time.monotonic()
-            if deadline is None:
-                deadline = now + _CTRL_CMD_SETTLE_S
-            elif now >= deadline:
+            if start is None:
+                start = now
+                limit = now + _CTRL_CMD_SETTLE_S
+                if deadline is not None:
+                    limit = min(limit, deadline)
+            if now >= limit:
                 raise CommandPendingError(
                     f"the previous ARM/RESET has not reached the sample clock "
-                    f"after {_CTRL_CMD_SETTLE_S:.1f} s (STATUS[4] still set): "
+                    f"after {now - start:.2f} s (STATUS[4] still set): "
                     "is the sample clock running and out of reset?"
                 )
+            time.sleep(_CTRL_CMD_POLL_S)
 
     @_selected_transaction
     def reset(self) -> None:
@@ -885,6 +890,9 @@ class Analyzer:
             RuntimeError: if the core is still busy after ``max_resets`` resets
                 (e.g. ``STARTUP_ARM`` is still enabled because :meth:`configure`
                 was not called first).
+            CommandPendingError: (a ``RuntimeError``) if a previous ARM /
+                RESET has not reached the sample clock within ``timeout`` (at
+                most ``_CTRL_CMD_SETTLE_S``); no further reset is written.
         """
         read_status = self.transport.read_reg_stable
         deadline = time.monotonic() + timeout
@@ -892,7 +900,7 @@ class Analyzer:
         attempt = 0
         for attempt in range(max(1, max_resets)):
             with self._selected():
-                self._wait_ctrl_cmd_idle()
+                self._wait_ctrl_cmd_idle(deadline)
                 self._armed_gen = None
                 self.transport.write_reg(_ADDR_CTRL, _CTRL_RESET)
             # A re-armed core (startup-arm CDC race) will not clear on its own,

@@ -142,9 +142,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   write is still crossing to the sample clock, or while a startup arm
   (after a soft or hard reset, with `STARTUP_ARM`) has yet to happen, and
   the host waits for it to clear
-  before the next ARM or RESET. After 0.5 s it raises
-  `CommandPendingError` without writing (for example, the sample clock is
-  stopped).
+  before the next ARM or RESET. After 0.5 s (or `force_idle()`'s shorter
+  `timeout`) it raises `CommandPendingError` without writing (for
+  example, the sample clock is stopped).
   Before, two such writes close together could arm with a mix of their
   settings. Verilog and VHDL.
 

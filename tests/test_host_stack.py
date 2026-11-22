@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import unittest
 import uuid
 from dataclasses import replace
@@ -1019,6 +1020,25 @@ class AnalyzerTests(unittest.TestCase):
         with mock.patch("fcapz.analyzer._FORCE_IDLE_SETTLE_S", 0.0):
             analyzer.force_idle(poll_interval=0.0)
         self.assertEqual(t.resets, 1)
+
+    def test_force_idle_keeps_to_its_timeout_while_a_command_is_pending(self):
+        """A stuck STATUS[4] stops force_idle at its own timeout, not after the
+        longer ARM/RESET wait, and nothing is written."""
+        from fcapz.analyzer import CommandPendingError
+
+        t = FakeTransport()
+        analyzer = Analyzer(t)
+        analyzer.connect()
+        t.regs[0x0008] = 0x10
+        with (
+            mock.patch("fcapz.analyzer._CTRL_CMD_SETTLE_S", 30.0),
+            mock.patch.object(t, "write_reg", wraps=t.write_reg) as write,
+        ):
+            start = time.monotonic()
+            with self.assertRaises(CommandPendingError):
+                analyzer.force_idle(timeout=0.05)
+            self.assertLess(time.monotonic() - start, 5.0)
+        self.assertNotIn(0x0004, [c.args[0] for c in write.call_args_list])
 
     def test_a_refused_command_keeps_the_armed_capture(self):
         from fcapz.analyzer import CommandPendingError
