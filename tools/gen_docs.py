@@ -85,6 +85,8 @@ def _help(action: argparse.Action) -> str:
 def _flag(action: argparse.Action) -> str:
     if not action.option_strings:
         return action.metavar or action.dest.upper()
+    if isinstance(action, argparse.BooleanOptionalAction):
+        return " / ".join(action.option_strings)
     name = max(action.option_strings, key=len)
     if action.nargs == 0:
         return name

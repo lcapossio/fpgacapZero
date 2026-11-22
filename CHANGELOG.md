@@ -19,7 +19,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `gui.toml` or as a JSON file, and restore it later. The GUI's
   capture panel has a **Capture profile** row (**Save…**, **Delete**);
   the CLI loads one with `--capture-profile NAME|FILE` on `configure`,
-  `capture` and `stream` (options on the command line still win) and
+  `capture` and `stream` (options on the command line still win;
+  `--no-rle` and `--no-startup-arm` turn those settings off) and
   manages them with `fcapz capture-profile save|list|show|delete`,
   which needs no board. Python: `save_capture_profile()` and
   `load_capture_profile()`.

@@ -355,10 +355,10 @@ Usage: `fcapz [global options] configure [options]`
 | `--stor-qual-mode N` | `0` | Storage qualification mode: 0=disabled, 1=store-when-match, 2=store-when-no-match |
 | `--stor-qual-value V` | `0` | Storage qualification comparison value (hex or decimal) |
 | `--stor-qual-mask M` | `0` | Storage qualification mask (hex or decimal) |
-| `--startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
+| `--startup-arm / --no-startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
 | `--trigger-holdoff N` | `0` | Ignore trigger hits for N sample-clock cycles after arm or segmented auto-rearm. Distinct from --trigger-delay, which moves the committed trigger sample later. |
 | `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535). Shifts the committed trigger sample N cycles after the trigger event to compensate for upstream pipeline latency. |
-| `--rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
+| `--rle / --no-rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
 | `--post-clocks N` | `0` | With --rle: also end the post-trigger window N sample clocks after the trigger, if --posttrigger runs have not ended it first (0 = no clock limit). |
 | `--profile NAME` | — | Use named probe list from gui.toml section [probe_profiles.NAME] |
 | <code>--capture-profile NAME&#124;FILE</code> | — | Start from a saved capture profile (gui.toml [capture_profiles.NAME] or a .json file); options given on the command line override it |
@@ -630,7 +630,9 @@ Options `capture-profile save` has in addition to those of `configure`:
 
 `configure`, `capture`, `stream` and `capture-profile save` load a
 profile with `--capture-profile NAME|FILE`; every option given on the
-same command line overrides the profile.  The profile's probes are not
+same command line overrides the profile (`--no-rle` and
+`--no-startup-arm` turn off a profile's `rle` and `startup_arm`).  The
+profile's probes are not
 used when `--probes`, `--probe-file` or `--profile` is given, nor its
 sample clock with `--probe-file`.
 

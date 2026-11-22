@@ -357,6 +357,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(cfg.trigger, _full_config().trigger)
         self.assertTrue(cfg.startup_arm)
 
+    def test_the_command_line_turns_off_a_profiles_rle_and_startup_arm(self):
+        self._run("capture-profile", "save", "on", "--rle", "--startup-arm")
+        cfg = self._config("--capture-profile", "on")
+        self.assertTrue(cfg.rle)
+        self.assertTrue(cfg.startup_arm)
+        cfg = self._config("--capture-profile", "on", "--no-rle", "--no-startup-arm")
+        self.assertFalse(cfg.rle)
+        self.assertFalse(cfg.startup_arm)
+
     def test_errors(self):
         code, _, err = self._run("capture-profile", "show", "nope")
         self.assertEqual(code, 2)

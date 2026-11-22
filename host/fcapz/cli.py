@@ -647,7 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(
             "--startup-arm",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
+            default=False,
             help=(
                 "Leave the ELA armed after reset / configuration recovery. "
                 "Useful with bitstreams that want to begin capturing immediately "
@@ -678,7 +679,8 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument(
             "--rle",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
+            default=False,
             help=(
                 "Run-length capture: store each run of a repeated sample once, "
                 "with its length. Pre/post-trigger lengths then count runs. "
