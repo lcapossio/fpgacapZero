@@ -334,6 +334,56 @@ def test_a_second_runtime_loses_the_election(broker_env):
         assert s.status()["runtime_id"] == read_info(rdir)["runtime_id"]
 
 
+def test_concurrent_starters_share_one_runtime_and_leave_no_spare(broker_env):
+    rdir, _ = broker_env
+    sessions: list = []
+    errors: list = []
+
+    def start():
+        try:
+            sessions.append(BrokerSession.connect(rdir))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=start) for _ in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(30)
+    assert not errors, errors
+    assert len({s.runtime_id for s in sessions}) == 1
+    pid = sessions[0].runtime_pid
+    sessions[0].stop()
+    for s in sessions:
+        s.close()
+    _wait_for(lambda: not _alive(pid), what="runtime exit")
+    # A spare spawn that reached the election late would take over now.
+    time.sleep(1.5)
+    assert read_info(rdir) is None
+
+
+def test_a_starter_that_finds_another_runtime_stops_its_own_spawn(broker_env, monkeypatch):
+    rdir, _ = broker_env
+    from fcapz.broker import session as session_mod
+
+    spawned = []
+    real_spawn = session_mod.spawn_runtime
+
+    def spy(directory, spawn_id=None):
+        proc = real_spawn(directory, spawn_id)
+        spawned.append(proc)
+        return proc
+
+    with BrokerSession.connect(rdir) as first:
+        monkeypatch.setattr(session_mod, "spawn_runtime", spy)
+        # As a second starter that raced the first: it spawned too, then
+        # found the first one's runtime.
+        conn, info = BrokerSession._start(rdir, 20)
+        conn.close()
+        assert info["runtime_id"] == first.runtime_id
+        assert spawned and spawned[0].poll() is not None, "spare spawn still running"
+
+
 def test_the_runtime_exits_when_idle(broker_env, monkeypatch):
     rdir, _ = broker_env
     monkeypatch.setenv("FCAPZ_BROKER_IDLE_EXIT", "0.5")

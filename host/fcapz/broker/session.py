@@ -16,9 +16,11 @@ and waits briefly for it to stop before re-raising.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
 import queue
+import secrets
 import subprocess
 import sys
 import threading
@@ -87,8 +89,9 @@ def _log_tail(directory: Path, lines: int = 15) -> str:
     return "\n".join(out) or "(no runtime log)"
 
 
-def spawn_runtime(directory: Path) -> subprocess.Popen:
-    """Start a detached runtime for *directory*."""
+def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Popen:
+    """Start a detached runtime for *directory*; *spawn_id* tags it in
+    ``runtime.json``."""
     ensure_dir(directory)
     import fcapz
 
@@ -98,6 +101,8 @@ def spawn_runtime(directory: Path) -> subprocess.Popen:
         p for p in (pkg_parent, env.get("PYTHONPATH", "")) if p
     )
     args = [sys.executable, "-m", "fcapz.broker", "--dir", str(directory)]
+    if spawn_id:
+        args += ["--spawn-id", spawn_id]
     stderr = open(directory / "runtime-stderr.log", "ab")  # noqa: SIM115
     kw: dict[str, Any] = dict(
         stdin=subprocess.DEVNULL, stdout=stderr, stderr=stderr,
@@ -116,6 +121,18 @@ def spawn_runtime(directory: Path) -> subprocess.Popen:
         return subprocess.Popen(args, start_new_session=True, **kw)
     finally:
         stderr.close()
+
+
+def _discard_spawn(proc: subprocess.Popen) -> None:
+    """Stop a runtime this client started when it connected to another
+    starter's.  Left alone, a spawn that reaches the election only after the
+    winner has exited would win it and idle with no client."""
+    if proc.poll() is not None:
+        return
+    with contextlib.suppress(OSError):
+        proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(5.0)
 
 
 class BrokerSession:
@@ -159,14 +176,17 @@ class BrokerSession:
 
     @staticmethod
     def _start(directory: Path, start_timeout: float) -> tuple[Any, dict[str, Any]]:
+        spawn_id = secrets.token_hex(8)
         try:
-            proc = spawn_runtime(directory)
+            proc = spawn_runtime(directory, spawn_id)
         except OSError as exc:
             raise wire.BrokerStartError(f"could not start the fcapz broker: {exc}") from exc
         deadline = time.monotonic() + start_timeout
         while True:
             found = _connect_info(directory)
             if found is not None:
+                if found[1].get("spawn_id") != spawn_id:
+                    _discard_spawn(proc)
                 return found
             rc = proc.poll()
             # Losing the election is fine: another starter's runtime won,

@@ -328,9 +328,11 @@ class Runtime:
         *,
         idle_exit: float = IDLE_EXIT_S,
         transport_factory: Callable[[TargetSpec], Any] | None = None,
+        spawn_id: str | None = None,
     ) -> None:
         self.dir = Path(directory)
         self.idle_exit = float(idle_exit)
+        self.spawn_id = spawn_id
         self.runtime_id = uuid.uuid4().hex[:12]
         self.authority = f"local:{self.runtime_id}"
         self.authkey = secrets.token_bytes(32)
@@ -445,6 +447,9 @@ class Runtime:
             "family": self.family,
             "address": self.address,
             "authkey": self.authkey.hex(),
+            # Lets the client that started this runtime tell it from another
+            # starter's, whose leftover spawn it then stops.
+            "spawn_id": self.spawn_id,
         }
         tmp = self.dir / f"{INFO_NAME}.{os.getpid()}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -522,6 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         default=float(os.environ.get("FCAPZ_BROKER_IDLE_EXIT", IDLE_EXIT_S)),
         metavar="SEC", help="exit this long after the last client and job",
     )
+    p.add_argument("--spawn-id", default=None, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
     directory = ensure_dir(args.dir or default_dir())
     logging.basicConfig(
@@ -530,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(process)d %(levelname)s %(name)s: %(message)s",
     )
     try:
-        return Runtime(directory, idle_exit=args.idle_exit).serve()
+        return Runtime(directory, idle_exit=args.idle_exit, spawn_id=args.spawn_id).serve()
     except Exception:
         log.exception("runtime failed")
         return 1
