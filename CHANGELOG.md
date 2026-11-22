@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Broker (opt-in): several programs on one board.** With `--broker`
+  or `FCAPZ_BROKER=1`, `probe`, `capture`, `eio-probe|read|write` and the
+  `axi-*` transfers run as jobs in a per-user broker process that the
+  first command starts and that exits when idle. Each core runs one job
+  at a time in arrival order (a capture holds its ELA from configuration
+  to readout; manager slots are separate cores); a command whose core
+  stays busy past `--broker-wait` fails with `CoreBusy` instead of
+  interfering. A client that exits or crashes loses only its own jobs, a
+  broker that cannot start is reported with its log (never a silent
+  fallback to direct mode), and a lost cable reconnects as a new image
+  generation. `fcapz broker status|stop` show and stop it. Python:
+  `fcapz.broker.BrokerSession`. Direct mode stays the default; the RPC
+  server, GUIs and MCP server do not use the broker yet.
 - **Resource comparison against the AMD/Xilinx ILA.**
   `scripts/ila_comparison.tcl` builds fcapz and the Vivado ILA (with its
   `dbg_hub`) at matching widths, depths and trigger features; the results

@@ -41,6 +41,7 @@ back to individual chapters as you need them.
 | 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API. |
 | 19 | [AXI monitor](19_axi_monitor.md) | Capture and trigger on an AXI4-Lite interface over JTAG — a portable, vendor-agnostic AXI bus monitor. Passive tap over the ELA, named AXI fields, and a decode layer for triggering on transaction events (handshakes, error responses). |
 | 20 | [MCP server](20_mcp_server.md) | Agent-facing MCP server (`fcapz-mcp`) over stdio or bearer-token HTTP: the ELA/EIO/AXI/UART tools, capture paging and search, AXI transaction decode, resources, safety flags, backend fields, and large-capture handling. |
+| 21 | [Broker](21_broker.md) | Opt-in per-user broker (`fcapz --broker`, `FCAPZ_BROKER=1`) so several programs share one board: one job per core in arrival order, `CoreBusy` instead of interference, cancellation of a crashed client's jobs, reconnects as new image generations, and `fcapz broker status|stop`. |
 
 ## Reference specs
 

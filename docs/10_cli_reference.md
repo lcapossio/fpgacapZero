@@ -47,6 +47,8 @@ subcommand follows:
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
 | `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: the first ELA slot behind a core manager) |
 | `--program BITFILE` | — | hw_server: run fpga -file on this .bit before the command (slow); ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin over JTAG. Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
+| `--broker / --no-broker` | off | Run probe, capture, eio-* and axi-* through the per-user broker, which shares the cable and queues work per core so several programs can use one core safely (started on first use). Default: the FCAPZ_BROKER environment variable, else off |
+| `--broker-wait SEC` | `30.0` | With --broker: how long to wait for another program's job on the same core before giving up (default 30) |
 
 <!-- END GENERATED cli:global -->
 
@@ -109,6 +111,7 @@ EIO/AXI/UART panels are refused — one CLI run builds exactly one transport, so
 
 | Subcommand | What it does |
 |---|---|
+| `broker` | Show or stop the per-user broker (see --broker) |
 | `list-ports` | List this machine's serial ports (for --backend serial) |
 | `openocd-bridge` | Serve an FTDI JTAG adapter to OpenOCD (remote_bitbang), e.g. a FlashPro5 or Digilent cable on Windows; --hardware picks the adapter |
 | `probe` | Read core identity registers |
@@ -980,6 +983,64 @@ Usage: `fcapz [global options] uart-monitor [--chain N] [--timeout SEC]`
 fcapz uart-monitor               # runs forever, Ctrl+C to stop
 ```
 
+## Broker
+
+With `--broker` (or `FCAPZ_BROKER=1`), `probe`, `capture`, `eio-probe`,
+`eio-read`, `eio-write` and the `axi-*` transfers run through the per-user
+broker instead of opening the cable themselves, so several programs can use
+one board, and one core, at once without corrupting each other's work.  The
+first command starts the broker; a command whose core is busy waits for its
+turn, printing what it waits behind, for up to `--broker-wait` seconds.  The
+other subcommands refuse `--broker` (exit code 2), as does `--program`:
+program the FPGA once without the broker.  Ctrl+C cancels the command's job
+in the broker (exit code 130).  See [chapter 21](21_broker.md).
+
+<!-- BEGIN GENERATED cli:broker (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] broker {status,stop} ...`
+
+| Subcommand | What it does |
+|---|---|
+| `status` | Show the running broker, its clients and cores |
+| `stop` | Stop the running broker |
+
+<!-- END GENERATED cli:broker -->
+
+<!-- BEGIN GENERATED cli:broker.status (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] broker status [--json]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--json` | off | Print JSON |
+
+<!-- END GENERATED cli:broker.status -->
+
+`status` exits with 1 when no broker is running (`--json` then prints
+`{"running": false}`).
+
+<!-- BEGIN GENERATED cli:broker.stop (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] broker stop [--force]`
+
+| Option | Default | Description |
+|---|---|---|
+| `--force` | off | Stop even with jobs running (they are cancelled) |
+
+<!-- END GENERATED cli:broker.stop -->
+
+Neither starts a broker.  `stop` refuses while jobs are running unless
+given `--force`, and exits with 0 when none is running.
+
+```bash
+# Two terminals capturing from the same ELA: the second waits its turn
+fcapz --broker capture --out a.vcd --format vcd
+fcapz --broker capture --out b.vcd --format vcd
+
+fcapz broker status
+fcapz broker stop
+```
+
 ## Argument validation
 
 All numeric arguments are validated at parse time:
@@ -1003,7 +1064,8 @@ exit code 2 — no surprises.
 |---|---|
 | `0` | Success |
 | `1` | Runtime error (TimeoutError, RuntimeError, etc.) — message on stderr |
-| `2` | Argument parse error |
+| `2` | Argument parse error, or a command that does not run through the broker |
+| `130` | Interrupted (Ctrl+C) |
 
 ## What's next
 

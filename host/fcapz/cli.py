@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -420,8 +422,43 @@ def build_parser() -> argparse.ArgumentParser:
             "(already-loaded bitstream)."
         ),
     )
+    p.add_argument(
+        "--broker",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Run probe, capture, eio-* and axi-* through the per-user broker, "
+            "which shares the cable and queues work per core so several "
+            "programs can use one core safely (started on first use). "
+            "Default: the FCAPZ_BROKER environment variable, else off"
+        ),
+    )
+    p.add_argument(
+        "--broker-wait",
+        type=_positive_float,
+        default=30.0,
+        metavar="SEC",
+        help=(
+            "With --broker: how long to wait for another program's job on "
+            "the same core before giving up (default 30)"
+        ),
+    )
 
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    broker = sub.add_parser(
+        "broker", help="Show or stop the per-user broker (see --broker)"
+    )
+    broker_sub = broker.add_subparsers(dest="broker_cmd", required=True)
+    broker_status = broker_sub.add_parser(
+        "status", help="Show the running broker, its clients and cores"
+    )
+    broker_status.add_argument("--json", action="store_true", help="Print JSON")
+    broker_stop = broker_sub.add_parser("stop", help="Stop the running broker")
+    broker_stop.add_argument(
+        "--force", action="store_true",
+        help="Stop even with jobs running (they are cancelled)",
+    )
 
     sub.add_parser(
         "list-ports",
@@ -1027,6 +1064,126 @@ def _stream_to_jsonl(analyzer: Analyzer, args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_capture_outputs(writer, result, cfg: CaptureConfig, args: argparse.Namespace) -> int:
+    """Write a capture as ``capture`` was asked to (file, summary, AXI
+    decode, viewer).  *writer* exports it: the analyzer that took it, or an
+    unconnected one for a broker capture."""
+    if args.format == "json":
+        writer.write_json(result, args.out)
+    elif args.format == "csv":
+        writer.write_csv(result, args.out)
+    else:
+        writer.write_vcd(result, args.out)
+
+    print(f"captured {len(result.samples)} samples from channel {cfg.channel} -> {args.out}")
+    if result.overflow:
+        print("warning: overflow flag set", file=sys.stderr)
+
+    if getattr(args, "summarize", False):
+        probe_defs = None
+        if cfg.probes:
+            probe_defs = [
+                ProbeDefinition(name=probe.name, width=probe.width, lsb=probe.lsb)
+                for probe in cfg.probes
+            ]
+        print(json.dumps(summarize(result, probe_defs), indent=2))
+
+    if getattr(args, "decode_axi", False):
+        if not looks_like_axi(probe.name for probe in cfg.probes):
+            print(
+                "error: --decode-axi needs an AXI monitor probe map; run "
+                "`fcapz axi-mon --write-probe-file P` and capture with "
+                "--probe-file P",
+                file=sys.stderr,
+            )
+            return 2
+        _print_axi_transactions(
+            decode_axi(
+                result.samples,
+                cfg.probes,
+                decimation=cfg.decimation,
+                storage_qualified=bool(cfg.stor_qual_mode),
+                run_lengths=result.run_lengths or None,
+            ),
+            only_anomalies=False,
+            kind=None,
+            limit=0,
+        )
+
+    open_in = getattr(args, "open_in", None)
+    if open_in:
+        if args.format != "vcd":
+            print("error: --open-in requires --format vcd", file=sys.stderr)
+            return 2
+        from pathlib import Path as _Path
+
+        from .gui.gtkw_writer import write_gtkw_for_capture
+        from .gui.surfer_command_writer import write_surfer_command_file_for_capture
+        from .gui.settings import (
+            default_gui_config_path,
+            load_gui_settings,
+            viewer_executable_override,
+        )
+        from .gui.viewers import GtkWaveViewer, SurferViewer, viewer_by_name
+
+        vcd = _Path(args.out)
+        gpath = args.gui_config if args.gui_config is not None else default_gui_config_path()
+        st_gui = load_gui_settings(gpath)
+        custom_argv = None
+        if open_in.strip().lower() in ("custom", "customcommand"):
+            custom_argv = list(st_gui.viewers.custom_argv)
+            if not custom_argv:
+                print(
+                    "error: custom viewer requires viewers.custom_argv in gui.toml",
+                    file=sys.stderr,
+                )
+                return 2
+        try:
+            viewer = viewer_by_name(open_in, custom_argv=custom_argv)
+        except (KeyError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if isinstance(viewer, GtkWaveViewer):
+            ovr = viewer_executable_override(st_gui, "gtkwave")
+            if ovr is not None:
+                viewer = GtkWaveViewer(executable=ovr)
+        if isinstance(viewer, GtkWaveViewer):
+            gtkw = vcd.with_suffix(".gtkw")
+            try:
+                write_gtkw_for_capture(result, vcd, gtkw)
+            except OSError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            try:
+                viewer.open(vcd, save_file=gtkw)
+            except (OSError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+        elif isinstance(viewer, SurferViewer):
+            ovr = viewer_executable_override(st_gui, "surfer")
+            if ovr is not None:
+                viewer = SurferViewer(executable=ovr)
+            scmd = vcd.with_suffix(".surfer.txt")
+            try:
+                write_surfer_command_file_for_capture(result, scmd)
+            except OSError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            try:
+                viewer.open(vcd, save_file=scmd)
+            except (OSError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+        else:
+            try:
+                viewer.open(vcd)
+            except (OSError, ValueError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+
+    return 0
+
+
 def _print_axi_transactions(decoded: dict, *, only_anomalies: bool, kind, limit: int) -> None:
     if not decoded.get("decoded", True):
         print(f"cannot decode: {decoded['unavailable_reason']}", file=sys.stderr)
@@ -1287,6 +1444,191 @@ def _run_capture_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+# Commands that run through the broker; the rest refuse --broker for now.
+_BROKER_CMDS = (
+    "probe", "capture", "eio-probe", "eio-read", "eio-write",
+    "axi-read", "axi-write", "axi-dump", "axi-fill", "axi-load",
+)
+
+
+def _use_broker(args: argparse.Namespace) -> bool:
+    """``--broker`` / ``--no-broker``, else ``FCAPZ_BROKER``."""
+    if args.broker is not None:
+        return bool(args.broker)
+    return os.environ.get("FCAPZ_BROKER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _broker_target(args: argparse.Namespace):
+    from .broker import TargetSpec
+
+    spec = TargetSpec.from_args(args)
+    if args.cmd.startswith("axi-"):
+        # The axi commands' own --burst (AXI4 bursts) shadows the global
+        # --burst (ELA readout), which does not apply to them.
+        spec = dataclasses.replace(spec, burst=False)
+    return spec
+
+
+def _print_broker_status(st: dict) -> None:
+    up = int(st.get("uptime", 0))
+    print(
+        f"broker {st['runtime_id']} (pid {st['pid']}, fcapz {st['version']}), "
+        f"up {up} s, exits {st.get('idle_exit', 0):g} s after its last client"
+    )
+    print(f"  dir: {st.get('dir')}")
+    clients = st.get("clients") or []
+    print(f"  clients: {len(clients)}")
+    for c in clients:
+        print(f"    {c['id']}: pid {c.get('pid')} {c.get('name') or ''}".rstrip())
+    for t in st.get("targets") or []:
+        state = "connected" if t.get("connected") else "not connected"
+        print(f"  target {t['target']} (connection {t['image_gen']}, {state}, {t['jobs']} job(s))")
+        for core in t.get("cores") or []:
+            ref = core["core"]
+            slot = "" if ref.get("slot") is None else f" slot {ref['slot']}"
+            holder = core.get("holder") or {}
+            queued = ", ".join(f"job {j['job']} ({j['owner']})" for j in core.get("queued") or [])
+            print(
+                f"    {ref['kind']} chain {ref['chain']}{slot}: job {holder.get('job')} "
+                f"{holder.get('kind')} (client {holder.get('owner')}, {holder.get('state')})"
+                + (f"; queued: {queued}" if queued else "")
+            )
+
+
+def _run_broker_admin(args: argparse.Namespace) -> int:
+    """``fcapz broker status|stop``: never starts a broker."""
+    from .broker import BrokerError, BrokerNotRunning, BrokerSession
+
+    try:
+        session = BrokerSession.connect(autostart=False, name=f"fcapz broker {args.broker_cmd}")
+    except BrokerNotRunning as exc:
+        if args.broker_cmd == "status" and args.json:
+            print(json.dumps({"running": False}))
+        else:
+            print(str(exc))
+        return 0 if args.broker_cmd == "stop" else 1
+    except BrokerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    with session:
+        try:
+            if args.broker_cmd == "status":
+                st = session.status()
+                if args.json:
+                    print(json.dumps({"running": True, **st}, indent=2))
+                else:
+                    _print_broker_status(st)
+            else:
+                session.stop(force=args.force)
+                print(f"stopped broker {session.runtime_id} (pid {session.runtime_pid})")
+        except BrokerError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _run_via_broker(args: argparse.Namespace) -> int:
+    """Run *args.cmd* as broker jobs instead of on a transport of its own."""
+    if args.cmd not in _BROKER_CMDS:
+        print(
+            f"error: {args.cmd} does not run through the broker yet; run it "
+            "without it (--no-broker, or unset FCAPZ_BROKER)",
+            file=sys.stderr,
+        )
+        return 2
+    if getattr(args, "program", None):
+        print(
+            "error: --program does not run through the broker: program the "
+            "FPGA once with --no-broker, then use --broker",
+            file=sys.stderr,
+        )
+        return 2
+    from .broker import BrokerSession
+
+    spec = _broker_target(args)
+    try:
+        with BrokerSession.connect(name=f"fcapz {args.cmd}") as session:
+            return _broker_command(session, spec, args)
+    except KeyboardInterrupt:
+        print("interrupted: the broker job was cancelled", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _broker_command(session, spec, args: argparse.Namespace) -> int:
+    wait = args.broker_wait
+
+    def report(ev: dict) -> None:
+        if ev.get("event") == "queued":
+            b = ev["behind"]
+            print(
+                f"waiting: queued behind job {b['job']} ({b['kind']}, client "
+                f"{b['owner']}) on this core",
+                file=sys.stderr,
+            )
+
+    if args.cmd == "probe":
+        info = session.probe(spec, chain=args.chain, instance=args.ela_instance)
+        info.pop("core", None)
+        print(json.dumps(info, indent=2))
+        return 0
+
+    if args.cmd == "capture":
+        err = _apply_named_probe_profile(args)
+        if err:
+            print(f"error: {err}", file=sys.stderr)
+            return 2
+        if args.depth is None or args.sample_width is None:
+            hw = session.probe(spec, chain=args.chain, instance=args.ela_instance)
+            args.hw_depth = int(hw["depth"])
+            args.hw_sample_width = int(hw["sample_width"])
+        cfg = _build_config(args)
+        cap = session.capture(
+            spec, cfg, chain=args.chain, instance=args.ela_instance,
+            timeout=args.timeout, queue_timeout=wait, on_event=report,
+        )
+        return _write_capture_outputs(cap.exporter(), cap.result, cfg, args)
+
+    if args.cmd.startswith("eio-"):
+        kw = dict(chain=args.chain, instance=args.instance, base_addr=args.base_addr,
+                  queue_timeout=wait, on_event=report)
+        if args.cmd == "eio-probe":
+            r = session.eio(spec, "probe", **kw)
+            print(json.dumps({"in_w": r["in_w"], "out_w": r["out_w"],
+                              "chain": args.chain, "instance": r["instance"]}, indent=2))
+        elif args.cmd == "eio-read":
+            print(f"0x{session.eio(spec, 'read', **kw)['value']:X}")
+        else:
+            session.eio(spec, "write", value=args.value, **kw)
+            print(f"wrote 0x{args.value:X}")
+        return 0
+
+    kw = dict(chain=args.chain, queue_timeout=wait, on_event=report)
+    if args.cmd == "axi-read":
+        print(f"0x{session.axi(spec, 'read', addr=args.addr, **kw)['value']:08X}")
+    elif args.cmd == "axi-write":
+        r = session.axi(spec, "write", addr=args.addr, data=args.data, wstrb=args.wstrb, **kw)
+        print(f"wrote 0x{args.data:08X} -> 0x{args.addr:08X} (resp={r['resp']})")
+    elif args.cmd == "axi-dump":
+        r = session.axi(spec, "dump", addr=args.addr, count=args.count, burst=args.burst, **kw)
+        for i, w in enumerate(r["words"]):
+            print(f"0x{args.addr + i * 4:08X}: 0x{w:08X}")
+    elif args.cmd == "axi-fill":
+        session.axi(spec, "write_block", addr=args.addr, words=[args.pattern] * args.count,
+                    burst=args.burst, **kw)
+        print(f"filled {args.count} words @ 0x{args.addr:08X}")
+    else:
+        raw = args.file.read()
+        if len(raw) % 4 != 0:
+            raw += b"\x00" * (4 - len(raw) % 4)
+        words = [int.from_bytes(raw[i:i + 4], "little") for i in range(0, len(raw), 4)]
+        session.axi(spec, "write_block", addr=args.addr, words=words, burst=args.burst, **kw)
+        print(f"loaded {len(words)} words @ 0x{args.addr:08X}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -1327,6 +1669,11 @@ def main(argv: list[str] | None = None) -> int:
             detail = p["description"] or p["hwid"]
             print(f"{p['device']}	{detail}" if detail else p["device"])
         return 0
+
+    if args.cmd == "broker":
+        return _run_broker_admin(args)
+    if _use_broker(args):
+        return _run_via_broker(args)
 
     transport = _make_transport(args)
 
@@ -1536,120 +1883,7 @@ def main(argv: list[str] | None = None) -> int:
 
         analyzer.arm()
         result = analyzer.capture(timeout=args.timeout)
-        if args.format == "json":
-            analyzer.write_json(result, args.out)
-        elif args.format == "csv":
-            analyzer.write_csv(result, args.out)
-        else:
-            analyzer.write_vcd(result, args.out)
-
-        print(f"captured {len(result.samples)} samples from channel {cfg.channel} -> {args.out}")
-        if result.overflow:
-            print("warning: overflow flag set", file=sys.stderr)
-
-        if getattr(args, "summarize", False):
-            probe_defs = None
-            if cfg.probes:
-                probe_defs = [
-                    ProbeDefinition(name=probe.name, width=probe.width, lsb=probe.lsb)
-                    for probe in cfg.probes
-                ]
-            print(json.dumps(summarize(result, probe_defs), indent=2))
-
-        if getattr(args, "decode_axi", False):
-            if not looks_like_axi(probe.name for probe in cfg.probes):
-                print(
-                    "error: --decode-axi needs an AXI monitor probe map; run "
-                    "`fcapz axi-mon --write-probe-file P` and capture with "
-                    "--probe-file P",
-                    file=sys.stderr,
-                )
-                return 2
-            _print_axi_transactions(
-                decode_axi(
-                    result.samples,
-                    cfg.probes,
-                    decimation=cfg.decimation,
-                    storage_qualified=bool(cfg.stor_qual_mode),
-                    run_lengths=result.run_lengths or None,
-                ),
-                only_anomalies=False,
-                kind=None,
-                limit=0,
-            )
-
-        open_in = getattr(args, "open_in", None)
-        if open_in:
-            if args.format != "vcd":
-                print("error: --open-in requires --format vcd", file=sys.stderr)
-                return 2
-            from pathlib import Path as _Path
-
-            from .gui.gtkw_writer import write_gtkw_for_capture
-            from .gui.surfer_command_writer import write_surfer_command_file_for_capture
-            from .gui.settings import (
-                default_gui_config_path,
-                load_gui_settings,
-                viewer_executable_override,
-            )
-            from .gui.viewers import GtkWaveViewer, SurferViewer, viewer_by_name
-
-            vcd = _Path(args.out)
-            gpath = args.gui_config if args.gui_config is not None else default_gui_config_path()
-            st_gui = load_gui_settings(gpath)
-            custom_argv = None
-            if open_in.strip().lower() in ("custom", "customcommand"):
-                custom_argv = list(st_gui.viewers.custom_argv)
-                if not custom_argv:
-                    print(
-                        "error: custom viewer requires viewers.custom_argv in gui.toml",
-                        file=sys.stderr,
-                    )
-                    return 2
-            try:
-                viewer = viewer_by_name(open_in, custom_argv=custom_argv)
-            except (KeyError, ValueError) as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-            if isinstance(viewer, GtkWaveViewer):
-                ovr = viewer_executable_override(st_gui, "gtkwave")
-                if ovr is not None:
-                    viewer = GtkWaveViewer(executable=ovr)
-            if isinstance(viewer, GtkWaveViewer):
-                gtkw = vcd.with_suffix(".gtkw")
-                try:
-                    write_gtkw_for_capture(result, vcd, gtkw)
-                except OSError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
-                try:
-                    viewer.open(vcd, save_file=gtkw)
-                except (OSError, ValueError) as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
-            elif isinstance(viewer, SurferViewer):
-                ovr = viewer_executable_override(st_gui, "surfer")
-                if ovr is not None:
-                    viewer = SurferViewer(executable=ovr)
-                scmd = vcd.with_suffix(".surfer.txt")
-                try:
-                    write_surfer_command_file_for_capture(result, scmd)
-                except OSError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
-                try:
-                    viewer.open(vcd, save_file=scmd)
-                except (OSError, ValueError) as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
-            else:
-                try:
-                    viewer.open(vcd)
-                except (OSError, ValueError) as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    return 1
-
-        return 0
+        return _write_capture_outputs(analyzer, result, cfg, args)
 
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
