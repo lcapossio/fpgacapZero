@@ -200,6 +200,9 @@ TARGETS: tuple[CocotbTarget, ...] = (
                                                 "DUAL_COMPARE": 0},
                  ("sequencer_matches_cycle_reference",)),
     CocotbTarget("wide48", {"SAMPLE_W": 48, "DEPTH": 8}, ("wide_sample_readback",)),
+    CocotbTarget("wide48_seq", {"SAMPLE_W": 48, "DEPTH": 16, "TRIG_STAGES": 2,
+                                 "INPUT_PIPE": 1, "REL_COMPARE": 1},
+                 ("narrow_comparators_ignore_upper_bits",)),
     # 256 x 2048: the timestamp window base (0x10100) is past 0xFFFF.
     CocotbTarget("deep_wide_timestamp", {"SAMPLE_W": 256, "DEPTH": 2048, "TIMESTAMP_W": 32},
                  ("deep_timestamp_base_does_not_alias_data",

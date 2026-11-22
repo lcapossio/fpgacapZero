@@ -1237,6 +1237,38 @@ async def wide_sample_readback(dut):
 
 
 @cocotb.test()
+async def narrow_comparators_ignore_upper_bits(dut):
+    """Above 32 bits, sequencer comparators A and B only see the low 32 bits
+    (their value/mask registers are 32 bits wide): a change confined to the
+    upper bits never fires CHANGED, a change in bit 0 does."""
+    assert SAMPLE_W > 32
+    ela = await setup(dut)
+    upper = ((1 << SAMPLE_W) - 1) ^ 0xFFFF_FFFF
+    for name, cfg, regs in (
+        ("A", 0x0000_1008, (ADDR_SEQ_BASE + 4, ADDR_SEQ_BASE + 8)),
+        ("B", 0x0000_1180, (ADDR_SEQ_BASE + 12, ADDR_SEQ_BASE + 16)),
+    ):
+        await ela.write(ADDR_CTRL, 0x2)
+        await ela.wait_sample(8)
+        await ela.write(ADDR_PRETRIG, 0)
+        await ela.write(ADDR_POSTTRIG, 0)
+        await ela.write(ADDR_SEQ_BASE + 0, cfg)  # final, CHANGED on A or B
+        await ela.write(regs[0], 0)
+        await ela.write(regs[1], 0xFFFF_FFFF)
+        ela.dut.probe_in.value = 0
+        await ela.arm()
+        await ela.wait_sample(4)
+        for i in range(16):
+            ela.dut.probe_in.value = upper if i % 2 == 0 else 0
+            await RisingEdge(ela.dut.sample_clk)
+        await ela.wait_sample(6)
+        status = await ela.read(ADDR_STATUS)
+        assert not status & 0x4, f"{name}: fired on upper bits only, status={status:#x}"
+        ela.dut.probe_in.value = 1
+        assert await ela.wait_done() & 0x4, f"{name}: bit 0 change did not fire"
+
+
+@cocotb.test()
 async def deep_timestamp_base_does_not_alias_data(dut):
     """A deep wide core puts the timestamp window base past 0xFFFF.  Every
     16-bit register address is then below it, so DATA window reads must

@@ -670,6 +670,22 @@ architecture rtl of fcapz_ela is
         return r;
     end function;
 
+    -- Reset value of an active comparator mask: ones on the bits the host
+    -- can program (the low 32, or every bit of comparator A with WIDE_TRIG),
+    -- zero above, as every ARM loads them.  Mirrors rtl/fcapz_ela.v.
+    constant NARROW_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) :=
+        expand32(x"FFFFFFFF");
+
+    function trig_mask_reset return std_logic_vector is
+    begin
+        if HAS_WIDE_TRIG then
+            return (SAMPLE_W - 1 downto 0 => '1');
+        end if;
+        return NARROW_MASK_ONES;
+    end function;
+
+    constant TRIG_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) := trig_mask_reset;
+
     -- Assemble a SAMPLE_W value from its per-word registers (WIDE_TRIG).
     function wide_assemble(words : reg32_array_t) return std_logic_vector is
         variable full : std_logic_vector(WORDS_PER_SAMPLE * 32 - 1 downto 0) := (others => '0');
@@ -1363,9 +1379,9 @@ begin
             trig_cmp_mode_b <= (others => '0');
             trig_combine <= (others => '0');
             trig_value <= (others => '0');
-            trig_mask <= (others => '1');
+            trig_mask <= TRIG_MASK_ONES;
             trig_value_b <= (others => '0');
-            trig_mask_b <= (others => '1');
+            trig_mask_b <= NARROW_MASK_ONES;
             rle_active <= '0';
             rle_post_clks <= (others => '0');
             post_clk_en <= '0';
@@ -1382,9 +1398,9 @@ begin
             seq_mode_b <= (others => (others => '0'));
             seq_combine <= (others => (others => '0'));
             seq_value_a <= (others => (others => '0'));
-            seq_mask_a <= (others => (others => '1'));
+            seq_mask_a <= (others => NARROW_MASK_ONES);
             seq_value_b <= (others => (others => '0'));
-            seq_mask_b <= (others => (others => '1'));
+            seq_mask_b <= (others => NARROW_MASK_ONES);
             seq_count_target <= (others => (others => '0'));
             seq_next_state <= (others => (others => '0'));
             seq_is_final <= (others => '0');
@@ -1427,7 +1443,7 @@ begin
                     trig_mask_b <= seq_mask_b_hold(0);
                 else
                     trig_value_b <= (others => '0');
-                    trig_mask_b <= (others => '1');
+                    trig_mask_b <= NARROW_MASK_ONES;
                 end if;
                 rle_active <= rle_active_next;
                 rle_post_clks <= rle_post_clks_stage;
@@ -1477,7 +1493,7 @@ begin
                         seq_is_final(i) <= '0';
                         seq_count_target(i) <= (others => '0');
                         seq_value_a(i) <= (others => '0');
-                        seq_mask_a(i) <= (others => '1');
+                        seq_mask_a(i) <= NARROW_MASK_ONES;
                     end if;
                     if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
                         seq_mode_b(i) <= seq_cfg_hold(i)(7 downto 4);
@@ -1488,7 +1504,7 @@ begin
                         seq_mode_b(i) <= (others => '0');
                         seq_combine(i) <= (others => '0');
                         seq_value_b(i) <= (others => '0');
-                        seq_mask_b(i) <= (others => '1');
+                        seq_mask_b(i) <= NARROW_MASK_ONES;
                     end if;
                 end loop;
             end if;
@@ -2068,14 +2084,14 @@ begin
                         seq_mask_a_hold(i) <= expand32(jtag_seq_mask_a(i));
                     else
                         seq_value_a_hold(i) <= (others => '0');
-                        seq_mask_a_hold(i) <= (others => '1');
+                        seq_mask_a_hold(i) <= NARROW_MASK_ONES;
                     end if;
                     if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
                         seq_value_b_hold(i) <= expand32(jtag_seq_value_b(i));
                         seq_mask_b_hold(i) <= expand32(jtag_seq_mask_b(i));
                     else
                         seq_value_b_hold(i) <= (others => '0');
-                        seq_mask_b_hold(i) <= (others => '1');
+                        seq_mask_b_hold(i) <= NARROW_MASK_ONES;
                     end if;
                 end loop;
             end if;

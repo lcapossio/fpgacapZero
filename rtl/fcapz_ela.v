@@ -224,6 +224,14 @@ module fcapz_ela #(
     localparam HAS_STOR_QUAL = (STOR_QUAL != 0);
     // Wide programmable comparator A only makes sense above 32 bits.
     localparam HAS_WIDE_TRIG = (WIDE_TRIG != 0) && (SAMPLE_W > 32);
+    // Reset value of an active comparator mask: ones on the bits the host
+    // can program (the low 32, or every bit of comparator A with WIDE_TRIG),
+    // zero above, as every ARM loads them.  The bits above 32 are then
+    // constant, so synthesis trims those comparators to 32 bits.
+    localparam [SAMPLE_W-1:0] NARROW_MASK_ONES =
+        {SAMPLE_W{1'b1}} >> ((SAMPLE_W > 32) ? (SAMPLE_W - 32) : 0);
+    localparam [SAMPLE_W-1:0] TRIG_MASK_ONES =
+        HAS_WIDE_TRIG ? {SAMPLE_W{1'b1}} : NARROW_MASK_ONES;
     localparam HAS_DECIM = (DECIM_EN != 0);
     localparam HAS_EXT_TRIG = (EXT_TRIG_EN != 0);
     localparam HAS_SEGMENTS = (NUM_SEGMENTS > 1);
@@ -1476,14 +1484,14 @@ module fcapz_ela #(
                 end else begin
                     seq_cfg_hold[hi]     <= 32'h0;
                     seq_value_a_hold[hi] <= {SAMPLE_W{1'b0}};
-                    seq_mask_a_hold[hi]  <= {SAMPLE_W{1'b1}};
+                    seq_mask_a_hold[hi]  <= NARROW_MASK_ONES;
                 end
                 if (HAS_SEQUENCER && HAS_DUAL_COMPARE) begin
                     seq_value_b_hold[hi] <= jtag_seq_value_b_w[hi];
                     seq_mask_b_hold[hi]  <= jtag_seq_mask_b_w[hi];
                 end else begin
                     seq_value_b_hold[hi] <= {SAMPLE_W{1'b0}};
-                    seq_mask_b_hold[hi]  <= {SAMPLE_W{1'b1}};
+                    seq_mask_b_hold[hi]  <= NARROW_MASK_ONES;
                 end
             end
         end
@@ -1658,9 +1666,9 @@ module fcapz_ela #(
             trig_cmp_mode_b  <= 4'd0;
             trig_combine     <= 2'd0;  // A only
             trig_value       <= {SAMPLE_W{1'b0}};
-            trig_mask        <= {SAMPLE_W{1'b1}};
+            trig_mask        <= TRIG_MASK_ONES;
             trig_value_b     <= {SAMPLE_W{1'b0}};
-            trig_mask_b      <= {SAMPLE_W{1'b1}};
+            trig_mask_b      <= NARROW_MASK_ONES;
             sq_enable        <= 1'b0;
             sq_cmp_mode      <= 4'd0;
             sq_value         <= {SAMPLE_W{1'b0}};
@@ -1679,9 +1687,9 @@ module fcapz_ela #(
                 seq_mode_b[si]       <= 4'd0;
                 seq_combine[si]      <= 2'd0;
                 seq_value_a[si]      <= {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= {SAMPLE_W{1'b1}};
+                seq_mask_a[si]       <= NARROW_MASK_ONES;
                 seq_value_b[si]      <= {SAMPLE_W{1'b0}};
-                seq_mask_b[si]       <= {SAMPLE_W{1'b1}};
+                seq_mask_b[si]       <= NARROW_MASK_ONES;
                 seq_count_target[si] <= 16'h0;
                 seq_next_state[si]   <= {SEQ_STATE_W{1'b0}};
                 seq_is_final[si]     <= 1'b0;
@@ -1707,7 +1715,7 @@ module fcapz_ela #(
             trig_value_b     <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
                                  ? seq_value_b_hold[0] : {SAMPLE_W{1'b0}};
             trig_mask_b      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_mask_b_hold[0] : {SAMPLE_W{1'b1}};
+                                 ? seq_mask_b_hold[0] : NARROW_MASK_ONES;
             // Channel select (clamped to valid range)
             chan_sel         <= chan_sel_next;
             // Probe mux select (clamped when enabled)
@@ -1740,11 +1748,11 @@ module fcapz_ela #(
                 seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_hold[si][12] : 1'b0;
                 seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_hold[si][31:16] : 16'h0;
                 seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_hold[si] : {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_hold[si] : {SAMPLE_W{1'b1}};
+                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_hold[si] : NARROW_MASK_ONES;
                 seq_value_b[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
                                          ? seq_value_b_hold[si] : {SAMPLE_W{1'b0}};
                 seq_mask_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_mask_b_hold[si] : {SAMPLE_W{1'b1}};
+                                         ? seq_mask_b_hold[si] : NARROW_MASK_ONES;
             end
         end
     end
