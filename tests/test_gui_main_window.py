@@ -570,3 +570,201 @@ def test_eio_poll_skips_a_tick_while_a_capture_holds_the_transport(qtbot: Any) -
     assert panel._poll_timer.isActive()
     assert panel._poll_enable.isChecked()
     panel._poll_timer.stop()
+
+
+@pytest.mark.gui
+def test_capture_profiles_save_restore_delete(qtbot: Any, tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from fcapz.gui.settings import load_gui_settings
+
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        ex.enter_context(
+            patch("fcapz.gui.app_window.default_gui_config_path", return_value=gui_path),
+        )
+        ex.enter_context(
+            patch("fcapz.gui.capture_panel.QInputDialog.getText", return_value=("fast", True)),
+        )
+        ex.enter_context(
+            patch(
+                "fcapz.gui.capture_panel.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
+            ),
+        )
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        cap = w._capture
+        cap.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        cap.apply_trigger_history_entry(
+            {"pretrigger": 3, "posttrigger": 9, "trigger_mode": "edge_detect",
+             "trigger_value": 5, "trigger_mask": 15, "trigger_holdoff": 7,
+             "probes": "a:2:0"},
+        )
+
+        qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        saved = load_gui_settings(gui_path).capture_profiles
+        assert list(saved) == ["fast"]
+        assert saved["fast"]["posttrigger"] == 9
+        assert saved["fast"]["trigger_holdoff"] == 7
+        assert saved["fast"]["probes"] == "a:2:0"
+        assert cap.selected_capture_profile() == "fast"
+
+        # Change the form, then pick the profile again: the form comes back.
+        cap.apply_trigger_history_entry(
+            {"pretrigger": 1, "posttrigger": 2, "trigger_holdoff": 0, "probes": ""},
+        )
+        cap.set_capture_profiles(load_gui_settings(gui_path).capture_profiles)
+        combo = cap._cap_profile_pick
+        combo.setCurrentIndex(combo.findData("fast"))
+        cfg = cap.build_capture_config()
+        assert (cfg.pretrigger, cfg.posttrigger, cfg.trigger_holdoff) == (3, 9, 7)
+        assert cfg.trigger.mode == "edge_detect"
+        assert [p.name for p in cfg.probes] == ["a"]
+
+        qtbot.mouseClick(_button_with_text(w, "Delete"), Qt.MouseButton.LeftButton)
+        assert load_gui_settings(gui_path).capture_profiles == {}
+        assert cap.selected_capture_profile() is None
+
+
+@pytest.mark.gui
+def test_saving_over_a_profile_asks_first(qtbot: Any, tmp_path: Path) -> None:
+    """Replace is asked against gui.toml as it is now: a profile this
+    version cannot read, or one saved by the CLI since, is not lost unasked."""
+    from PySide6.QtWidgets import QMessageBox
+
+    gui_path = tmp_path / "gui.toml"
+    with ExitStack() as ex:
+        ex.enter_context(
+            patch("fcapz.gui.app_window.default_gui_config_path", return_value=gui_path),
+        )
+        name = ex.enter_context(patch("fcapz.gui.capture_panel.QInputDialog.getText"))
+        ask = ex.enter_context(
+            patch(
+                "fcapz.gui.app_window.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.No,
+            ),
+        )
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        w._capture.set_hw_probe_info({"sample_width": 8, "depth": 1024, "num_channels": 1})
+        gui_path.write_text(
+            "[capture_profiles.newer]\nfuture_key = 1\n"
+            "[capture_profiles.cli]\nposttrigger = 3\n",
+            encoding="utf-8",
+        )
+        for taken in ("newer", "cli"):
+            name.return_value = (taken, True)
+            qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        assert ask.call_count == 2
+        assert "cannot read" in ask.call_args_list[0].args[2]
+        text = gui_path.read_text(encoding="utf-8")
+        assert "future_key" in text and "posttrigger = 3" in text
+
+        ask.return_value = QMessageBox.StandardButton.Yes
+        name.return_value = ("newer", True)
+        qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        assert "future_key" not in gui_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.gui
+def test_disconnect_drops_the_last_cores_limits(qtbot: Any) -> None:
+    w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+    qtbot.addWidget(w)
+    cap = w._capture
+    cap.set_hw_probe_info(
+        {"sample_width": 8, "depth": 1024, "num_channels": 1, "num_segments": 4}
+    )
+    assert cap._post.maximum() == 255 and cap._channel.maximum() == 0
+    for disconnect in (cap.clear_hw, lambda: cap.set_hw_probe_info(None)):
+        cap.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "num_segments": 4}
+        )
+        disconnect()
+        assert cap._post.maximum() == 1_000_000
+        assert cap._pre.maximum() == 1_000_000
+        assert cap._channel.maximum() == 15
+
+
+@pytest.mark.gui
+def test_capture_profiles_load_exactly_or_not_at_all(qtbot: Any) -> None:
+    from fcapz.capture_profile import normalize_capture_profile
+
+    with ExitStack() as ex:
+        warn = ex.enter_context(patch("fcapz.gui.capture_panel.QMessageBox.warning"))
+        ex.enter_context(
+            patch("fcapz.gui.capture_panel.QInputDialog.getText",
+                  return_value=("fast.json", True)),
+        )
+        w = MainWindow(restore_saved_layout=False, persist_window_layout=False)
+        qtbot.addWidget(w)
+        cap = w._capture
+        cap.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "trig_stages": 2}
+        )
+        stage = {"cmp_a": 0, "value_a": 1, "mask_a": 255, "is_final": True}
+        cap.set_capture_profiles({
+            "slow": normalize_capture_profile({"decimation": 100_000}),
+            "long": normalize_capture_profile(
+                {"posttrigger": 5, "trigger_sequence": [stage, stage, stage]}
+            ),
+            "boot": normalize_capture_profile({"posttrigger": 5, "startup_arm": True}),
+            "runs": normalize_capture_profile({"posttrigger": 5, "rle": True}),
+            "uncounted": normalize_capture_profile(
+                {"trigger_sequence": [dict(stage, count=0)]}
+            ),
+        })
+
+        # The full 24-bit decimation fits.
+        assert cap.apply_capture_profile("slow")
+        assert cap.build_capture_config().decimation == 100_000
+
+        # Three stages on a two-stage core: refused, form unchanged.
+        assert not cap.apply_capture_profile("long")
+        assert warn.call_count == 1
+        assert cap.build_capture_config().posttrigger != 5
+
+        # Settings the form cannot hold here: startup arm, and run-length
+        # capture on a core without it.
+        assert not cap.apply_capture_profile("boot")
+        assert not cap.apply_capture_profile("runs")
+        assert warn.call_count == 3
+        assert cap.build_capture_config().posttrigger != 5
+
+        # Picked from the list, a refused profile is not left selected.
+        combo = cap._cap_profile_pick
+        combo.setCurrentIndex(combo.findData("boot"))
+        assert cap.selected_capture_profile() is None
+        assert warn.call_count == 4
+
+        # count 0 (no count check) is kept, not raised to 1.
+        assert cap.apply_capture_profile("uncounted")
+        assert cap.build_capture_config().sequence[0].count_target == 0
+
+        # A name the CLI would read as a file is not saved.
+        saves: list[str] = []
+        cap.capture_profile_save_requested.connect(saves.append)
+        qtbot.mouseClick(_button_with_text(w, "Save…"), Qt.MouseButton.LeftButton)
+        assert saves == []
+        assert warn.call_count == 5
+
+        # A feature the core lacks: the form would hold a value it cannot use.
+        cap.set_hw_probe_info(
+            {"sample_width": 8, "depth": 1024, "num_channels": 1, "trig_stages": 2,
+             "has_ext_trigger": False}
+        )
+        cap.set_capture_profiles(
+            {"ext": normalize_capture_profile({"ext_trigger_mode": "or"})}
+        )
+        assert not cap.apply_capture_profile("ext")
+
+
+@pytest.mark.gui
+def test_settings_dialog_keeps_capture_profiles(qtbot: Any) -> None:
+    from fcapz.capture_profile import normalize_capture_profile
+    from fcapz.gui.settings_dialog import SettingsDialog
+
+    prof = normalize_capture_profile({"posttrigger": 3})
+    dlg = SettingsDialog(GuiSettings(capture_profiles={"p": prof}))
+    qtbot.addWidget(dlg)
+    assert dlg.merged_settings().capture_profiles == {"p": prof}

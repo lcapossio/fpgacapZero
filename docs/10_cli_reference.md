@@ -120,6 +120,7 @@ EIO/AXI/UART panels are refused — one CLI run builds exactly one transport, so
 | `configure` | Write capture configuration without arming |
 | `capture` | Configure, arm, capture and export to a file |
 | `stream` | Continuous capture on a segmented core: write every window to a JSON Lines file as it completes (Ctrl+C to stop) |
+| `capture-profile` | Save, list, show or delete capture profiles (no board needed) |
 | `eio-probe` | Read EIO core identity and widths |
 | `eio-read` | Read EIO input probes |
 | `eio-write` | Write EIO output probes |
@@ -354,12 +355,13 @@ Usage: `fcapz [global options] configure [options]`
 | `--stor-qual-mode N` | `0` | Storage qualification mode: 0=disabled, 1=store-when-match, 2=store-when-no-match |
 | `--stor-qual-value V` | `0` | Storage qualification comparison value (hex or decimal) |
 | `--stor-qual-mask M` | `0` | Storage qualification mask (hex or decimal) |
-| `--startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
+| `--startup-arm / --no-startup-arm` | off | Leave the ELA armed after reset / configuration recovery. Useful with bitstreams that want to begin capturing immediately after startup or after an explicit RESET. |
 | `--trigger-holdoff N` | `0` | Ignore trigger hits for N sample-clock cycles after arm or segmented auto-rearm. Distinct from --trigger-delay, which moves the committed trigger sample later. |
 | `--trigger-delay N` | `0` | Post-trigger delay in sample-clock cycles (0..65535). Shifts the committed trigger sample N cycles after the trigger event to compensate for upstream pipeline latency. |
-| `--rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
+| `--rle / --no-rle` | off | Run-length capture: store each run of a repeated sample once, with its length. Pre/post-trigger lengths then count runs. Needs a core built with RLE_W; not with decimation or storage qualification. |
 | `--post-clocks N` | `0` | With --rle: also end the post-trigger window N sample clocks after the trigger, if --posttrigger runs have not ended it first (0 = no clock limit). |
 | `--profile NAME` | — | Use named probe list from gui.toml section [probe_profiles.NAME] |
+| <code>--capture-profile NAME&#124;FILE</code> | — | Start from a saved capture profile (gui.toml [capture_profiles.NAME] or a .json file); options given on the command line override it |
 
 <!-- END GENERATED cli:configure -->
 
@@ -588,6 +590,73 @@ A window with `after_gap` comes after a wait: the host fell behind,
 the core paused with every segment full, and `lost` counts what it
 missed since the arm (stored samples with `--raw`, sample clocks
 without).
+
+## `capture-profile`
+
+A capture profile is a whole capture setup saved under a name: the
+trigger, the sequencer stages, pre/post-trigger lengths, storage
+qualification, decimation, holdoff, delay, run-length capture, the
+probes and the rest of the `configure` options.  Settings the core
+reports itself (sample width, depth) are not saved.  A profile is
+either a name, stored in `gui.toml` under `[capture_profiles.NAME]`
+and shared with the desktop GUI, or a JSON file (any `NAME|FILE`
+that ends in `.json` or contains a path separator), which you can
+keep with a design.  `capture-profile` works without a board.
+
+<!-- BEGIN GENERATED cli:capture-profile (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Usage: `fcapz [global options] capture-profile {save,list,show,delete} ...`
+
+| Subcommand | What it does |
+|---|---|
+| `save` | Save the capture options given here as a profile |
+| `list` | List the profiles in gui.toml |
+| `show` | Print a profile as JSON |
+| `delete` | Delete a profile from gui.toml |
+
+<!-- END GENERATED cli:capture-profile -->
+
+`save` takes every `configure` option:
+
+<!-- BEGIN GENERATED cli:capture-profile.save/configure (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
+
+Options `capture-profile save` has in addition to those of `configure`:
+
+| Option | Default | Description |
+|---|---|---|
+| <code>NAME&#124;FILE</code> | required | Profile name or .json file |
+
+<!-- END GENERATED cli:capture-profile.save/configure -->
+
+`configure`, `capture`, `stream` and `capture-profile save` load a
+profile with `--capture-profile NAME|FILE`; every option given on the
+same command line overrides the profile (`--no-rle` and
+`--no-startup-arm` turn off a profile's `rle` and `startup_arm`).  The
+profile's probes are not
+used when `--probes`, `--probe-file` or `--profile` is given, nor its
+sample clock with `--probe-file`.
+
+```bash
+# Save a setup once...
+fcapz capture-profile save burst --pretrigger 16 --posttrigger 240     --trigger-mode edge_detect --trigger-value 0x1 --trigger-mask 0x1     --probes valid:1:0,data:8:1 --trigger-holdoff 100
+
+# ...capture with it, changing only the post-trigger length
+fcapz --backend hw_server --port 3121 capture --capture-profile burst     --posttrigger 100 --out burst.vcd --format vcd
+
+# Copy it to a file to keep with the design, then check it
+fcapz capture-profile save designs/burst.json --capture-profile burst
+fcapz capture-profile show designs/burst.json
+fcapz capture-profile list
+fcapz capture-profile delete burst
+```
+
+The JSON file holds `{"format": "fcapz.capture.v1", "name": ...,
+"capture": {...}}`, where `capture` has one key per setting, named
+after the option (`--trigger-value` is `trigger_value`; `--probes` is
+the same `name:width:lsb,...` text; `trigger_sequence` is the
+[`--trigger-sequence`](#the---trigger-sequence-json-schema) array).  Value
+and mask settings also accept `"0x..."` text.  A missing setting takes
+the option's default, and an unknown key is an error.
 
 ## EIO subcommands
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -29,15 +30,28 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import CaptureConfig, SequencerStage, TriggerConfig
+from ..capture_profile import is_profile_path
 from ..cli import _parse_probes
 from ..probes import load_probe_file, probes_to_arg
 from .collapsible_section import CollapsibleSection
 from .settings import ProbeProfile
 
+# Sequencer stage fields a profile may set, with the table widgets' ranges.
+_SEQ_PROFILE_LIMITS = (
+    ("cmp_a", 8),
+    ("cmp_b", 8),
+    ("combine", 3),
+    ("next_state", 3),
+    ("count", 0xFFFF),
+)
+
 # Pre/post + 1 must fit in usable depth; invalid pair → both spin boxes get a red outline.
 # Keep background/text from the active theme so dark/light palettes stay readable.
 _PREPOST_SPIN_INVALID_STYLE = "QSpinBox { border: 2px solid #e57373; border-radius: 3px; }"
 _PREPOST_SPIN_NORMAL_STYLE = ""
+# Spin box limits with no core connected.
+_PREPOST_NO_CORE_MAX = 1_000_000
+_CHANNEL_NO_CORE_MAX = 15
 
 _TRIGGER_VALUE_RADIXES: tuple[tuple[str, int], ...] = (
     ("Hex", 16),
@@ -125,6 +139,10 @@ class CapturePanel(QGroupBox):
     """ELA capture parameters including optional hardware trigger sequencer stages."""
 
     ela_core_changed = Signal(int)
+    #: Save the current form as the named capture profile.
+    capture_profile_save_requested = Signal(str)
+    #: Delete the named capture profile.
+    capture_profile_delete_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("ELA capture", parent)
@@ -165,11 +183,28 @@ class CapturePanel(QGroupBox):
         self._preset.addItem("— Trigger preset (from history) —", None)
         self._preset.currentIndexChanged.connect(self._on_preset_picked)
 
+        self._capture_profiles: dict[str, dict[str, Any]] = {}
+        self._cap_profile_pick = QComboBox()
+        self._cap_profile_pick.addItem("— Capture profile —", None)
+        self._cap_profile_pick.setToolTip(
+            "Saved capture setups (gui.toml [capture_profiles]): trigger, "
+            "sequencer, pre/post-trigger, advanced options and probes. "
+            "Shared with `fcapz --capture-profile NAME`."
+        )
+        self._cap_profile_pick.currentIndexChanged.connect(self._on_cap_profile_picked)
+        self._btn_cap_profile_save = QPushButton("Save…")
+        self._btn_cap_profile_save.setToolTip("Save the current capture settings as a profile")
+        self._btn_cap_profile_save.clicked.connect(self._on_cap_profile_save_clicked)
+        self._btn_cap_profile_delete = QPushButton("Delete")
+        self._btn_cap_profile_delete.setToolTip("Delete the selected capture profile")
+        self._btn_cap_profile_delete.setEnabled(False)
+        self._btn_cap_profile_delete.clicked.connect(self._on_cap_profile_delete_clicked)
+
         self._pre = QSpinBox()
-        self._pre.setRange(0, 1_000_000)
+        self._pre.setRange(0, _PREPOST_NO_CORE_MAX)
         self._pre.setValue(8)
         self._post = QSpinBox()
-        self._post.setRange(0, 1_000_000)
+        self._post.setRange(0, _PREPOST_NO_CORE_MAX)
         self._post.setValue(16)
         self._pre.valueChanged.connect(self._on_pre_post_changed)
         self._post.valueChanged.connect(self._on_pre_post_changed)
@@ -230,12 +265,12 @@ class CapturePanel(QGroupBox):
         self._clock_hz.setValue(100_000_000)
 
         self._channel = QSpinBox()
-        self._channel.setRange(0, 15)
+        self._channel.setRange(0, _CHANNEL_NO_CORE_MAX)
         self._channel.setValue(0)
 
         self._decim = QSpinBox()
         self._decim.setObjectName("fcapz_capture_decim")
-        self._decim.setRange(0, 65535)
+        self._decim.setRange(0, 0xFF_FFFF)  # DECIM is 24 bits
         self._decim.setValue(0)
 
         self._probe_sel = QSpinBox()
@@ -352,6 +387,11 @@ class CapturePanel(QGroupBox):
         form_main.addRow("ELA core", self._ela_core)
         form_main.addRow("Probe profile", self._profile_pick)
         form_main.addRow("Trigger preset", self._preset)
+        row_cap_profile = QHBoxLayout()
+        row_cap_profile.addWidget(self._cap_profile_pick, 1)
+        row_cap_profile.addWidget(self._btn_cap_profile_save)
+        row_cap_profile.addWidget(self._btn_cap_profile_delete)
+        form_main.addRow("Capture profile", row_cap_profile)
         form_main.addRow("Pre-trigger samples", row_pre)
         form_main.addRow("Post-trigger samples", row_post)
         form_main.addRow("Trigger mode", self._trig_mode)
@@ -432,6 +472,8 @@ class CapturePanel(QGroupBox):
         self._hw_num_segments = 1
         self._hw_rle_w = 0
         self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
+        self._hw_has_dual_compare = True
+        self._channel.setMaximum(_CHANNEL_NO_CORE_MAX)
         self._ui_busy = False
         self.set_managed_ela_slots([], current=0)
         self._btn_stop.setEnabled(False)
@@ -471,6 +513,11 @@ class CapturePanel(QGroupBox):
     def _refresh_pre_post_validity(self) -> None:
         lim = self._pre_post_depth_limit()
         if lim is None:
+            # No core: drop the last core's limits.
+            with QSignalBlocker(self._pre):
+                self._pre.setMaximum(_PREPOST_NO_CORE_MAX)
+            with QSignalBlocker(self._post):
+                self._post.setMaximum(_PREPOST_NO_CORE_MAX)
             self._pre.setStyleSheet(_PREPOST_SPIN_NORMAL_STYLE)
             self._post.setStyleSheet(_PREPOST_SPIN_NORMAL_STYLE)
             self._btn_pre_max.setEnabled(False)
@@ -621,6 +668,107 @@ class CapturePanel(QGroupBox):
             for name in sorted(self._profiles):
                 self._profile_pick.addItem(name, name)
             self._profile_pick.setCurrentIndex(0)
+
+    def set_capture_profiles(
+        self, profiles: Mapping[str, Mapping[str, Any]], *, select: str | None = None
+    ) -> None:
+        """List the saved capture profiles; *select* one without applying it."""
+        self._capture_profiles = {name: dict(body) for name, body in profiles.items()}
+        with QSignalBlocker(self._cap_profile_pick):
+            self._cap_profile_pick.clear()
+            self._cap_profile_pick.addItem("— Capture profile —", None)
+            for name in sorted(self._capture_profiles):
+                self._cap_profile_pick.addItem(name, name)
+            idx = self._cap_profile_pick.findData(select) if select else 0
+            self._cap_profile_pick.setCurrentIndex(max(idx, 0))
+        self._btn_cap_profile_delete.setEnabled(self.selected_capture_profile() is not None)
+
+    def selected_capture_profile(self) -> str | None:
+        name = self._cap_profile_pick.currentData()
+        return None if name is None else str(name)
+
+    def capture_profile_problem(self, body: Mapping[str, Any]) -> str | None:
+        """Why the form cannot hold *body* exactly for the connected core.
+
+        The form's spin boxes clamp and the sequencer table keeps only the
+        core's stages, so a profile is refused rather than loaded changed.
+        """
+        for key, spin in self._profile_spins():
+            if key not in body:
+                continue
+            try:
+                value = int(body[key])
+            except (TypeError, ValueError):
+                return f"{key} is not a number ({body[key]!r})"
+            if not spin.minimum() <= value <= spin.maximum():
+                return (
+                    f"{key} = {value} is outside {spin.minimum()}..{spin.maximum()} "
+                    "here"
+                )
+        if body.get("startup_arm"):
+            return "it turns startup arm on, which the GUI does not set"
+        if body.get("decimation") and not self._hw_has_decimation:
+            return "it uses decimation, which the connected core does not have"
+        ext = str(body.get("ext_trigger_mode", "disabled")).lower()
+        if ext != "disabled" and not self._hw_has_ext_trigger:
+            return "it uses the external trigger, which the connected core does not have"
+        if body.get("stor_qual_mode") and not self._hw_has_storage_qual:
+            return "it uses storage qualification, which the connected core does not have"
+        if body.get("rle") and not self._rle.isEnabled():
+            return "it uses run-length capture, which the connected core does not have"
+        seq = body.get("trigger_sequence")
+        if not isinstance(seq, list):
+            return None
+        if len(seq) > self._hw_trig_stages:
+            return (
+                f"its trigger sequence has {len(seq)} stage(s), and the connected "
+                f"core takes {self._hw_trig_stages}"
+            )
+        for n, stage in enumerate(seq, 1):
+            if not isinstance(stage, Mapping):
+                return f"sequencer stage {n} is not a table"
+            for key, top in _SEQ_PROFILE_LIMITS:
+                if key not in stage:
+                    continue
+                try:
+                    value = int(stage[key])
+                except (TypeError, ValueError):
+                    return f"sequencer stage {n} {key} is not a number"
+                if not 0 <= value <= top:
+                    return f"sequencer stage {n} {key} = {value} is outside 0..{top}"
+        return None
+
+    def _profile_spins(self) -> tuple[tuple[str, QSpinBox], ...]:
+        return (
+            ("pretrigger", self._pre),
+            ("posttrigger", self._post),
+            ("sample_clock_hz", self._clock_hz),
+            ("channel", self._channel),
+            ("decimation", self._decim),
+            ("probe_sel", self._probe_sel),
+            ("stor_qual_mode", self._stor_mode),
+            ("trigger_holdoff", self._trig_holdoff),
+            ("trigger_delay", self._trig_delay),
+            ("post_clocks", self._post_clocks),
+        )
+
+    def apply_capture_profile(self, name: str) -> bool:
+        """Fill the form from the named saved profile.
+
+        Returns ``False``, leaving the form alone, if the profile is unknown
+        or the form cannot hold it (:meth:`capture_profile_problem`).
+        """
+        body = self._capture_profiles.get(name)
+        if body is None:
+            return False
+        problem = self.capture_profile_problem(body)
+        if problem is not None:
+            QMessageBox.warning(
+                self, "Capture profile", f"Cannot load the profile {name!r}: {problem}."
+            )
+            return False
+        self.apply_trigger_history_entry(body)
+        return True
 
     def set_trigger_history(self, entries: list[dict[str, Any]]) -> None:
         with QSignalBlocker(self._preset):
@@ -778,7 +926,7 @@ class CapturePanel(QGroupBox):
         nxt.setRange(0, 3)
         fin = QCheckBox()
         cnt = QSpinBox()
-        cnt.setRange(1, 65535)
+        cnt.setRange(0, 65535)  # 0 skips the count check
         cnt.setValue(1)
         va = QLineEdit("0")
         ma = QLineEdit("0xFFFFFFFF")
@@ -832,7 +980,7 @@ class CapturePanel(QGroupBox):
             w.setChecked(bool(ent.get("is_final", False)))
         w = self._seq_table.cellWidget(row, _SEQ_COL_COUNT)
         if isinstance(w, QSpinBox):
-            w.setValue(max(1, min(65535, int(ent.get("count", 1)))))
+            w.setValue(max(0, min(65535, int(ent.get("count", 1)))))
         for col, key, default in (
             (_SEQ_COL_VAL_A, "value_a", "0"),
             (_SEQ_COL_MASK_A, "mask_a", "0xFFFFFFFF"),
@@ -904,6 +1052,48 @@ class CapturePanel(QGroupBox):
         if prof is not None:
             self._probes.setText(prof.probes)
 
+    def _on_cap_profile_picked(self, _idx: int) -> None:
+        name = self.selected_capture_profile()
+        if name is not None and not self.apply_capture_profile(name):
+            # Refused: the form still holds other settings, so show none
+            # picked (and let the same profile be picked again later).
+            with QSignalBlocker(self._cap_profile_pick):
+                self._cap_profile_pick.setCurrentIndex(0)
+            name = None
+        self._btn_cap_profile_delete.setEnabled(name is not None)
+
+    def _on_cap_profile_save_clicked(self) -> None:
+        name, ok = QInputDialog.getText(
+            self,
+            "Save capture profile",
+            "Profile name:",
+            text=self.selected_capture_profile() or "",
+        )
+        name = name.strip()
+        if not ok or not name:
+            return
+        if is_profile_path(name):
+            QMessageBox.warning(
+                self,
+                "Save capture profile",
+                f"{name!r} reads as a file to the CLI (--capture-profile): use a "
+                "name without '/', '\\' or a .json ending.",
+            )
+            return
+        # The main window asks before replacing a profile: it checks gui.toml
+        # as it is now, with profiles this list cannot show.
+        self.capture_profile_save_requested.emit(name)
+
+    def _on_cap_profile_delete_clicked(self) -> None:
+        name = self.selected_capture_profile()
+        if name is None:
+            return
+        answer = QMessageBox.question(
+            self, "Delete capture profile", f"Delete the capture profile {name!r}?"
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.capture_profile_delete_requested.emit(name)
+
     def _on_preset_picked(self, _idx: int) -> None:
         data = self._preset.currentData()
         if data is None:
@@ -949,6 +1139,8 @@ class CapturePanel(QGroupBox):
             self._hw_num_segments = 1
             self._hw_rle_w = 0
             self._hw_compare_caps = _COMPARE_CAPS_LEGACY_FULL
+            self._hw_has_dual_compare = True
+            self._channel.setMaximum(_CHANNEL_NO_CORE_MAX)
             self.set_managed_ela_slots([], current=0)
             self._btn_stop.setEnabled(False)
             self._hw_label.setText(

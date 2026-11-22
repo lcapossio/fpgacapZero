@@ -85,6 +85,8 @@ def _help(action: argparse.Action) -> str:
 def _flag(action: argparse.Action) -> str:
     if not action.option_strings:
         return action.metavar or action.dest.upper()
+    if isinstance(action, argparse.BooleanOptionalAction):
+        return " / ".join(action.option_strings)
     name = max(action.option_strings, key=len)
     if action.nargs == 0:
         return name
@@ -116,11 +118,29 @@ def _options(parser: argparse.ArgumentParser) -> list[argparse.Action]:
     ]
 
 
-def _subparsers(parser: argparse.ArgumentParser):
+def _subparsers(parser: argparse.ArgumentParser, required: bool = True):
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             return action
-    raise RuntimeError("fcapz parser has no subcommands")
+    if required:
+        raise RuntimeError("fcapz parser has no subcommands")
+    return None
+
+
+def _subcommand_table(subs) -> list[str]:
+    lines = ["| Subcommand | What it does |", "|---|---|"]
+    lines += [f"| `{c.dest}` | {_cell(c.help or '')} |" for c in subs._choices_actions]
+    return lines
+
+
+def _find_subcommand(parser: argparse.ArgumentParser, path: str):
+    """The parser for ``a`` or a nested ``a.b`` subcommand, or None."""
+    for part in path.split("."):
+        subs = _subparsers(parser, required=False)
+        if subs is None or part not in subs.choices:
+            return None
+        parser = subs.choices[part]
+    return parser
 
 
 def _groups(parser: argparse.ArgumentParser):
@@ -138,13 +158,16 @@ def _usage(name: str, parser: argparse.ArgumentParser) -> str:
         alts = " | ".join(_flag(a) for a in group._group_actions)
         parts.append(f"({alts})" if group.required else f"[{alts}]")
     parts += [_flag(a) for a in _options(parser) if not a.option_strings]
+    nested = _subparsers(parser, required=False)
+    if nested is not None:
+        parts.append("{" + ",".join(nested.choices) + "} ...")
     return " ".join(["fcapz [global options]", name, *parts])
 
 
 def _option_table(actions: list[argparse.Action]) -> list[str]:
     lines = ["| Option | Default | Description |", "|---|---|---|"]
     for action in actions:
-        lines.append(f"| `{_flag(action)}` | {_default(action)} | {_help(action)} |")
+        lines.append(f"| {_code_cell(_flag(action))} | {_default(action)} | {_help(action)} |")
     return lines
 
 
@@ -153,21 +176,24 @@ def _cli_block(key: str, parser: argparse.ArgumentParser) -> str:
     if key == "global":
         lines = _option_table(_options(parser))
     elif key == "subcommands":
-        lines = ["| Subcommand | What it does |", "|---|---|"]
-        lines += [f"| `{c.dest}` | {_cell(c.help or '')} |" for c in subs._choices_actions]
+        lines = _subcommand_table(subs)
     else:
-        name, _, base = key.partition("/")
-        if name not in subs.choices or (base and base not in subs.choices):
+        path, _, base = key.partition("/")
+        sub = _find_subcommand(parser, path)
+        if sub is None or (base and base not in subs.choices):
             raise SystemExit(f"{CLI_DOC.name}: unknown subcommand in block cli:{key}")
-        sub = subs.choices[name]
+        name = path.replace(".", " ")
         actions = _options(sub)
         lines = [f"Usage: `{_usage(name, sub)}`", ""]
         if base:
             have = {a.dest for a in _options(subs.choices[base])}
             actions = [a for a in actions if a.dest not in have]
             lines = [f"Options `{name}` has in addition to those of `{base}`:", ""]
+        nested = _subparsers(sub, required=False)
         if actions:
             lines += _option_table(actions)
+        elif nested is not None:
+            lines += _subcommand_table(nested)
         else:
             lines.append("No options of its own; the [global options](#global-options) apply.")
         for group in _groups(sub):
@@ -186,7 +212,7 @@ def render_cli_doc(text: str, parser: argparse.ArgumentParser) -> str:
         key = match.group("key")
         if not key.startswith("cli:"):
             raise SystemExit(f"{CLI_DOC.name}: unknown generated block {key}")
-        covered.add(key[4:].partition("/")[0])
+        covered.add(key[4:].partition("/")[0].partition(".")[0])
         body = _cli_block(key[4:], parser)
         return f"{match.group(1)}{body}{match.group(4)}"
 

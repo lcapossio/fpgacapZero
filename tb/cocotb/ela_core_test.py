@@ -421,6 +421,34 @@ async def edge_capture(dut):
 
 
 @cocotb.test()
+async def both_mode_fires_on_value_or_change(dut):
+    """TRIG_MODE 3 ("both") is value_match OR edge_detect, with or without
+    comparator B: a steady sample equal to the value triggers, and so does a
+    change under the mask while the value never matches."""
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_TRIG_MODE, 3)
+    await ela.write(ADDR_TRIG_VALUE, 0x5A)
+    await ela.write(ADDR_TRIG_MASK, 0xFF)
+    ela.dut.probe_in.value = 0x5A
+    await ela.wait_sample(4)
+    await ela.arm()
+    assert await ela.wait_done() & 0x4, "steady matching value did not trigger"
+
+    await ela.reset_core()
+    ela.dut.probe_in.value = 0x00
+    await ela.wait_sample(4)
+    await ela.arm()
+    await ela.wait_sample(20)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"steady non-matching value triggered, status=0x{status:x}"
+    ela.dut.probe_in.value = 0x01
+    assert await ela.wait_done() & 0x4, "change under the mask did not trigger"
+
+
+@cocotb.test()
 async def overflow_and_reset(dut):
     ela = await setup(dut)
     await ela.configure_value_capture(pre=8, post=8, value=5)
@@ -1019,6 +1047,78 @@ async def trigger_delay_startup_and_holdoff(dut):
 
 
 @cocotb.test()
+async def ctrl_cmd_busy_clears_after_the_arm(dut):
+    """STATUS[4] (ARM / RESET in flight) must not clear before the command
+    has armed the core: for ARM, its arm latch; for RESET with STARTUP_ARM,
+    the startup arm one sample clock later.  A slow sample clock opens the
+    window where a host would otherwise replace the snapshot early."""
+    ela = await setup(dut, sample_period_ns=200)
+    await ela.configure_value_capture(pre=0, post=2, value=0xFF)
+    ela.dut.probe_in.value = 0
+    for ctrl, startup_arm in ((0x1, 0), (0x2, 1)):
+        await ela.write(ADDR_STARTUP_ARM, startup_arm)
+        await ela.write(ADDR_CTRL, 0x2)
+        for _ in range(200):
+            if not await ela.read(ADDR_STATUS) & 0x10:
+                break
+        await ela.write(ADDR_CTRL, ctrl)
+        status = await ela.read(ADDR_STATUS)
+        assert status & 0x10, f"STATUS[4] not set after CTRL 0x{ctrl:x}: 0x{status:x}"
+        for _ in range(200):
+            status = await ela.read(ADDR_STATUS)
+            if not status & 0x10:
+                break
+        else:
+            raise AssertionError(f"STATUS[4] stuck after CTRL 0x{ctrl:x}")
+        assert status & 0x1, (
+            f"STATUS[4] cleared before CTRL 0x{ctrl:x} armed: status=0x{status:x}"
+        )
+    await ela.write(ADDR_STARTUP_ARM, 0)
+
+
+@cocotb.test()
+async def boot_startup_arm_holds_status4(dut):
+    """A STARTUP_ARM=1 core leaves reset with a startup arm still to come,
+    which reads the *_hold snapshot: STATUS[4] stays set until it happens,
+    even while the sample clock has not started."""
+    if env_int("ELA_PARAM_STARTUP_ARM", 0) == 0:
+        return
+    cocotb.start_soon(Clock(dut.jtag_clk, 14, unit="ns").start())
+    dut.sample_clk.value = 0
+    dut.sample_rst.value = 1
+    dut.jtag_rst.value = 1
+    dut.probe_in.value = 0
+    dut.trigger_in.value = 0
+    dut.jtag_wr_en.value = 0
+    dut.jtag_rd_en.value = 0
+    dut.jtag_addr.value = 0
+    dut.jtag_wdata.value = 0
+    if hasattr(dut, "burst_rd_active"):
+        dut.burst_rd_active.value = 0
+    dut.burst_rd_addr.value = 0
+    ela = ElaDriver(dut)
+    await ela.wait_jtag(4)
+    dut.sample_rst.value = 0
+    await ela.wait_jtag(2)
+    dut.jtag_rst.value = 0
+    # Read at once: the bit must be set from the first jtag_clk after reset.
+    for _ in range(3):
+        status = await ela.read(ADDR_STATUS)
+        assert status & 0x10, f"STATUS[4] clear before the startup arm: 0x{status:x}"
+        assert not status & 0x1
+    cocotb.start_soon(Clock(dut.sample_clk, 10, unit="ns").start())
+    for _ in range(50):
+        status = await ela.read(ADDR_STATUS)
+        if not status & 0x10:
+            break
+    else:
+        raise AssertionError("STATUS[4] stuck after the sample clock started")
+    # The reset trigger mask matches anything, so the arm may have triggered
+    # and finished already: armed, triggered or done all show it happened.
+    assert status & 0x7, f"STATUS[4] cleared before the startup arm: 0x{status:x}"
+
+
+@cocotb.test()
 async def input_pipe_captures(dut):
     ela = await setup(dut)
     await ela.write(ADDR_DECIM, 0)
@@ -1293,6 +1393,27 @@ async def config_user1_disabled(dut):
     await ela.write(ADDR_DATA_OFFSET, 5)
     assert await ela.read(ADDR_DATA_OFFSET) == 0
     FUNCTIONAL_COVERAGE.hit("user1_disabled")
+
+
+@cocotb.test()
+async def sequencer_mode9_never_fires(dut):
+    """Compare mode 9 (EQ or CHANGED) belongs to the single-stage comparator
+    behind TRIG_MODE 3.  A sequencer stage written with it by a raw register
+    write never fires, even with a zero mask (everything equal)."""
+    ela = await setup(dut)
+    await ela.reset_core()
+    await ela.write(ADDR_PRETRIG, 0)
+    await ela.write(ADDR_POSTTRIG, 0)
+    await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1009)   # final stage, A only, mode 9
+    await ela.write(ADDR_SEQ_BASE + 4, 0)
+    await ela.write(ADDR_SEQ_BASE + 8, 0)
+    ela.dut.probe_in.value = 0
+    await ela.arm()
+    for value in (0, 0, 1, 2, 2, 3):
+        ela.dut.probe_in.value = value
+        await ela.wait_sample(4)
+    status = await ela.read(ADDR_STATUS)
+    assert not status & 0x6, f"sequencer mode 9 fired, status=0x{status:x}"
 
 
 @cocotb.test()
@@ -2619,6 +2740,38 @@ async def stream_waits_for_release_and_counts_loss(dut):
     # It resumed after a gap, not where the last window before the wait ended.
     assert (resumed[0] - first[-1]) & 0xFF != 1
     FUNCTIONAL_COVERAGE.hit("stream_ring")
+
+
+@cocotb.test()
+async def stream_waits_again_after_many_laps(dut):
+    """The ring's fill count wraps with the window counters: after several
+    laps it still waits with every segment unread, refuses a release past
+    the completed windows, and resumes on a release."""
+    ela = await setup(dut)
+    await ela.write(ADDR_DECIM, 0)
+    host = StreamHost(ela)
+    counter = cocotb.start_soon(free_running_counter(dut))
+    await host.start(raw=True)
+    while host.read_seq < 5 * NUM_SEGMENTS + 1:
+        await host.next_windows(STREAM_SEG_DEPTH)
+    read = host.read_seq
+    await ela.wait_sample(DEPTH * 4)
+    session, done = await host.completed()
+    assert done == read + NUM_SEGMENTS, (read, done)
+    assert await host.status() & 0x8, "not waiting with every segment full"
+    await host.release(session, done + 1)
+    assert await host.released() == read, "a release past the completed windows was taken"
+    await host.release(session, read + 1)
+    assert await host.released() == read + 1
+    for _ in range(400):
+        _, done = await host.completed()
+        if done == read + NUM_SEGMENTS + 1:
+            break
+        await ela.wait_sample(2)
+    assert done == read + NUM_SEGMENTS + 1, done
+    await ela.wait_sample(DEPTH)
+    assert (await host.completed())[1] == done, "one release made room for one window"
+    counter.cancel()
 
 
 @cocotb.test()

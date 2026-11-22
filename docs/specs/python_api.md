@@ -143,7 +143,9 @@ Soft-reset the ELA capture state (CTRL reset bit).
 
 The core re-arms at once if the runtime STARTUP_ARM register is set
 (`CaptureConfig.startup_arm=True`); use `force_idle` when the
-next step needs a verified idle core.
+next step needs a verified idle core.  Raises
+`CommandPendingError` if the previous ARM or RESET never
+reaches the sample clock.
 
 #### `Analyzer.force_idle`
 
@@ -211,6 +213,7 @@ it and should use `reset`/`arm` directly.
 **Raises:**
 
 - `RuntimeError`: if the core is still busy after `max_resets` resets (e.g. `STARTUP_ARM` is still enabled because `configure` was not called first).
+- `CommandPendingError`: (a `RuntimeError`) if a previous ARM / RESET has not reached the sample clock within `timeout` (at most `_CTRL_CMD_SETTLE_S`); no further reset is written.
 
 #### `Analyzer.configure`
 
@@ -255,6 +258,8 @@ Raises `ManagerResetError` if the core's slot was reset since
 `CAPTURE_GEN` (`COMPARE_CAPS` bit 21), raises
 `CaptureChangedError` if another controller armed or reset the
 core at the same time; the capture read later must be this arm's.
+Raises `CommandPendingError` if the previous ARM or RESET never
+reaches the sample clock.
 
 #### `Analyzer.wait_done`
 
@@ -3236,6 +3241,43 @@ Non-destructive status poll. Does not consume RX data.
 
 rx_ready: True if RX FIFO has data waiting (use this for polling).
 tx_free:  conservative lower bound of TX FIFO free space.
+
+## `fcapz`
+
+### `CAPTURE_PROFILE_FORMAT`
+
+```python
+CAPTURE_PROFILE_FORMAT = 'fcapz.capture.v1'
+```
+
+## `fcapz.capture_profile`
+
+### `load_capture_profile`
+
+```python
+load_capture_profile(
+    path: str | Path,
+    *,
+    sample_width: int = 8,
+    depth: int = 1024,
+) -> CaptureConfig
+```
+
+Load a JSON profile file as a `CaptureConfig` for a core of
+*sample_width* bits and *depth* samples.
+
+### `save_capture_profile`
+
+```python
+save_capture_profile(
+    path: str | Path,
+    cfg: CaptureConfig,
+    *,
+    name: str | None = None,
+) -> None
+```
+
+Save every user setting of *cfg* to a JSON profile file.
 
 ## `fcapz`
 

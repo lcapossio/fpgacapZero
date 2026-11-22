@@ -28,6 +28,11 @@ from .events import (
     summarize,
 )
 from .ftdi_transport import FtdiMpsseTransport
+from .capture_profile import (
+    CAPTURE_PROFILE_FORMAT,
+    load_capture_profile,
+    save_capture_profile,
+)
 from .probes import (
     PROBE_FILE_FORMAT,
     ProbeFile,
@@ -79,6 +84,9 @@ __all__ = [
     "EjtagAxiController",
     "AXIError",
     "EjtagUartController",
+    "CAPTURE_PROFILE_FORMAT",
+    "load_capture_profile",
+    "save_capture_profile",
     "PROBE_FILE_FORMAT",
     "ProbeFile",
     "load_probe_file",

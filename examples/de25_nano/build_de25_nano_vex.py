@@ -87,6 +87,14 @@ def main() -> int:
         print(f"[build_de25_nano_vex.py] build reported success but bitfile missing: {BITFILE}",
               file=sys.stderr)
         return 4
+    from build import timing_failures  # examples/de25_nano/build.py
+
+    failures = timing_failures(BITFILE)
+    if failures:
+        print(f"[build_de25_nano_vex.py] {BITFILE.name} misses timing:", file=sys.stderr)
+        for failure in failures:
+            print(f"[build_de25_nano_vex.py]   {failure}", file=sys.stderr)
+        return 5
     print(f"[build_de25_nano_vex.py] success: {BITFILE}")
     return 0
 

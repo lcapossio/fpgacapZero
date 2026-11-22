@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult, ELA_CORE_ID
+from ..capture_profile import capture_profile_from_config, normalize_capture_profile
 from ..eio import EIO_CORE_ID, EioController, default_eio_chains, discover_eio
 from ..ejtagaxi import AXIError, EjtagAxiController
 from ..ejtaguart import EjtagUartController
@@ -244,6 +245,10 @@ class MainWindow(QMainWindow):
         self._probe = ProbePanel()
         self._capture = CapturePanel()
         self._capture.ela_core_changed.connect(self._on_ela_core_changed)
+        self._capture.capture_profile_save_requested.connect(self._on_capture_profile_save)
+        self._capture.capture_profile_delete_requested.connect(
+            self._on_capture_profile_delete
+        )
         self._capture.wire_handlers(
             on_configure=self._on_configure,
             on_arm=self._on_arm_clicked,
@@ -436,6 +441,7 @@ class MainWindow(QMainWindow):
         self._conn.load_from_settings(settings.connection)
         self._capture.set_probe_profiles(settings.probe_profiles)
         self._capture.set_trigger_history(settings.trigger_history)
+        self._capture.set_capture_profiles(settings.capture_profiles)
         self._apply_viewer_choices(settings)
         self._history.set_open_viewer_after_capture(
             settings.viewers.open_viewer_after_capture,
@@ -574,6 +580,7 @@ class MainWindow(QMainWindow):
         self._history.set_reuse_external_viewer(gui.viewers.reuse_external_viewer)
         self._capture.set_probe_profiles(gui.probe_profiles)
         self._capture.set_trigger_history(gui.trigger_history)
+        self._capture.set_capture_profiles(gui.capture_profiles)
         self._sync_toolbar_actions()
 
     def _on_connect_worker_failed(self, message: str) -> None:
@@ -1164,6 +1171,7 @@ class MainWindow(QMainWindow):
         self._history.set_reuse_external_viewer(merged.viewers.reuse_external_viewer)
         self._capture.set_probe_profiles(merged.probe_profiles)
         self._capture.set_trigger_history(merged.trigger_history)
+        self._capture.set_capture_profiles(merged.capture_profiles)
 
     def _on_open_config_folder(self) -> None:
         p = self._config_path.parent
@@ -1179,15 +1187,60 @@ class MainWindow(QMainWindow):
             "(embedded preview or external viewers).</p>",
         )
 
-    def _persist_trigger_snapshot(self, cfg: CaptureConfig) -> None:
+    def _on_capture_profile_save(self, name: str) -> None:
+        try:
+            cfg = self._capture.build_capture_config()
+            # Normalized as on load, so what is saved also loads back.
+            profile = normalize_capture_profile(
+                capture_profile_from_config(
+                    cfg, trigger_value_radix=self._capture.trigger_value_radix()
+                )
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save capture profile", str(exc))
+            return
         gui = load_gui_settings(self._config_path)
-        append_trigger_history(
-            gui,
-            trigger_history_entry_from_config(
+        # Checked against gui.toml now: the list may predate a CLI save, and
+        # does not show profiles this version cannot read.
+        if name in gui.unreadable_capture_profiles:
+            question = (
+                f"gui.toml holds a capture profile {name!r} this version cannot "
+                "read. Replace it?"
+            )
+        elif name in gui.capture_profiles:
+            question = f"Replace the capture profile {name!r}?"
+        else:
+            question = None
+        if question is not None:
+            answer = QMessageBox.question(self, "Save capture profile", question)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        gui.capture_profiles[name] = profile
+        gui.unreadable_capture_profiles.pop(name, None)
+        save_gui_settings(gui, self._config_path)
+        self._capture.set_capture_profiles(gui.capture_profiles, select=name)
+        self.statusBar().showMessage(f"Saved capture profile {name!r}")
+
+    def _on_capture_profile_delete(self, name: str) -> None:
+        gui = load_gui_settings(self._config_path)
+        gui.capture_profiles.pop(name, None)
+        gui.unreadable_capture_profiles.pop(name, None)
+        save_gui_settings(gui, self._config_path)
+        self._capture.set_capture_profiles(gui.capture_profiles)
+        self.statusBar().showMessage(f"Deleted capture profile {name!r}")
+
+    def _persist_trigger_snapshot(self, cfg: CaptureConfig) -> None:
+        try:
+            entry = trigger_history_entry_from_config(
                 cfg,
                 trigger_value_radix=self._capture.trigger_value_radix(),
-            ),
-        )
+            )
+        except ValueError as exc:
+            # Optional: a capture that history cannot hold still completes.
+            self.statusBar().showMessage(f"Not added to the trigger history: {exc}")
+            return
+        gui = load_gui_settings(self._config_path)
+        append_trigger_history(gui, entry)
         save_gui_settings(gui, self._config_path)
         self._capture.set_trigger_history(gui.trigger_history)
 

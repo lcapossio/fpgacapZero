@@ -929,7 +929,7 @@ class RpcServer:
         if isinstance(raw, str):
             probes = []
             for part in raw.split(","):
-                name, width_s, lsb_s = part.strip().split(":")
+                name, width_s, lsb_s = part.strip().rsplit(":", 2)
                 width = int(width_s)
                 lsb = int(lsb_s)
                 if width <= 0:
