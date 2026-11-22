@@ -231,6 +231,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   writes bytes `0x101`-`0x103` only. Verilog and VHDL; the cocotb
   AxiTrace now checks the lanes of every W beat.
 
+- **Verilog EJTAG-AXI: a CONFIG scan could swallow an AXI response.** The
+  scan after a CONFIG showed the CONFIG data but also popped a response
+  that had arrived meanwhile, so reading `CFG_AXI_STATUS` while a read was
+  in flight could lose that read's answer. A CONFIG scan now leaves the
+  response for the next scan, as the VHDL bridge already did, and like
+  VHDL a scan that shows a result no longer reports `busy` for responses
+  still owed.
+
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
   the next write's response; an aborted burst write never sent WLAST and

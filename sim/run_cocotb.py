@@ -547,7 +547,7 @@ TARGETS: tuple[Target, ...] = (
             RTL / "fcapz_async_fifo.v",
             RTL / "fcapz_ejtagaxi.v",
         ),
-        ("fcapz_ejtagaxi_wstrb_lanes",),
+        ("fcapz_ejtagaxi_wstrb_lanes", "fcapz_ejtagaxi_config_keeps_resp"),
         {"FIFO_DEPTH": 16, "TIMEOUT": 1024},
         (
             RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",

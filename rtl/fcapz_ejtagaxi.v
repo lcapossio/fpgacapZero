@@ -606,9 +606,11 @@ module fcapz_ejtagaxi #(
     // Capture-time data source mux
     // Nothing is captured while a CMD_RESET is in flight: the AXI sides of
     // the FIFOs are not reset yet, so the TCK side may see stale entries.
+    // A CONFIG scan shows config_rdata and leaves a queued response alone.
     wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty &&
                               !reset_busy_tck;
     wire capture_resp_data  = !capture_burst_data && !reset_busy_tck &&
+                              (last_cmd != CMD_CONFIG) &&
                               respq_head_seen &&
                               respq_rd_ready &&
                               !respq_empty;
@@ -632,6 +634,12 @@ module fcapz_ejtagaxi #(
                                (pending_count != {(CMD_FIFO_AW+1){1'b0}}) ||
                                cmdq_full || !cmdq_wr_ready || !cmdq_rd_ready;
     wire [3:0]  status_bits  = {fifo_notempty, error_sticky, busy_status, prev_valid};
+    // busy as captured: owed responses do not count on a scan that shows a
+    // result (CONFIG, burst word or response), as in the VHDL bridge.
+    wire        capture_busy = reset_busy_tck ||
+                               cmdq_full || !cmdq_wr_ready || !cmdq_rd_ready ||
+                               ((pending_count != {(CMD_FIFO_AW+1){1'b0}}) &&
+                                !capture_prev_valid);
 
     assign debug_tck = DEBUG_EN ? {
         sr,
@@ -804,7 +812,7 @@ module fcapz_ejtagaxi #(
                 // Build status with live values that reflect this capture's updates
                 sr <= {{fifo_notempty,
                         error_sticky | (capture_resp_data & (respq_code != 2'b00)),
-                        busy_status & ~capture_resp_data,
+                        capture_busy,
                         capture_prev_valid},
                        2'b00, capture_resp, info_field, capture_rdata};
 
