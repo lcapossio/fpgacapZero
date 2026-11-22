@@ -170,6 +170,7 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "axi_valid_stable",
         "wstrb_lanes_masked",
         "config_keeps_resp",
+        "burst_first_rresp",
     ),
 )
 
@@ -3151,6 +3152,39 @@ async def fcapz_ejtagaxi_config_keeps_resp(dut):
         assert not (axi_status(out) & 0x5), f"{label}: status 0x{axi_status(out):x}"
     assert not trace.violations, trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_keeps_resp")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_burst_rresp(dut):
+    """A burst read reports its first non-OKAY RRESP, not the last beat's
+    (BUG-309): an error on a middle beat must not come back OKAY."""
+    axi_ram, trace = await init_ejtagaxi(dut)
+    rif = axi_ram.read_if
+    base = 0x100
+    for i in range(4):
+        axi_ram.write_dword(base + 4 * i, 0xE000_0000 + i)
+    plain_read = rif._read
+    bad = {base + 4}
+
+    async def read_with_error(address, length):
+        if address in bad:
+            raise ValueError("injected SLVERR")
+        return await plain_read(address, length)
+
+    rif._read = read_with_error
+    resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, base, burst_cfg(3), 0),
+                                 axi_cmd(CMD_BURST_RSTART, 0, 0, 0)], "burst, beat 1 SLVERR")
+    assert resps == [2], f"burst with a SLVERR beat answered {resps}"
+    await clear_after_error(dut)
+
+    # The error is per burst: the next clean burst answers OKAY.
+    bad.clear()
+    resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, base, burst_cfg(3), 0),
+                                 axi_cmd(CMD_BURST_RSTART, 0, 0, 0)], "clean burst")
+    assert resps == [0], f"clean burst after an error answered {resps}"
+    await clear_after_error(dut)
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_first_rresp")
 
 
 @cocotb.test()

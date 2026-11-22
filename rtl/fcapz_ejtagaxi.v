@@ -314,7 +314,7 @@ module fcapz_ejtagaxi #(
     reg [31:0]          strm_left;     // words not yet requested
     reg [7:0]           strm_len;      // beats of the next burst
     reg                 strm_len_ok;   // strm_len computed for strm_addr/left
-    reg [1:0]           strm_err;      // first non-OKAY rresp of the stream
+    reg [1:0]           strm_err;      // first non-OKAY rresp of the burst/stream
 
     // -- Write path (axi_clk domain) ------------------------------------------
     // A write reaches the bus only once all its beats are in wbuf: a burst is
@@ -1968,6 +1968,7 @@ module fcapz_ejtagaxi #(
                                 m_axi_arsize  <= launch_burst_size;
                                 m_axi_arburst <= launch_burst_type;
                                 m_axi_arvalid <= 1'b1;
+                                strm_err      <= 2'b00;
                                 axi_state     <= ST_BURST_AR;
                             end
                         end
@@ -2071,14 +2072,16 @@ module fcapz_ejtagaxi #(
                     // a beat is accepted exactly when fifo_wr_en writes it.
                     if (m_axi_rvalid && !fifo_full) begin
                         timeout_cnt    <= {TO_W{1'b0}};
-                        if (strm_active && m_axi_rresp != 2'b00 && strm_err == 2'b00)
+                        // The response reports the first non-OKAY beat,
+                        // not just the last one.
+                        if (m_axi_rresp != 2'b00 && strm_err == 2'b00)
                             strm_err <= m_axi_rresp;
                         if (m_axi_rlast && strm_active) begin
                             strm_addr <= strm_addr + {{(ADDR_W-10){1'b0}}, strm_len, 2'b00};
                             strm_left <= strm_left - {24'd0, strm_len};
                             axi_state <= ST_STREAM_ISSUE;
                         end else if (m_axi_rlast) begin
-                            resp_code    <= m_axi_rresp;
+                            resp_code    <= (strm_err != 2'b00) ? strm_err : m_axi_rresp;
                             resp_rdata   <= m_axi_rdata;
                             axi_state    <= ST_DONE;
                         end

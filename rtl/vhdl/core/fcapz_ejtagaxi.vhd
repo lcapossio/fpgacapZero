@@ -308,6 +308,7 @@ architecture rtl of fcapz_ejtagaxi is
     signal launch_burst_type : std_logic_vector(1 downto 0) := "01";
     signal resp_rdata : std_logic_vector(DATA_W - 1 downto 0) := (others => '0');
     signal resp_code : std_logic_vector(1 downto 0) := "00";
+    signal rd_err : std_logic_vector(1 downto 0) := "00";  -- first non-OKAY rresp of a burst
 
     signal m_axi_awaddr_i : std_logic_vector(ADDR_W - 1 downto 0) := (others => '0');
     signal m_axi_awlen_i : std_logic_vector(7 downto 0) := (others => '0');
@@ -980,6 +981,7 @@ begin
             launch_burst_type <= "01";
             resp_rdata <= (others => '0');
             resp_code <= "00";
+            rd_err <= "00";
             m_axi_araddr_i <= (others => '0');
             m_axi_arlen_i <= (others => '0');
             m_axi_arsize_i <= "010";
@@ -1225,6 +1227,7 @@ begin
                                     m_axi_arsize_i <= cmd_size;
                                     m_axi_arburst_i <= cmd_burst;
                                     m_axi_arvalid_i <= '1';
+                                    rd_err <= "00";
                                     axi_state <= ST_BURST_AR;
                                 end if;
                             else
@@ -1296,9 +1299,18 @@ begin
                         -- m_axi_rready and fifo_wr_en_i are concurrent here.
                         if m_axi_rvalid = '1' and fifo_full = '0' then
                             timeout_cnt <= (others => '0');
+                            -- The response reports the first non-OKAY beat,
+                            -- not just the last one.
+                            if m_axi_rresp /= "00" and rd_err = "00" then
+                                rd_err <= m_axi_rresp;
+                            end if;
                             if m_axi_rlast = '1' then
                                 resp_rdata <= m_axi_rdata;
-                                resp_code <= m_axi_rresp;
+                                if rd_err /= "00" then
+                                    resp_code <= rd_err;
+                                else
+                                    resp_code <= m_axi_rresp;
+                                end if;
                                 axi_state <= ST_DONE;
                             end if;
                         elsif m_axi_rvalid = '0' then

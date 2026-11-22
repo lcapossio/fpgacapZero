@@ -334,6 +334,10 @@ beat per JTAG scan.
   host sends one after any error).
 - `count ≤ 256` — AXI4 maximum burst length.
 
+The burst's response is the first non-OKAY `RRESP` of its beats, not
+the last beat's, so an error on any beat sets the error bit and
+`burst_read()` raises `AXIError`.
+
 ### AXI4 burst write
 
 ```python

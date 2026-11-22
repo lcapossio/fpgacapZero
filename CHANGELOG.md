@@ -239,6 +239,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   VHDL a scan that shows a result no longer reports `busy` for responses
   still owed.
 
+- **EJTAG-AXI: a burst read hid errors on all but its last beat.** The
+  burst's response was the last beat's RRESP, so a SLVERR or DECERR on an
+  earlier beat came back OKAY and `burst_read()` returned that beat's data
+  without an error. The response is now the first non-OKAY RRESP of the
+  burst, as for streaming reads (Verilog and VHDL).
+
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
   the next write's response; an aborted burst write never sent WLAST and
