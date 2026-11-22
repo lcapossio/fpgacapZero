@@ -488,8 +488,15 @@ async def jtag_burst_read_protocol(dut):
     await idle_tap(dut, 80)
     await scan_burst(dut)
     scan = await scan_burst(dut)
-    assert_timestamp_sequence(scan, 64)
-    JTAG_BURST_FUNCTIONAL_COVERAGE.hit("timestamp_burst")
+    if len(dut.timestamp_data) > 1:
+        assert_timestamp_sequence(scan, 64)
+        JTAG_BURST_FUNCTIONAL_COVERAGE.hit("timestamp_burst")
+    else:
+        # No aux lane (TIMESTAMP_W = 0): a timestamp-lane request reads
+        # samples, 32 per scan like any other burst.
+        assert_sample_sequence(scan, 64)
+        scan = await scan_burst(dut)
+        assert_sample_sequence(scan, 96)
 
 
 async def pipe_bus_monitor(dut) -> None:

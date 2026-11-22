@@ -220,6 +220,14 @@ TARGETS: tuple[Target, ...] = (
         (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_burst_read.vhd"),
     ),
     Target(
+        "jtag_burst_read_no_ts",
+        "jtag_burst_read",
+        (RTL / "jtag_burst_read.v",),
+        "jtag_burst_read_protocol",
+        {"SAMPLE_W": 8, "TIMESTAMP_W": 0, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_burst_read.vhd"),
+    ),
+    Target(
         "jtag_pipe_iface",
         "jtag_pipe_iface",
         (RTL / "jtag_pipe_iface.v",),
