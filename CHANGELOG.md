@@ -222,6 +222,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   popped on that scan's UPDATE, whatever the new command (Verilog and
   VHDL). The host's `burst_read` drains the FIFO, so it was not affected.
 
+- **EJTAG-AXI: WSTRB outside the transfer.** The bridge passed the host's
+  strobes to the bus as given, so a write to an unaligned address, or a
+  narrow INCR, FIXED or WRAP burst, could strobe bytes outside the beat's
+  transfer, which AXI forbids (a slave may write them or reject the
+  beat). Each beat's strobes are now ANDed with the lanes allowed for its
+  address, size and burst type: a `WRITE` to `0x101` with strobes `0xF`
+  writes bytes `0x101`-`0x103` only. Verilog and VHDL; the cocotb
+  AxiTrace now checks the lanes of every W beat.
+
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
   the next write's response; an aborted burst write never sent WLAST and

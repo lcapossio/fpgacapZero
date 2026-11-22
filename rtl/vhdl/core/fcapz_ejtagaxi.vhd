@@ -176,6 +176,54 @@ architecture rtl of fcapz_ejtagaxi is
         end case;
     end function;
 
+    -- Byte lanes beat idx of a write may strobe (AXI A3.4.1): from the beat
+    -- address to the end of its size-aligned transfer.  Beat 0 and FIXED
+    -- beats use the start address, later INCR beats step from its aligned
+    -- base, WRAP beats (aligned start, see burst_ok) wrap in their window.
+    -- The host's WSTRB is ANDed with it, so a narrow or unaligned write
+    -- never strobes a byte outside the transfer.  Only the address bits
+    -- below the bus width matter, so the sums are LANE_W bits wide.
+    constant LANE_W : positive := fcapz_clog2(DATA_BYTES);
+    constant LANE_M : unsigned(LANE_W - 1 downto 0) := to_unsigned(DATA_BYTES - 1, LANE_W);
+
+    function lane_mask(addr  : std_logic_vector;
+                       len   : std_logic_vector(7 downto 0);
+                       size  : std_logic_vector(2 downto 0);
+                       btype : std_logic_vector(1 downto 0);
+                       idx   : unsigned(8 downto 0)) return std_logic_vector is
+        variable sz   : natural range 0 to 7;
+        variable szm  : unsigned(LANE_W - 1 downto 0);
+        variable wm   : unsigned(LANE_W - 1 downto 0);
+        variable offs : unsigned(LANE_W - 1 downto 0);
+        variable a0   : unsigned(LANE_W - 1 downto 0);
+        variable a    : unsigned(LANE_W - 1 downto 0);
+        variable lo   : unsigned(LANE_W - 1 downto 0);
+        variable m    : std_logic_vector(DATA_BYTES - 1 downto 0);
+    begin
+        sz := to_integer(unsigned(size));
+        szm := resize(shift_left(to_unsigned(1, 12), sz) - 1, LANE_W);
+        wm := resize(shift_left(resize(unsigned(len), 12) + 1, sz) - 1, LANE_W);
+        offs := resize(shift_left(resize(idx, 12), sz), LANE_W);
+        a0 := unsigned(addr(addr'right + LANE_W - 1 downto addr'right));
+        if idx = 0 or btype = "00" then
+            a := a0;
+        elsif btype = "10" then
+            a := (a0 and not wm) or ((a0 + offs) and wm);
+        else
+            a := (a0 and not szm) + offs;
+        end if;
+        lo := a and LANE_M;
+        for i in 0 to DATA_BYTES - 1 loop
+            if i >= to_integer(lo) and
+               (to_unsigned(i, LANE_W) and not szm) = (lo and not szm) then
+                m(i) := '1';
+            else
+                m(i) := '0';
+            end if;
+        end loop;
+        return m;
+    end function;
+
     type axi_state_t is (
         ST_IDLE,
         ST_W_WAIT,
@@ -877,7 +925,10 @@ begin
                 elsif m_axi_wvalid_i = '0' and we_w_idx <= resize(we_len, 9) and
                       we_rd_ok = '1' then
                     m_axi_wdata_i <= wbuf_q(DATA_W - 1 downto 0);
-                    m_axi_wstrb_i <= wbuf_q(WB_W - 1 downto DATA_W);
+                    m_axi_wstrb_i <= wbuf_q(WB_W - 1 downto DATA_W) and
+                                     lane_mask(m_axi_awaddr_i, m_axi_awlen_i,
+                                               m_axi_awsize_i, m_axi_awburst_i,
+                                               we_w_idx);
                     m_axi_wvalid_i <= '1';
                     if we_w_idx = resize(we_len, 9) then
                         m_axi_wlast_i <= '1';

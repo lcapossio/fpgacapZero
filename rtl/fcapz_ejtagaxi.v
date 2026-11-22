@@ -1480,6 +1480,41 @@ module fcapz_ejtagaxi #(
         end
     endfunction
 
+    // Byte lanes beat idx of a write may strobe (AXI A3.4.1): from the beat
+    // address to the end of its size-aligned transfer.  Beat 0 and FIXED
+    // beats use the start address, later INCR beats step from its aligned
+    // base, WRAP beats (aligned start, see burst_ok) wrap in their window.
+    // The host's WSTRB is ANDed with it, so a narrow or unaligned write
+    // never strobes a byte outside the transfer.  Only the address bits
+    // below the bus width matter, so the sums are LANE_W bits wide.
+    localparam              LANE_W = (DATA_W > 8) ? $clog2(DATA_W / 8) : 1;
+    localparam [LANE_W-1:0] LANE_M = DATA_W / 8 - 1;
+
+    function [DATA_W/8-1:0] lane_mask;
+        input [ADDR_W-1:0] addr;
+        input [7:0]        len;
+        input [2:0]        size;
+        input [1:0]        btype;
+        input [8:0]        idx;
+        reg   [LANE_W-1:0] szm, wm, offs, a0, a, lo;
+        integer            i;
+        begin
+            szm  = (12'd1 << size) - 12'd1;
+            wm   = (({4'd0, len} + 12'd1) << size) - 12'd1;
+            offs = {3'd0, idx} << size;
+            a0   = addr[LANE_W-1:0];
+            if (idx == 9'd0 || btype == 2'b00)
+                a = a0;
+            else if (btype == 2'b10)
+                a = (a0 & ~wm) | ((a0 + offs) & wm);
+            else
+                a = (a0 & ~szm) + offs;
+            lo = a & LANE_M;
+            for (i = 0; i < DATA_W / 8; i = i + 1)
+                lane_mask[i] = (i >= lo) && ((i & ~szm) == (lo & ~szm));
+        end
+    endfunction
+
     // Read channel owes something: beats of an accepted read, or an AR held
     // up after a timeout/RESET.  Write channel owes something: we_busy.
     wire rd_busy   = r_drain || ar_orphan;
@@ -1600,7 +1635,9 @@ module fcapz_ejtagaxi #(
                     we_progress  <= 1'b1;
                 end else if (!m_axi_wvalid && (we_w_idx <= {1'b0, we_len}) && we_rd_ok) begin
                     m_axi_wdata  <= wbuf_q[DATA_W-1:0];
-                    m_axi_wstrb  <= wbuf_q[WB_W-1:DATA_W];
+                    m_axi_wstrb  <= wbuf_q[WB_W-1:DATA_W] &
+                                    lane_mask(m_axi_awaddr, we_len, m_axi_awsize,
+                                              m_axi_awburst, we_w_idx);
                     m_axi_wvalid <= 1'b1;
                     m_axi_wlast  <= (we_w_idx == {1'b0, we_len});
                     we_w_idx     <= we_w_idx + 9'd1;

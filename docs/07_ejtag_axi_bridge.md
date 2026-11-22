@@ -102,6 +102,12 @@ keeps these rules whatever the host does (bridges with `FEATURES[25]`):
   one 4 KB page.  A write burst longer than `FIFO_DEPTH` is refused too.
   A refused burst answers SLVERR (every beat, for a write) and never
   reaches the bus.
+- `WSTRB` strobes only bytes inside each beat's transfer.  The host's
+  strobes are ANDed with the lanes AXI allows for the beat's address,
+  size and burst type: a `WRITE` to `0x101` with strobes `0xF` goes out
+  as `0xE`, and a byte-wide INCR burst strobes one lane per beat.  Lanes
+  outside the transfer are dropped, not refused; a beat may end up with
+  no strobe at all.
 
 When a write times out (`TIMEOUT` cycles with no AW, W or B handshake)
 the host gets SLVERR, and the write engine carries on by itself: it
