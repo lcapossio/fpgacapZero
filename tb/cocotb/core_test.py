@@ -382,6 +382,43 @@ async def trig_compare_full(dut):
         assert int(dut.hit.value) == expected
 
 
+def _trig_compare_model(probe, prev, value, mask, mode, rel, both):
+    mp, mv, mpp = probe & mask, value & mask, prev & mask
+    eq, lt, gt = mp == mv, mp < mv, mp > mv
+    hits = {
+        0: eq, 1: not eq,
+        2: rel and lt, 3: rel and gt, 4: rel and (lt or eq), 5: rel and (gt or eq),
+        6: mpp == 0 and mp != 0, 7: mpp != 0 and mp == 0, 8: mp != mpp,
+        9: both and (eq or mp != mpp),
+    }
+    return int(bool(hits.get(mode, False)))
+
+
+@cocotb.test()
+async def trig_compare_sweep(dut):
+    """Every mode against a model, all probe/value pairs of a 4-bit compare."""
+    width = len(dut.probe)
+    rel = int(dut.REL_COMPARE.value)
+    both = int(dut.BOTH_MODE.value)
+    full = (1 << width) - 1
+    for mask in (full, 0x5 & full, 0xA & full, 0x6 & full, 0):
+        for probe in range(full + 1):
+            for value in range(full + 1):
+                for prev in (probe, probe ^ 1, 0):
+                    dut.probe.value = probe
+                    dut.probe_prev.value = prev
+                    dut.value.value = value
+                    dut.mask.value = mask
+                    for mode in range(16):
+                        dut.mode.value = mode
+                        await Timer(1, unit="ns")
+                        want = _trig_compare_model(probe, prev, value, mask, mode, rel, both)
+                        assert int(dut.hit.value) == want, (
+                            f"probe={probe:#x} prev={prev:#x} value={value:#x} "
+                            f"mask={mask:#x} mode={mode}: hit={dut.hit.value} want={want}"
+                        )
+
+
 async def burst_mem_driver(dut) -> None:
     while True:
         await RisingEdge(dut.tck)

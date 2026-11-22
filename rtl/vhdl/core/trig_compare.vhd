@@ -40,11 +40,13 @@ begin
         mv := value and mask;
         mpp := probe_prev and mask;
 
+        -- One magnitude compare (<) plus the equality: > is neither < nor
+        -- =, so the relational modes share a single carry chain.
         eq := mp = mv;
         lt := REL_COMPARE /= 0 and unsigned(mp) < unsigned(mv);
-        gt := REL_COMPARE /= 0 and unsigned(mp) > unsigned(mv);
         leq := REL_COMPARE /= 0 and (lt or eq);
-        geq := REL_COMPARE /= 0 and (gt or eq);
+        gt := REL_COMPARE /= 0 and not leq;
+        geq := REL_COMPARE /= 0 and not lt;
         zero_prev := mpp = std_logic_vector(to_unsigned(0, W));
         zero_cur := mp = std_logic_vector(to_unsigned(0, W));
         changed := mp /= mpp;

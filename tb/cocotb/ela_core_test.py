@@ -1436,6 +1436,37 @@ async def config_rel_compare(dut):
 
 
 @cocotb.test()
+async def config_rel_compare_modes(dut):
+    """LT, GT, LEQ and GEQ each trigger on the first sample that meets them,
+    through the sequencer's relational comparator (one < plus ==)."""
+    ela = await setup(dut)
+    value = 0x40
+    cases = (
+        (2, range(0x50, 0x30, -1), 0x3F),  # LT
+        (3, range(0x30, 0x50), 0x41),      # GT
+        (4, range(0x50, 0x30, -1), 0x40),  # LEQ
+        (5, range(0x30, 0x50), 0x40),      # GEQ
+    )
+    for mode, ramp, want in cases:
+        await ela.write(ADDR_CTRL, 0x2)
+        await ela.wait_sample(8)
+        await ela.write(ADDR_PRETRIG, 0)
+        await ela.write(ADDR_POSTTRIG, 1)
+        await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1000 | mode)
+        await ela.write(ADDR_SEQ_BASE + 4, value)
+        await ela.write(ADDR_SEQ_BASE + 8, 0xFF)
+        ela.dut.probe_in.value = ramp[0]
+        await ela.arm()
+        await ela.wait_sample(4)
+        for v in ramp:
+            ela.dut.probe_in.value = v
+            await RisingEdge(ela.dut.sample_clk)
+        assert await ela.wait_done() & 0x4, f"mode {mode}: no trigger"
+        first = (await ela.read_samples(1))[0] & 0xFF
+        assert first == want, f"mode {mode}: trigger sample {first:#x}, want {want:#x}"
+
+
+@cocotb.test()
 async def config_combo_sq_segments(dut):
     ela = await setup(dut)
     features = await ela.read(ADDR_FEATURES)

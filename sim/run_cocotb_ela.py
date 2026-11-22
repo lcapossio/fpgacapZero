@@ -264,7 +264,7 @@ TARGETS: tuple[CocotbTarget, ...] = (
     CocotbTarget(
         "config_rel",
         {"TRIG_STAGES": 2, "INPUT_PIPE": 1, "REL_COMPARE": 1, "DUAL_COMPARE": 0},
-        ("config_rel_compare",),
+        ("config_rel_compare", "config_rel_compare_modes"),
     ),
     CocotbTarget(
         "config_combo",

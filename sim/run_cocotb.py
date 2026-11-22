@@ -205,6 +205,12 @@ TARGETS: tuple[Target, ...] = (
     Target("trig_compare_full", "trig_compare", _TRIG_COMPARE_SRC,
            "trig_compare_full", {"W": 8, "REL_COMPARE": 1},
            (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
+    Target("trig_compare_sweep_rel", "trig_compare", _TRIG_COMPARE_SRC,
+           "trig_compare_sweep", {"W": 4, "REL_COMPARE": 1, "BOTH_MODE": 0},
+           (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
+    Target("trig_compare_sweep_both", "trig_compare", _TRIG_COMPARE_SRC,
+           "trig_compare_sweep", {"W": 4, "REL_COMPARE": 0, "BOTH_MODE": 1},
+           (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
     Target(
         "jtag_burst_read",
         "jtag_burst_read",

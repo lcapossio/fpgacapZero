@@ -128,26 +128,31 @@ architecture rtl of fcapz_ela is
         variable mpp       : unsigned(probe_prev'range);
         variable zero_cur  : boolean;
         variable zero_prev : boolean;
+        variable eq        : boolean;
+        variable lt        : boolean;
     begin
         mp := unsigned(probe and mask);
         mv := unsigned(value and mask);
         mpp := unsigned(probe_prev and mask);
         zero_cur := mp = 0;
         zero_prev := mpp = 0;
+        -- One magnitude compare (<) plus the equality, as rtl/trig_compare.v.
+        eq := mp = mv;
+        lt := REL_COMPARE /= 0 and mp < mv;
 
         case to_integer(unsigned(mode)) is
-            when 0 => if mp = mv then return '1'; end if;
-            when 1 => if mp /= mv then return '1'; end if;
-            when 2 => if REL_COMPARE /= 0 and mp < mv then return '1'; end if;
-            when 3 => if REL_COMPARE /= 0 and mp > mv then return '1'; end if;
-            when 4 => if REL_COMPARE /= 0 and mp <= mv then return '1'; end if;
-            when 5 => if REL_COMPARE /= 0 and mp >= mv then return '1'; end if;
+            when 0 => if eq then return '1'; end if;
+            when 1 => if not eq then return '1'; end if;
+            when 2 => if lt then return '1'; end if;
+            when 3 => if REL_COMPARE /= 0 and not (lt or eq) then return '1'; end if;
+            when 4 => if REL_COMPARE /= 0 and (lt or eq) then return '1'; end if;
+            when 5 => if REL_COMPARE /= 0 and not lt then return '1'; end if;
             when 6 => if zero_prev and not zero_cur then return '1'; end if;
             when 7 => if not zero_prev and zero_cur then return '1'; end if;
             when 8 => if mp /= mpp then return '1'; end if;
             -- EQ or CHANGED: the legacy TRIG_MODE "both", single-stage
             -- comparator A only (rtl/trig_compare.v BOTH_MODE)
-            when 9 => if both_mode and (mp = mv or mp /= mpp) then return '1'; end if;
+            when 9 => if both_mode and (eq or mp /= mpp) then return '1'; end if;
             when others => null;
         end case;
         return '0';
