@@ -654,7 +654,7 @@ The JSON file holds `{"format": "fcapz.capture.v1", "name": ...,
 "capture": {...}}`, where `capture` has one key per setting, named
 after the option (`--trigger-value` is `trigger_value`; `--probes` is
 the same `name:width:lsb,...` text; `trigger_sequence` is the
-[`--trigger-sequence`](#the-trigger-sequence-json-schema) array).  Value
+[`--trigger-sequence`](#the---trigger-sequence-json-schema) array).  Value
 and mask settings also accept `"0x..."` text.  A missing setting takes
 the option's default, and an unknown key is an error.
 
