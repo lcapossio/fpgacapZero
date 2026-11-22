@@ -645,9 +645,10 @@ module fcapz_ela #(
     // The published stream state was taken after the latest ARM / reset
     // reached sample_clk (STREAM_STATUS[6]), so its session is that arm's.
     reg        rb_stream_cur_jtag;
-    reg [23:0] stream_r_d, stream_w_pub_d;
-    reg [7:0]  stream_session_d;
-    reg [31:0] stream_lost_d;
+    // Set on the clock edge that changes stream_w_pub, stream_r,
+    // stream_session or stream_lost, so it is high exactly while one of them
+    // differs from its value a clock earlier (no 88-bit copy to compare).
+    reg        stream_ev_q;
     reg [3:0]  stream_flags_d;
 
     // ---- Sample buffer (dual-port RAM) -------------------------------------
@@ -1224,9 +1225,7 @@ module fcapz_ela #(
     // The ring publishes its counters with the segment descriptors, so a
     // window the host sees counted always has its descriptor in place.
     wire stream_event_sample = HAS_SEGMENTS &&
-        ((stream_w_pub != stream_w_pub_d) || (stream_r != stream_r_d) ||
-         (stream_session != stream_session_d) || (stream_lost != stream_lost_d) ||
-         (stream_flags != stream_flags_d));
+        (stream_ev_q || (stream_flags != stream_flags_d));
     wire rb_meta_event_sample = (done && !rb_done_d) ||
                                 (HAS_SEGMENTS && (seg_count != rb_seg_count_d)) ||
                                 (HAS_SEGMENTS && !done && rb_done_d) ||
@@ -1244,10 +1243,6 @@ module fcapz_ela #(
             rb_gen_sample <= 2'b00;
             rb_capture_len_sample <= {LEN_W{1'b0}};
             rb_start_ptr_sample <= {PTR_W{1'b0}};
-            stream_r_d       <= 24'd0;
-            stream_w_pub_d   <= 24'd0;
-            stream_session_d <= 8'd0;
-            stream_lost_d    <= 32'd0;
             stream_flags_d   <= 4'd0;
             rb_stream_w_sample       <= 24'd0;
             rb_stream_r_sample       <= 24'd0;
@@ -1262,10 +1257,6 @@ module fcapz_ela #(
         end else begin
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
-            stream_r_d       <= stream_r;
-            stream_w_pub_d   <= stream_w_pub;
-            stream_session_d <= stream_session;
-            stream_lost_d    <= stream_lost;
             stream_flags_d   <= stream_flags;
             rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
             rb_meta_ack_sync2 <= rb_meta_ack_sync1;
@@ -1575,6 +1566,8 @@ module fcapz_ela #(
     wire        rel_strobe   = rel_req_sync2 ^ rel_req_sync3;
     wire        rel_ok       = stream_on && (jtag_rel_payload[31:24] == stream_session) &&
                                (rel_advance <= stream_owned);
+    wire        stream_lost_inc = stream_hold && stream_lost != 32'hFFFF_FFFF &&
+                                  (!stream_raw || store_eligible);
 
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
@@ -1589,9 +1582,16 @@ module fcapz_ela #(
             rel_req_sync2    <= 1'b0;
             rel_req_sync3    <= 1'b0;
             rel_ack_sample   <= 1'b0;
+            stream_ev_q      <= 1'b0;
         end else begin
             if (cfg_stage_en)
                 stream_cfg_stage <= stream_cfg_hold;
+            // An ARM / reset always moves stream_session; otherwise each
+            // term is exactly the condition under which its register below
+            // takes a new value.
+            stream_ev_q <= any_arm_pulse || reset_pulse ||
+                           (stream_w_d1 != stream_w_pub) || stream_lost_inc ||
+                           (rel_strobe && rel_ok && rel_advance != 24'd0);
             rel_req_sync1 <= jtag_rel_req;
             rel_req_sync2 <= rel_req_sync1;
             rel_req_sync3 <= rel_req_sync2;
@@ -1599,8 +1599,7 @@ module fcapz_ela #(
             // window (queued with INPUT_PIPE) has landed by then.
             stream_w_d1  <= stream_w;
             stream_w_pub <= stream_w_d1;
-            if (stream_hold && stream_lost != 32'hFFFF_FFFF &&
-                (!stream_raw || store_eligible))
+            if (stream_lost_inc)
                 stream_lost <= stream_lost + 32'd1;
             if (rel_strobe) begin
                 // The payload is stable: jtag_clk holds it until this

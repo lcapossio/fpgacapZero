@@ -11,7 +11,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import ReadOnly, RisingEdge
 
 
 ADDR_CTRL = 0x0004
@@ -285,9 +285,28 @@ class ElaDriver:
         return [await self.read(base + i * 4 * stride) for i in range(count)]
 
 
+async def _stream_event_monitor(dut) -> None:
+    """stream_ev_q is high exactly while stream_w_pub, stream_r,
+    stream_session or stream_lost differs from its value a clock earlier
+    (the change detect it replaces compared 88 bits of copies)."""
+    regs = (dut.stream_w_pub, dut.stream_r, dut.stream_session, dut.stream_lost)
+    prev = None
+    while True:
+        await RisingEdge(dut.sample_clk)
+        await ReadOnly()
+        cur = tuple(int(r.value) for r in regs)
+        if prev is not None:
+            want = int(cur != prev)
+            got = int(dut.stream_ev_q.value)
+            assert got == want, f"stream_ev_q={got}, ring registers {prev} -> {cur}"
+        prev = cur
+
+
 async def setup(dut, *, sample_period_ns: int = 10) -> ElaDriver:
     ela = ElaDriver(dut)
     await ela.start(sample_period_ns=sample_period_ns)
+    if NUM_SEGMENTS > 1:
+        cocotb.start_soon(_stream_event_monitor(dut))
     return ela
 
 

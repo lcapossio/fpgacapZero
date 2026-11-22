@@ -623,10 +623,9 @@ architecture rtl of fcapz_ela is
     signal rel_req_sync3          : std_logic := '0';
     signal rel_ack_sample         : std_logic := '0';
     signal stream_rel_err         : std_logic := '0';  -- a release was refused since arm
-    signal stream_r_d             : unsigned(23 downto 0) := (others => '0');
-    signal stream_w_pub_d         : unsigned(23 downto 0) := (others => '0');
-    signal stream_session_d       : unsigned(7 downto 0) := (others => '0');
-    signal stream_lost_d          : unsigned(31 downto 0) := (others => '0');
+    -- Set on the clock edge that changes stream_w_pub, stream_r,
+    -- stream_session or stream_lost (rtl/fcapz_ela.v stream_ev_q).
+    signal stream_ev_q            : std_logic := '0';
     signal stream_flags_d         : std_logic_vector(3 downto 0) := (others => '0');
     signal rb_stream_w_sample       : unsigned(23 downto 0) := (others => '0');
     signal rb_stream_r_sample       : unsigned(23 downto 0) := (others => '0');
@@ -867,9 +866,7 @@ begin
     -- window the host sees counted always has its descriptor in place.
     stream_flags <= stream_rel_err & stream_hold & stream_raw & stream_on;
     stream_event_sample <= '1' when NUM_SEGMENTS > 1 and
-                                    (stream_w_pub /= stream_w_pub_d or stream_r /= stream_r_d or
-                                     stream_session /= stream_session_d or
-                                     stream_lost /= stream_lost_d or
+                                    (stream_ev_q = '1' or
                                      stream_flags /= stream_flags_d) else '0';
     stream_owned <= stream_w(STREAM_OWNED_W-1 downto 0) -
                     stream_r(STREAM_OWNED_W-1 downto 0);
@@ -1812,10 +1809,6 @@ begin
             rb_start_ptr_sample <= 0;
             rb_seg_start_ptr_sample <= (others => 0);
             rb_seg_len_sample <= (others => (others => '0'));
-            stream_r_d <= (others => '0');
-            stream_w_pub_d <= (others => '0');
-            stream_session_d <= (others => '0');
-            stream_lost_d <= (others => '0');
             stream_flags_d <= (others => '0');
             rb_stream_w_sample <= (others => '0');
             rb_stream_r_sample <= (others => '0');
@@ -1826,10 +1819,6 @@ begin
         elsif rising_edge(sample_clk) then
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
-            stream_r_d <= stream_r;
-            stream_w_pub_d <= stream_w_pub;
-            stream_session_d <= stream_session;
-            stream_lost_d <= stream_lost;
             stream_flags_d <= stream_flags;
             rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
             rb_meta_ack_sync2 <= rb_meta_ack_sync1;
@@ -1965,7 +1954,10 @@ begin
     -- session and only up to the windows completed so far; a repeat is
     -- harmless.
     p_stream_sample : process(sample_clk, sample_rst)
-        variable rel_seq : unsigned(23 downto 0);
+        variable rel_seq  : unsigned(23 downto 0);
+        variable lost_inc : boolean;
+        variable rel_take : boolean;
+        variable arm_rst  : boolean;
     begin
         if sample_rst = '1' then
             stream_cfg_stage <= "00";
@@ -1979,10 +1971,24 @@ begin
             rel_req_sync2 <= '0';
             rel_req_sync3 <= '0';
             rel_ack_sample <= '0';
+            stream_ev_q <= '0';
         elsif rising_edge(sample_clk) then
             if cfg_stage_en = '1' then
                 stream_cfg_stage <= stream_cfg_hold;
             end if;
+            rel_seq := unsigned(jtag_rel_payload(23 downto 0));
+            lost_inc := stream_hold = '1' and stream_lost /= x"FFFFFFFF" and
+                        (stream_raw = '0' or comb_store_eligible = '1');
+            rel_take := (rel_req_sync2 xor rel_req_sync3) = '1' and stream_on = '1' and
+                        unsigned(jtag_rel_payload(31 downto 24)) = stream_session and
+                        rel_seq - stream_r <= stream_owned;
+            arm_rst := arm_sync_pulse = '1' or startup_arm_pending = '1' or
+                       reset_sync_pulse = '1';
+            -- An ARM / reset always moves stream_session; otherwise each
+            -- term is exactly the condition under which its register below
+            -- takes a new value.
+            stream_ev_q <= bool_to_sl(arm_rst or stream_w_d1 /= stream_w_pub or lost_inc or
+                                      (rel_take and rel_seq /= stream_r));
             rel_req_sync1 <= jtag_rel_req;
             rel_req_sync2 <= rel_req_sync1;
             rel_req_sync3 <= rel_req_sync2;
@@ -1990,24 +1996,20 @@ begin
             -- window (queued with INPUT_PIPE) has landed by then.
             stream_w_d1 <= stream_w;
             stream_w_pub <= stream_w_d1;
-            if stream_hold = '1' and stream_lost /= x"FFFFFFFF" and
-               (stream_raw = '0' or comb_store_eligible = '1') then
+            if lost_inc then
                 stream_lost <= stream_lost + 1;
             end if;
             if (rel_req_sync2 xor rel_req_sync3) = '1' then
                 -- The payload is stable: jtag_clk holds it until this
                 -- acknowledgement returns.
                 rel_ack_sample <= rel_req_sync2;
-                rel_seq := unsigned(jtag_rel_payload(23 downto 0));
-                if stream_on = '1' and
-                   unsigned(jtag_rel_payload(31 downto 24)) = stream_session and
-                   rel_seq - stream_r <= stream_owned then
+                if rel_take then
                     stream_r <= rel_seq;
                 else
                     stream_rel_err <= '1';
                 end if;
             end if;
-            if arm_sync_pulse = '1' or startup_arm_pending = '1' or reset_sync_pulse = '1' then
+            if arm_rst then
                 stream_r <= (others => '0');
                 stream_w_d1 <= (others => '0');
                 stream_w_pub <= (others => '0');
