@@ -10,8 +10,10 @@ import contextlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from multiprocessing import connection as mpc
@@ -48,6 +50,7 @@ from fcapz.broker.operations import Engine  # noqa: E402
 from fcapz.broker.runtime import (  # noqa: E402
     EXIT_ALREADY_RUNNING,
     INFO_NAME,
+    SOCK_PATH_MAX,
     Runtime,
     endpoint,
     ensure_dir,
@@ -517,7 +520,7 @@ def test_a_relative_directory_is_the_callers_not_the_runtimes(broker_env, monkey
         assert read_info(rdir)["runtime_id"] == s.runtime_id
         with BrokerSession.connect(rdir.name, autostart=False) as s2:
             assert s2.runtime_id == s.runtime_id
-        s.stop()
+        s.stop()        # s2 has left: nobody else is connected
     assert not (rdir / rdir.name).exists()
 
 
@@ -579,16 +582,31 @@ def test_a_symlinked_directory_is_refused_before_it_is_touched(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix socket paths")
-def test_a_deep_directory_gets_its_socket_in_a_private_one(tmp_path):
+@pytest.mark.parametrize("deep_tmp", [False, True])
+def test_a_deep_directory_gets_its_socket_in_a_private_one(tmp_path, monkeypatch, deep_tmp):
+    # Whatever the checkout path: with a temporary directory that is too
+    # deep itself (TMPDIR inside a deep tree) the socket goes under /tmp.
     deep = tmp_path / ("d" * 120)
+    if deep_tmp:
+        deep.mkdir()
+        mkdtemp = tempfile.mkdtemp
+        monkeypatch.setattr(
+            tempfile, "mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: mkdtemp(suffix, prefix, dir or deep),
+        )
     made = []
     try:
         for _ in range(2):
             family, address = endpoint(deep, "n")
             made.append(Path(address).parent)
-            assert family == "AF_UNIX" and len(address) <= 100
+            assert family == "AF_UNIX" and len(address) <= SOCK_PATH_MAX
             assert made[-1].stat().st_mode & 0o777 == 0o700
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(address)
+            os.unlink(address)
         assert made[0] != made[1], "not a predictable path"
+        assert not deep_tmp or made[0].parent == Path("/tmp")
+        assert not deep_tmp or not any(deep.iterdir()), "the too-deep try is removed"
     finally:
         for p in made:
             p.rmdir()
@@ -624,7 +642,7 @@ def test_concurrent_starters_share_one_runtime_and_leave_no_spare(broker_env):
     assert not errors, errors
     assert len({s.runtime_id for s in sessions}) == 1
     pid = sessions[0].runtime_pid
-    sessions[0].stop()
+    sessions[0].stop(force=True)
     for s in sessions:
         s.close()
     _wait_for(lambda: not _alive(pid), what="runtime exit")
