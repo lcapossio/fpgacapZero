@@ -125,7 +125,8 @@ begin
             TRIG_STAGES => TRIG_STAGES, STOR_QUAL => STOR_QUAL,
             INPUT_PIPE => INPUT_PIPE, NUM_CHANNELS => NUM_CHANNELS,
             TIMESTAMP_W => TIMESTAMP_W, REL_COMPARE => REL_COMPARE,
-            DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN, RLE_W => RLE_W
+            DUAL_COMPARE => DUAL_COMPARE, USER1_DATA_EN => USER1_DATA_EN, RLE_W => RLE_W,
+            READBACK_RAM => 0  -- no async-read LUT RAM on Efinix
         )
         port map (
             sample_clk => sample_clk, sample_rst => sample_rst,

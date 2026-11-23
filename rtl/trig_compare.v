@@ -39,11 +39,13 @@ module trig_compare #(
     wire [W-1:0] mv   = value      & mask;
     wire [W-1:0] mpp  = probe_prev & mask;
 
+    // One magnitude compare (<) plus the equality: > is neither < nor ==,
+    // so the relational modes share a single carry chain.
     wire eq  = (mp == mv);
     wire lt  = (REL_COMPARE != 0) && (mp <  mv);
-    wire gt  = (REL_COMPARE != 0) && (mp >  mv);
     wire leq = (REL_COMPARE != 0) && (lt | eq);
-    wire geq = (REL_COMPARE != 0) && (gt | eq);
+    wire gt  = (REL_COMPARE != 0) && !leq;
+    wire geq = (REL_COMPARE != 0) && !lt;
     wire zero_prev = (mpp == {W{1'b0}});
     wire zero_cur  = (mp  == {W{1'b0}});
     wire changed   = (mp  != mpp);

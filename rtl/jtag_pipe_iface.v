@@ -79,7 +79,11 @@ module jtag_pipe_iface #(
     localparam SEG_PTR_W = $clog2(SEG_DEPTH);
     localparam TS_W_SAFE = (TIMESTAMP_W > 0) ? TIMESTAMP_W : 1;
     localparam SAMPLES_PER_SCAN = BURST_W / SAMPLE_W;
-    localparam TS_PER_SCAN = BURST_W / TS_W_SAFE;
+    // Without an aux lane (TIMESTAMP_W = 0) a timestamp-lane request reads
+    // samples: the lane path, its 256-bit shift mux and the wider load
+    // counter are left out.
+    localparam HAS_TS = (TIMESTAMP_W > 0);
+    localparam TS_PER_SCAN = HAS_TS ? (BURST_W / TS_W_SAFE) : SAMPLES_PER_SCAN;
     localparam MAX_PER_SCAN = (SAMPLES_PER_SCAN > TS_PER_SCAN) ? SAMPLES_PER_SCAN : TS_PER_SCAN;
     localparam LOAD_CTR_W = $clog2(MAX_PER_SCAN + 1);
     localparam SHIFT_CTR_W = $clog2(BURST_W + 1);
@@ -115,7 +119,7 @@ module jtag_pipe_iface #(
     wire [LOAD_CTR_W-1:0] words_per_scan =
         burst_timestamp_r ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
     wire [LOAD_CTR_W-1:0] start_words_per_scan =
-        burst_timestamp ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
+        (HAS_TS && burst_timestamp) ? TS_PER_SCAN_C : SAMPLES_PER_SCAN_C;
 
     wire [PTR_W-1:0] seg_base_of_ptr;
     wire [SEG_PTR_W-1:0] burst_ptr_off;
@@ -221,7 +225,7 @@ module jtag_pipe_iface #(
                         rd_off <= burst_ptr_off + start_words_per_scan - 1'b1;
                         next_off <= burst_ptr_off + start_words_per_scan;
                         load_cnt <= {LOAD_CTR_W{1'b0}};
-                        burst_timestamp_r <= burst_timestamp;
+                        burst_timestamp_r <= HAS_TS && burst_timestamp;
                         loading <= 1'b1;
                         if (HEADER_EN != 0)
                             sr <= burst_header;

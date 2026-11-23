@@ -148,6 +148,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Before, two such writes close together could arm with a mix of their
   settings. Verilog and VHDL.
 
+- **ELA: smaller comparators, stream ring and burst readout.** On
+  Artix-7, against the ILA comparison builds before this change:
+  8-bit basic and dual builds take 130-175 fewer LUTs and 94 fewer FFs,
+  the 8-bit sequenced build 184 fewer LUTs and 555 fewer FFs, and the
+  64-bit sequenced build 1,068 fewer LUTs and 110 fewer FFs. The
+  relational compares share one `<` with the equality. The sequencer
+  compares only the 32 bits it can program, so the comparator masks
+  above bit 31 now reset to 0 (bits that no compare ever used). The
+  stream ring reports a change through one registered event. A burst
+  reader without a timestamp or run-count lane drops that lane's path:
+  a request for the lane there reads samples. With the sequencer and
+  fewer than 32 sample bits, the value and mask bits above the sample
+  width, kept only for readback, move into one small memory. Reads
+  return the same values as before. The new `READBACK_RAM` parameter
+  of `fcapz_ela` and the `fcapz_debug_multi` hubs selects that memory
+  (1, the default) or keeps the bits in flip-flops (0); the Efinix
+  wrappers set 0, as should an iCE40 build, since neither family has
+  asynchronous-read LUT RAM.
+  Verilog and VHDL.
+
 - **FTDI: a failed USB transfer closes the channel for every transport on
   it.** Each refuses I/O until it connects again, which opens the channel
   afresh; before, only the transport that saw the failure (and only during

@@ -47,10 +47,15 @@ module fcapz_ela #(
     parameter DUAL_COMPARE = 1,     // 0=A-only trigger compare, 1=enable comparator B
     parameter USER1_DATA_EN = 1,    // 0=disable slow USER1 DATA window readback
     parameter RLE_W = 0,            // 0=no run-length capture, 1..16=run-count width
-    parameter WIDE_TRIG = 0         // 0=trigger A value/mask are the low 32 bits only
+    parameter WIDE_TRIG = 0,        // 0=trigger A value/mask are the low 32 bits only
                                     // (upper bits masked to 0); 1=make comparator A
                                     // programmable across the full SAMPLE_W via the
                                     // WIDE_SEL/WIDE_DATA indexed-word window.
+    parameter READBACK_RAM = 1      // 1=keep the readback-only upper bits of the
+                                    // value/mask registers (SAMPLE_W < 32) in a small
+                                    // inferred RAM (with the sequencer); 0=in flops.
+                                    // Use 0 on families without async-read LUT RAM
+                                    // (iCE40, Efinix).
 ) (
     input  wire                              sample_clk,
     input  wire                              sample_rst,
@@ -224,6 +229,14 @@ module fcapz_ela #(
     localparam HAS_STOR_QUAL = (STOR_QUAL != 0);
     // Wide programmable comparator A only makes sense above 32 bits.
     localparam HAS_WIDE_TRIG = (WIDE_TRIG != 0) && (SAMPLE_W > 32);
+    // Reset value of an active comparator mask: ones on the bits the host
+    // can program (the low 32, or every bit of comparator A with WIDE_TRIG),
+    // zero above, as every ARM loads them.  The bits above 32 are then
+    // constant, so synthesis trims those comparators to 32 bits.
+    localparam [SAMPLE_W-1:0] NARROW_MASK_ONES =
+        {SAMPLE_W{1'b1}} >> ((SAMPLE_W > 32) ? (SAMPLE_W - 32) : 0);
+    localparam [SAMPLE_W-1:0] TRIG_MASK_ONES =
+        HAS_WIDE_TRIG ? {SAMPLE_W{1'b1}} : NARROW_MASK_ONES;
     localparam HAS_DECIM = (DECIM_EN != 0);
     localparam HAS_EXT_TRIG = (EXT_TRIG_EN != 0);
     localparam HAS_SEGMENTS = (NUM_SEGMENTS > 1);
@@ -637,9 +650,10 @@ module fcapz_ela #(
     // The published stream state was taken after the latest ARM / reset
     // reached sample_clk (STREAM_STATUS[6]), so its session is that arm's.
     reg        rb_stream_cur_jtag;
-    reg [23:0] stream_r_d, stream_w_pub_d;
-    reg [7:0]  stream_session_d;
-    reg [31:0] stream_lost_d;
+    // Set on the clock edge that changes stream_w_pub, stream_r,
+    // stream_session or stream_lost, so it is high exactly while one of them
+    // differs from its value a clock earlier (no 88-bit copy to compare).
+    reg        stream_ev_q;
     reg [3:0]  stream_flags_d;
 
     // ---- Sample buffer (dual-port RAM) -------------------------------------
@@ -1216,9 +1230,7 @@ module fcapz_ela #(
     // The ring publishes its counters with the segment descriptors, so a
     // window the host sees counted always has its descriptor in place.
     wire stream_event_sample = HAS_SEGMENTS &&
-        ((stream_w_pub != stream_w_pub_d) || (stream_r != stream_r_d) ||
-         (stream_session != stream_session_d) || (stream_lost != stream_lost_d) ||
-         (stream_flags != stream_flags_d));
+        (stream_ev_q || (stream_flags != stream_flags_d));
     wire rb_meta_event_sample = (done && !rb_done_d) ||
                                 (HAS_SEGMENTS && (seg_count != rb_seg_count_d)) ||
                                 (HAS_SEGMENTS && !done && rb_done_d) ||
@@ -1236,10 +1248,6 @@ module fcapz_ela #(
             rb_gen_sample <= 2'b00;
             rb_capture_len_sample <= {LEN_W{1'b0}};
             rb_start_ptr_sample <= {PTR_W{1'b0}};
-            stream_r_d       <= 24'd0;
-            stream_w_pub_d   <= 24'd0;
-            stream_session_d <= 8'd0;
-            stream_lost_d    <= 32'd0;
             stream_flags_d   <= 4'd0;
             rb_stream_w_sample       <= 24'd0;
             rb_stream_r_sample       <= 24'd0;
@@ -1254,10 +1262,6 @@ module fcapz_ela #(
         end else begin
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
-            stream_r_d       <= stream_r;
-            stream_w_pub_d   <= stream_w_pub;
-            stream_session_d <= stream_session;
-            stream_lost_d    <= stream_lost;
             stream_flags_d   <= stream_flags;
             rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
             rb_meta_ack_sync2 <= rb_meta_ack_sync1;
@@ -1476,14 +1480,14 @@ module fcapz_ela #(
                 end else begin
                     seq_cfg_hold[hi]     <= 32'h0;
                     seq_value_a_hold[hi] <= {SAMPLE_W{1'b0}};
-                    seq_mask_a_hold[hi]  <= {SAMPLE_W{1'b1}};
+                    seq_mask_a_hold[hi]  <= NARROW_MASK_ONES;
                 end
                 if (HAS_SEQUENCER && HAS_DUAL_COMPARE) begin
                     seq_value_b_hold[hi] <= jtag_seq_value_b_w[hi];
                     seq_mask_b_hold[hi]  <= jtag_seq_mask_b_w[hi];
                 end else begin
                     seq_value_b_hold[hi] <= {SAMPLE_W{1'b0}};
-                    seq_mask_b_hold[hi]  <= {SAMPLE_W{1'b1}};
+                    seq_mask_b_hold[hi]  <= NARROW_MASK_ONES;
                 end
             end
         end
@@ -1567,6 +1571,8 @@ module fcapz_ela #(
     wire        rel_strobe   = rel_req_sync2 ^ rel_req_sync3;
     wire        rel_ok       = stream_on && (jtag_rel_payload[31:24] == stream_session) &&
                                (rel_advance <= stream_owned);
+    wire        stream_lost_inc = stream_hold && stream_lost != 32'hFFFF_FFFF &&
+                                  (!stream_raw || store_eligible);
 
     always @(posedge sample_clk or posedge sample_rst) begin
         if (sample_rst) begin
@@ -1581,9 +1587,16 @@ module fcapz_ela #(
             rel_req_sync2    <= 1'b0;
             rel_req_sync3    <= 1'b0;
             rel_ack_sample   <= 1'b0;
+            stream_ev_q      <= 1'b0;
         end else begin
             if (cfg_stage_en)
                 stream_cfg_stage <= stream_cfg_hold;
+            // An ARM / reset always moves stream_session; otherwise each
+            // term is exactly the condition under which its register below
+            // takes a new value.
+            stream_ev_q <= any_arm_pulse || reset_pulse ||
+                           (stream_w_d1 != stream_w_pub) || stream_lost_inc ||
+                           (rel_strobe && rel_ok && rel_advance != 24'd0);
             rel_req_sync1 <= jtag_rel_req;
             rel_req_sync2 <= rel_req_sync1;
             rel_req_sync3 <= rel_req_sync2;
@@ -1591,8 +1604,7 @@ module fcapz_ela #(
             // window (queued with INPUT_PIPE) has landed by then.
             stream_w_d1  <= stream_w;
             stream_w_pub <= stream_w_d1;
-            if (stream_hold && stream_lost != 32'hFFFF_FFFF &&
-                (!stream_raw || store_eligible))
+            if (stream_lost_inc)
                 stream_lost <= stream_lost + 32'd1;
             if (rel_strobe) begin
                 // The payload is stable: jtag_clk holds it until this
@@ -1658,9 +1670,9 @@ module fcapz_ela #(
             trig_cmp_mode_b  <= 4'd0;
             trig_combine     <= 2'd0;  // A only
             trig_value       <= {SAMPLE_W{1'b0}};
-            trig_mask        <= {SAMPLE_W{1'b1}};
+            trig_mask        <= TRIG_MASK_ONES;
             trig_value_b     <= {SAMPLE_W{1'b0}};
-            trig_mask_b      <= {SAMPLE_W{1'b1}};
+            trig_mask_b      <= NARROW_MASK_ONES;
             sq_enable        <= 1'b0;
             sq_cmp_mode      <= 4'd0;
             sq_value         <= {SAMPLE_W{1'b0}};
@@ -1679,9 +1691,9 @@ module fcapz_ela #(
                 seq_mode_b[si]       <= 4'd0;
                 seq_combine[si]      <= 2'd0;
                 seq_value_a[si]      <= {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= {SAMPLE_W{1'b1}};
+                seq_mask_a[si]       <= NARROW_MASK_ONES;
                 seq_value_b[si]      <= {SAMPLE_W{1'b0}};
-                seq_mask_b[si]       <= {SAMPLE_W{1'b1}};
+                seq_mask_b[si]       <= NARROW_MASK_ONES;
                 seq_count_target[si] <= 16'h0;
                 seq_next_state[si]   <= {SEQ_STATE_W{1'b0}};
                 seq_is_final[si]     <= 1'b0;
@@ -1707,7 +1719,7 @@ module fcapz_ela #(
             trig_value_b     <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
                                  ? seq_value_b_hold[0] : {SAMPLE_W{1'b0}};
             trig_mask_b      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                 ? seq_mask_b_hold[0] : {SAMPLE_W{1'b1}};
+                                 ? seq_mask_b_hold[0] : NARROW_MASK_ONES;
             // Channel select (clamped to valid range)
             chan_sel         <= chan_sel_next;
             // Probe mux select (clamped when enabled)
@@ -1740,11 +1752,11 @@ module fcapz_ela #(
                 seq_is_final[si]     <= HAS_SEQUENCER ? seq_cfg_hold[si][12] : 1'b0;
                 seq_count_target[si] <= HAS_SEQUENCER ? seq_cfg_hold[si][31:16] : 16'h0;
                 seq_value_a[si]      <= HAS_SEQUENCER ? seq_value_a_hold[si] : {SAMPLE_W{1'b0}};
-                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_hold[si] : {SAMPLE_W{1'b1}};
+                seq_mask_a[si]       <= HAS_SEQUENCER ? seq_mask_a_hold[si] : NARROW_MASK_ONES;
                 seq_value_b[si]      <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
                                          ? seq_value_b_hold[si] : {SAMPLE_W{1'b0}};
                 seq_mask_b[si]       <= (HAS_SEQUENCER && HAS_DUAL_COMPARE)
-                                         ? seq_mask_b_hold[si] : {SAMPLE_W{1'b1}};
+                                         ? seq_mask_b_hold[si] : NARROW_MASK_ONES;
             end
         end
     end
@@ -2277,6 +2289,88 @@ module fcapz_ela #(
         end
     end
 
+    // ---- Readback-only upper bits of the value / mask registers -----------
+    // Below 32 sample bits, a comparator value or mask register only uses
+    // its low SAMPLE_W bits; the rest are kept only so a read returns what
+    // was written.  They live in one small inferred memory (distributed RAM
+    // where the family has it) instead of flops, with a written-since-reset
+    // bit per entry so a read before any write returns the reset value.
+    // READBACK_RAM=0 keeps them in the register flops, for families without
+    // async-read LUT RAM, where the memory would turn back into flops plus a
+    // read mux and cost more than it saves.  Without the sequencer there are
+    // only two to four registers, too few for the memory to pay off, so they
+    // stay in flops there too.
+    // Entries: 0 TRIG_VALUE, 1 TRIG_MASK, 2 SQ_VALUE, 3 SQ_MASK, then per
+    // sequencer stage s: 4+4s VALUE_A, +1 MASK_A, +2 VALUE_B, +3 MASK_B.
+    localparam HAS_CFG_HI = (SAMPLE_W < 32) && (READBACK_RAM != 0) && HAS_SEQUENCER;
+    localparam CFG_HI_W   = HAS_CFG_HI ? (32 - SAMPLE_W) : 1;
+    localparam CFG_HI_N   = 4 + 4 * TRIG_STAGES;
+    localparam CFG_HI_IW  = $clog2(CFG_HI_N);
+    reg                 cfg_hi_hit;
+    reg [CFG_HI_IW-1:0] cfg_hi_idx;
+    integer             cfg_hi_s;
+    always @(*) begin
+        cfg_hi_hit = 1'b0;
+        cfg_hi_idx = {CFG_HI_IW{1'b0}};
+        if (jtag_addr == ADDR_TRIG_VALUE) begin
+            cfg_hi_hit = 1'b1; cfg_hi_idx = 0;
+        end
+        if (jtag_addr == ADDR_TRIG_MASK) begin
+            cfg_hi_hit = 1'b1; cfg_hi_idx = 1;
+        end
+        if (HAS_STOR_QUAL && jtag_addr == ADDR_SQ_VALUE) begin
+            cfg_hi_hit = 1'b1; cfg_hi_idx = 2;
+        end
+        if (HAS_STOR_QUAL && jtag_addr == ADDR_SQ_MASK) begin
+            cfg_hi_hit = 1'b1; cfg_hi_idx = 3;
+        end
+        if (HAS_SEQUENCER) begin
+            for (cfg_hi_s = 0; cfg_hi_s < TRIG_STAGES; cfg_hi_s = cfg_hi_s + 1) begin
+                if (jtag_addr == ADDR_SEQ_BASE + cfg_hi_s * SEQ_STRIDE + 4) begin
+                    cfg_hi_hit = 1'b1; cfg_hi_idx = 4 + 4 * cfg_hi_s;
+                end
+                if (jtag_addr == ADDR_SEQ_BASE + cfg_hi_s * SEQ_STRIDE + 8) begin
+                    cfg_hi_hit = 1'b1; cfg_hi_idx = 5 + 4 * cfg_hi_s;
+                end
+                if (HAS_DUAL_COMPARE &&
+                    jtag_addr == ADDR_SEQ_BASE + cfg_hi_s * SEQ_STRIDE + 12) begin
+                    cfg_hi_hit = 1'b1; cfg_hi_idx = 6 + 4 * cfg_hi_s;
+                end
+                if (HAS_DUAL_COMPARE &&
+                    jtag_addr == ADDR_SEQ_BASE + cfg_hi_s * SEQ_STRIDE + 16) begin
+                    cfg_hi_hit = 1'b1; cfg_hi_idx = 7 + 4 * cfg_hi_s;
+                end
+            end
+        end
+    end
+    wire [31:0] cfg_hi_word;  // upper bits of the addressed entry, low bits 0
+    generate
+        if (HAS_CFG_HI) begin : g_cfg_hi
+            reg [CFG_HI_W-1:0] cfg_hi_mem [0:CFG_HI_N-1];
+            reg [CFG_HI_N-1:0] cfg_hi_set;
+            always @(posedge jtag_clk)
+                if (jtag_wr_en && cfg_hi_hit)
+                    cfg_hi_mem[cfg_hi_idx] <= jtag_wdata[31:SAMPLE_W];
+            always @(posedge jtag_clk or posedge jtag_rst) begin
+                if (jtag_rst)
+                    cfg_hi_set <= {CFG_HI_N{1'b0}};
+                else if (jtag_wr_en && cfg_hi_hit)
+                    cfg_hi_set[cfg_hi_idx] <= 1'b1;
+            end
+            // Reset values: masks all ones, except SQ_MASK (0); values 0.
+            wire cfg_hi_rst_ones = cfg_hi_idx[0] && (cfg_hi_idx != 3);
+            wire [CFG_HI_W-1:0] cfg_hi_rd =
+                cfg_hi_set[cfg_hi_idx] ? cfg_hi_mem[cfg_hi_idx]
+                                       : {CFG_HI_W{cfg_hi_rst_ones}};
+            assign cfg_hi_word = cfg_hi_hit ? {cfg_hi_rd, {SAMPLE_W{1'b0}}} : 32'h0;
+        end else begin : g_no_cfg_hi
+            assign cfg_hi_word = 32'h0;
+        end
+    endgenerate
+    // The flops keep only the low bits once the upper ones read from memory.
+    localparam [31:0] CFG_LO_MASK = HAS_CFG_HI ? ((32'h1 << SAMPLE_W) - 32'h1)
+                                               : 32'hFFFF_FFFF;
+
     // ---- Register read mux -------------------------------------------------
     // Sequencer stage readback: constant address decode, one-hot OR of the
     // selected word (0 for an address that hits no stage register).  The
@@ -2293,19 +2387,21 @@ module fcapz_ela #(
                     if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE)
                         seq_rd_r = seq_rd_r | jtag_seq_cfg[seq_rd_i];
                     if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 4)
-                        seq_rd_r = seq_rd_r | jtag_seq_value_a[seq_rd_i];
+                        seq_rd_r = seq_rd_r | (jtag_seq_value_a[seq_rd_i] & CFG_LO_MASK);
                     if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 8)
-                        seq_rd_r = seq_rd_r | jtag_seq_mask_a[seq_rd_i];
+                        seq_rd_r = seq_rd_r | (jtag_seq_mask_a[seq_rd_i] & CFG_LO_MASK);
                     if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 12)
                         seq_rd_r = seq_rd_r
-                                   | (HAS_DUAL_COMPARE ? jtag_seq_value_b[seq_rd_i] : 32'h0);
+                                   | (HAS_DUAL_COMPARE
+                                      ? (jtag_seq_value_b[seq_rd_i] & CFG_LO_MASK) : 32'h0);
                     if (jtag_addr == ADDR_SEQ_BASE + seq_rd_i * SEQ_STRIDE + 16)
                         seq_rd_r = seq_rd_r
-                                   | (HAS_DUAL_COMPARE ? jtag_seq_mask_b[seq_rd_i]
-                                                       : 32'hFFFF_FFFF);
+                                   | (HAS_DUAL_COMPARE
+                                      ? (jtag_seq_mask_b[seq_rd_i] & CFG_LO_MASK)
+                                      : 32'hFFFF_FFFF);
                 end
             end
-            assign seq_rd_word = seq_rd_r;
+            assign seq_rd_word = seq_rd_r | cfg_hi_word;
         end else begin : g_no_seq_rd
             assign seq_rd_word = 32'h0;
         end
@@ -2363,11 +2459,13 @@ module fcapz_ela #(
             ADDR_POSTTRIG:    jtag_rdata_mux = jtag_posttrig_len;
             ADDR_CAPTURE_LEN: jtag_rdata_mux = rb_window_len_jtag;
             ADDR_TRIG_MODE:   jtag_rdata_mux = jtag_trig_mode;
-            ADDR_TRIG_VALUE:  jtag_rdata_mux = jtag_trig_value;
-            ADDR_TRIG_MASK:   jtag_rdata_mux = jtag_trig_mask;
+            ADDR_TRIG_VALUE:  jtag_rdata_mux = (jtag_trig_value & CFG_LO_MASK) | cfg_hi_word;
+            ADDR_TRIG_MASK:   jtag_rdata_mux = (jtag_trig_mask & CFG_LO_MASK) | cfg_hi_word;
             ADDR_SQ_MODE:     jtag_rdata_mux = HAS_STOR_QUAL ? jtag_sq_mode : 32'h0;
-            ADDR_SQ_VALUE:    jtag_rdata_mux = HAS_STOR_QUAL ? jtag_sq_value : 32'h0;
-            ADDR_SQ_MASK:     jtag_rdata_mux = HAS_STOR_QUAL ? jtag_sq_mask : 32'h0;
+            ADDR_SQ_VALUE:    jtag_rdata_mux = HAS_STOR_QUAL
+                                  ? ((jtag_sq_value & CFG_LO_MASK) | cfg_hi_word) : 32'h0;
+            ADDR_SQ_MASK:     jtag_rdata_mux = HAS_STOR_QUAL
+                                  ? ((jtag_sq_mask & CFG_LO_MASK) | cfg_hi_word) : 32'h0;
             ADDR_FEATURES:    jtag_rdata_mux = FEATURES;
             ADDR_CHAN_SEL:    jtag_rdata_mux = HAS_CHANNEL_MUX ? {24'h0, jtag_chan_sel} : 32'h0;
             ADDR_NUM_CHAN:    jtag_rdata_mux = NUM_CHANNELS;

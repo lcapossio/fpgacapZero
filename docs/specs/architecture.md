@@ -105,38 +105,39 @@ each core after `opt_design`.  The ILA counts include its `dbg_hub`
 741 FFs here), and the fcapz counts include `fcapz_ela_xilinx7`'s own
 BSCANE2, register interface and readout, so both are what one core
 costs in a design.  LUTs include LUTRAM and SRLs (ILA uses some; fcapz
-none).  Every pair uses the same BRAM: 0.5 tiles at 8b x 1024, 7.5 at
+uses 24 LUTRAM in the 8-bit sequenced builds, for the readback-only bits of
+its value and mask registers, and none elsewhere).  Every pair uses the same BRAM: 0.5 tiles at 8b x 1024, 7.5 at
 64b x 4096.
 
 LUTs / FFs:
 
 | Profile | fcapz 8b x 1024 | ILA + `dbg_hub` 8b x 1024 | fcapz 64b x 4096 | ILA + `dbg_hub` 64b x 4096 |
 |---|---:|---:|---:|---:|
-| fcapz minimum: one EQ-or-change comparator, slow USER1 readout, one segment | 561 / 772 | — | 716 / 958 | — |
-| Basic: one comparator, 4 segments, fast readout (ILA: 1 comparator) | 1,341 / 1,867 | 1,078 / 1,775 | 1,436 / 2,078 | 1,218 / 2,050 |
-| Dual: storage qualification, trigger in/out, input pipe (ILA: 2 comparators, capture control, basic trigger) | 1,408 / 2,048 | 1,172 / 1,920 | 1,607 / 2,469 | 1,341 / 2,363 |
-| Sequenced: 4-stage sequencer with 2 comparators per stage (ILA: advanced trigger, 8 comparators) | 2,058 / 3,171 | 2,985 / 4,466 | 3,616 / 4,271 | 3,325 / 5,581 |
+| fcapz minimum: one EQ-or-change comparator, slow USER1 readout, one segment | 560 / 779 | — | 688 / 932 | — |
+| Basic: one comparator, 4 segments, fast readout (ILA: 1 comparator) | 1,126 / 1,780 | 1,078 / 1,775 | 1,240 / 1,954 | 1,218 / 2,050 |
+| Dual: storage qualification, trigger in/out, input pipe (ILA: 2 comparators, capture control, basic trigger) | 1,200 / 1,961 | 1,172 / 1,920 | 1,386 / 2,377 | 1,341 / 2,363 |
+| Sequenced: 4-stage sequencer with 2 comparators per stage (ILA: advanced trigger, 8 comparators) | 1,830 / 2,623 | 2,985 / 4,466 | 2,534 / 4,167 | 3,325 / 5,581 |
 | ILA advanced trigger with 2 comparators | — | 2,773 / 3,902 | — | 2,938 / 4,345 |
-| fcapz sequenced plus decimation and 32-bit timestamps (no ILA equivalent; +1 / +4 BRAM) | 2,080 / 3,343 | — | 3,629 / 4,446 | — |
+| fcapz sequenced plus decimation and 32-bit timestamps (no ILA equivalent; +1 / +4 BRAM) | 2,011 / 2,803 | — | 2,673 / 4,355 | — |
 
 What it shows:
 
-- The smallest fcapz build takes 52-59% of the LUTs of the smallest
+- The smallest fcapz build takes 52-57% of the LUTs of the smallest
   ILA, which always has relational compares and a fast readout.  It is
   the build for a design that has little room left.
-- The basic and dual fcapz builds take 18-24% more LUTs than the ILA
-  and do less: without the sequencer (`TRIG_STAGES=1`) the fcapz
-  trigger compares only for equal or changed, while every ILA match
-  unit also has the relational modes.  Most of the extra area is the
-  segment and streaming logic and the 256-bit burst readout, not the
-  comparator.
-- With the sequencer, fcapz takes 31% fewer LUTs and 29% fewer FFs
-  than the ILA at 8 bits, and 23% fewer FFs at 64 bits.
+- The basic and dual fcapz builds take 2-4% more LUTs than the ILA,
+  and within 5% of its FFs, and do less: without the sequencer
+  (`TRIG_STAGES=1`) the fcapz trigger compares only for equal or
+  changed, while every ILA match unit also has the relational modes.
+  Most of their area is the segment and streaming logic and the
+  256-bit burst readout, not the comparator.
+- With the sequencer, fcapz takes 39% fewer LUTs and 41% fewer FFs
+  than the ILA at 8 bits, and 24% fewer LUTs and 25% fewer FFs at 64
+  bits.
 - fcapz grows faster with sample width: each comparator keeps its
   value and mask in flip-flops and compares in LUTs, where the ILA loads
-  SRL-based match units.  The 64-bit sequenced build takes 9% more
-  LUTs than the ILA's, although its stage comparators match only the
-  low 32 bits of the sample, and the ILA's match all 64.
+  SRL-based match units.  Its stage comparators match only the low 32
+  bits of the sample, though, where the ILA's match all 64.
 - `dbg_hub` is paid once per design and shared by every ILA and VIO.
   The fcapz equivalent is inside each wrapper, or shared by every core
   behind one core manager (`fcapz_debug_multi`).

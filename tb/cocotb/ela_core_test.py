@@ -11,7 +11,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import ReadOnly, RisingEdge
 
 
 ADDR_CTRL = 0x0004
@@ -285,9 +285,28 @@ class ElaDriver:
         return [await self.read(base + i * 4 * stride) for i in range(count)]
 
 
+async def _stream_event_monitor(dut) -> None:
+    """stream_ev_q is high exactly while stream_w_pub, stream_r,
+    stream_session or stream_lost differs from its value a clock earlier
+    (the change detect it replaces compared 88 bits of copies)."""
+    regs = (dut.stream_w_pub, dut.stream_r, dut.stream_session, dut.stream_lost)
+    prev = None
+    while True:
+        await RisingEdge(dut.sample_clk)
+        await ReadOnly()
+        cur = tuple(int(r.value) for r in regs)
+        if prev is not None:
+            want = int(cur != prev)
+            got = int(dut.stream_ev_q.value)
+            assert got == want, f"stream_ev_q={got}, ring registers {prev} -> {cur}"
+        prev = cur
+
+
 async def setup(dut, *, sample_period_ns: int = 10) -> ElaDriver:
     ela = ElaDriver(dut)
     await ela.start(sample_period_ns=sample_period_ns)
+    if NUM_SEGMENTS > 1:
+        cocotb.start_soon(_stream_event_monitor(dut))
     return ela
 
 
@@ -335,6 +354,41 @@ async def register_roundtrip(dut):
     await ela.write(ADDR_TRIG_MASK, 0x5A5A_5A5A)
     assert await ela.read(ADDR_TRIG_MASK) == 0x5A5A_5A5A
     FUNCTIONAL_COVERAGE.hit("register_roundtrip")
+
+
+@cocotb.test()
+async def value_mask_registers_read_back_32_bits(dut):
+    """Every comparator value / mask register reads back its reset value and
+    then all 32 written bits, whatever SAMPLE_W, without aliasing another
+    (below 32 bits the upper bits are kept in a small memory)."""
+    ela = await setup(dut)
+    regs = {ADDR_TRIG_VALUE: 0, ADDR_TRIG_MASK: 0xFFFF_FFFF}
+    if STOR_QUAL:
+        regs.update({ADDR_SQ_VALUE: 0, ADDR_SQ_MASK: 0})
+    fixed = {}
+    if TRIG_STAGES > 1:
+        for s in range(TRIG_STAGES):
+            base = ADDR_SEQ_BASE + s * 20
+            regs.update({base + 4: 0, base + 8: 0xFFFF_FFFF})
+            if DUAL_COMPARE:
+                regs.update({base + 12: 0, base + 16: 0xFFFF_FFFF})
+            else:
+                fixed.update({base + 12: 0, base + 16: 0xFFFF_FFFF})
+    for addr, want in {**regs, **fixed}.items():
+        got = await ela.read(addr)
+        assert got == want, f"reset {addr:#06x}: {got:#010x}, want {want:#010x}"
+    # TRIG_MASK (reset all ones) stays unwritten: the written-since-reset
+    # bit is per entry, so it must keep reading its reset value.
+    untouched = ADDR_TRIG_MASK
+    written = {untouched: regs[untouched]}
+    for i, addr in enumerate(regs):
+        if addr == untouched:
+            continue
+        written[addr] = (0x9E37_79B9 * (i + 1)) & 0xFFFF_FFFF
+        await ela.write(addr, written[addr])
+    for addr, want in {**written, **fixed}.items():
+        got = await ela.read(addr)
+        assert got == want, f"{addr:#06x}: {got:#010x}, want {want:#010x}"
 
 
 @cocotb.test()
@@ -1237,6 +1291,38 @@ async def wide_sample_readback(dut):
 
 
 @cocotb.test()
+async def narrow_comparators_ignore_upper_bits(dut):
+    """Above 32 bits, sequencer comparators A and B only see the low 32 bits
+    (their value/mask registers are 32 bits wide): a change confined to the
+    upper bits never fires CHANGED, a change in bit 0 does."""
+    assert SAMPLE_W > 32
+    ela = await setup(dut)
+    upper = ((1 << SAMPLE_W) - 1) ^ 0xFFFF_FFFF
+    for name, cfg, regs in (
+        ("A", 0x0000_1008, (ADDR_SEQ_BASE + 4, ADDR_SEQ_BASE + 8)),
+        ("B", 0x0000_1180, (ADDR_SEQ_BASE + 12, ADDR_SEQ_BASE + 16)),
+    ):
+        await ela.write(ADDR_CTRL, 0x2)
+        await ela.wait_sample(8)
+        await ela.write(ADDR_PRETRIG, 0)
+        await ela.write(ADDR_POSTTRIG, 0)
+        await ela.write(ADDR_SEQ_BASE + 0, cfg)  # final, CHANGED on A or B
+        await ela.write(regs[0], 0)
+        await ela.write(regs[1], 0xFFFF_FFFF)
+        ela.dut.probe_in.value = 0
+        await ela.arm()
+        await ela.wait_sample(4)
+        for i in range(16):
+            ela.dut.probe_in.value = upper if i % 2 == 0 else 0
+            await RisingEdge(ela.dut.sample_clk)
+        await ela.wait_sample(6)
+        status = await ela.read(ADDR_STATUS)
+        assert not status & 0x4, f"{name}: fired on upper bits only, status={status:#x}"
+        ela.dut.probe_in.value = 1
+        assert await ela.wait_done() & 0x4, f"{name}: bit 0 change did not fire"
+
+
+@cocotb.test()
 async def deep_timestamp_base_does_not_alias_data(dut):
     """A deep wide core puts the timestamp window base past 0xFFFF.  Every
     16-bit register address is then below it, so DATA window reads must
@@ -1433,6 +1519,37 @@ async def config_rel_compare(dut):
             ela.dut.probe_in.value = int(ela.dut.probe_in.value) - 1
     assert await ela.wait_done() & 0x4
     FUNCTIONAL_COVERAGE.hit("rel_compare")
+
+
+@cocotb.test()
+async def config_rel_compare_modes(dut):
+    """LT, GT, LEQ and GEQ each trigger on the first sample that meets them,
+    through the sequencer's relational comparator (one < plus ==)."""
+    ela = await setup(dut)
+    value = 0x40
+    cases = (
+        (2, range(0x50, 0x30, -1), 0x3F),  # LT
+        (3, range(0x30, 0x50), 0x41),      # GT
+        (4, range(0x50, 0x30, -1), 0x40),  # LEQ
+        (5, range(0x30, 0x50), 0x40),      # GEQ
+    )
+    for mode, ramp, want in cases:
+        await ela.write(ADDR_CTRL, 0x2)
+        await ela.wait_sample(8)
+        await ela.write(ADDR_PRETRIG, 0)
+        await ela.write(ADDR_POSTTRIG, 1)
+        await ela.write(ADDR_SEQ_BASE + 0, 0x0000_1000 | mode)
+        await ela.write(ADDR_SEQ_BASE + 4, value)
+        await ela.write(ADDR_SEQ_BASE + 8, 0xFF)
+        ela.dut.probe_in.value = ramp[0]
+        await ela.arm()
+        await ela.wait_sample(4)
+        for v in ramp:
+            ela.dut.probe_in.value = v
+            await RisingEdge(ela.dut.sample_clk)
+        assert await ela.wait_done() & 0x4, f"mode {mode}: no trigger"
+        first = (await ela.read_samples(1))[0] & 0xFF
+        assert first == want, f"mode {mode}: trigger sample {first:#x}, want {want:#x}"
 
 
 @cocotb.test()
