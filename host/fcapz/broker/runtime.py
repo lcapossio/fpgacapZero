@@ -56,6 +56,8 @@ SOCK_NAME = "broker.sock"
 MAX_FRAME = 64 << 20
 #: Longest Unix socket path used, in bytes (sun_path holds 104 on macOS).
 SOCK_PATH_MAX = 100
+#: How often a Unix socket's accept() returns to look at the stop flag.
+ACCEPT_POLL_S = 0.2
 #: How often a runtime checks that its directory still names it, and how many
 #: checks in a row must fail before it leaves.
 OWN_CHECK_S = 1.0
@@ -249,6 +251,84 @@ def lock_held(directory: Path) -> bool:
         return not probe.try_acquire()
     finally:
         probe.close()
+
+
+class _Owned:
+    """A file this runtime made, as the directory it was made in and its
+    inode (POSIX).
+
+    The directory is held open: when it is removed and made again (a
+    deleted ``XDG_RUNTIME_DIR``), a path would lead to the next runtime's
+    file of the same name, the descriptor never does.  A file of another
+    inode under the old name is not ours either."""
+
+    def __init__(self, path: Path, st: os.stat_result | None = None) -> None:
+        self.path = Path(path)
+        self.dir_fd: int | None = None
+        if os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd:
+            self.dir_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        if st is None:
+            st = self._stat()
+        self.ident = (st.st_dev, st.st_ino)
+
+    def _stat(self) -> os.stat_result:
+        if self.dir_fd is not None:
+            return os.stat(self.path.name, dir_fd=self.dir_fd, follow_symlinks=False)
+        return os.lstat(self.path)
+
+    def remove(self) -> None:
+        """Unlink the file if it is still the one that was made."""
+        try:
+            st = self._stat()
+            if (st.st_dev, st.st_ino) != self.ident:
+                return
+            if self.dir_fd is not None:
+                os.unlink(self.path.name, dir_fd=self.dir_fd)
+            else:
+                os.unlink(self.path)
+        except OSError:
+            pass
+
+    def remove_dir(self) -> None:
+        """Remove the (private, by now empty) directory the file was in."""
+        try:
+            if self.dir_fd is not None:
+                held, named = os.fstat(self.dir_fd), os.lstat(self.path.parent)
+                if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+                    return
+            os.rmdir(self.path.parent)
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        if self.dir_fd is not None:
+            os.close(self.dir_fd)
+            self.dir_fd = None
+
+
+class _UnixListener:
+    """A listening Unix socket whose ``accept()`` returns connections as
+    :mod:`multiprocessing.connection` does, and times out every
+    ``ACCEPT_POLL_S``.  Unlike ``Listener`` it never unlinks its path: that
+    path may by then be another runtime's (see :class:`_Owned`)."""
+
+    def __init__(self, address: str, backlog: int) -> None:
+        self._sock = socket.socket(socket.AF_UNIX)
+        try:
+            self._sock.bind(address)
+            self._sock.listen(backlog)
+            self._sock.settimeout(ACCEPT_POLL_S)
+        except OSError:
+            self._sock.close()
+            raise
+
+    def accept(self) -> Any:
+        conn, _ = self._sock.accept()
+        conn.setblocking(True)
+        return mpc.Connection(conn.detach())
+
+    def close(self) -> None:
+        self._sock.close()
 
 
 def default_transport_factory() -> Callable[[TargetSpec], Any]:
@@ -479,6 +559,9 @@ class Runtime:
         self._closing = False
         self.family: str | None = None
         self.address: str | None = None
+        # POSIX: the socket and runtime.json, as this runtime made them.
+        self._sock_file: _Owned | None = None
+        self._info_file: _Owned | None = None
 
     # ---- registry ------------------------------------------------------
 
@@ -577,13 +660,14 @@ class Runtime:
             if delay:
                 time.sleep(delay)
             self._stopping.set()
-            # Wake accept() with a bare connection, closed at once.  A Unix
-            # socket whose path is gone cannot be reached this way: there
-            # accept() times out instead (see serve).
-            try:
-                mpc.Client(self.address, self.family).close()
-            except Exception:  # noqa: BLE001 - accept is not waiting
-                pass
+            # A pipe's accept() is woken with a bare connection, closed at
+            # once.  A Unix socket's times out by itself: its path may be
+            # gone, or lead to another runtime by now.
+            if self.family == "AF_PIPE":
+                try:
+                    mpc.Client(self.address, self.family).close()
+                except Exception:  # noqa: BLE001 - accept is not waiting
+                    pass
 
         threading.Thread(target=go, daemon=True).start()
 
@@ -642,17 +726,24 @@ class Runtime:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
+            made = os.fstat(fd)
         for attempt in range(40):
             try:
                 os.replace(tmp, self.dir / INFO_NAME)
-                return
+                break
             except PermissionError:
                 # Windows: a client is reading a dead runtime's file.
                 if attempt == 39:
                     raise
                 time.sleep(0.05)
+        if os.name != "nt":
+            self._info_file = _Owned(self.dir / INFO_NAME, made)
 
     def _remove_info(self) -> None:
+        if os.name != "nt":
+            if self._info_file is not None:
+                self._info_file.remove()
+            return
         info = read_info(self.dir)
         if info and info.get("runtime_id") == self.runtime_id:
             for _ in range(40):
@@ -672,17 +763,16 @@ class Runtime:
             election.close()
             log.info("another runtime holds %s", self.dir / LOCK_NAME)
             return EXIT_ALREADY_RUNNING
-        listener = None
+        listener: Any = None
         try:
             self.family, self.address = endpoint(self.dir, secrets.token_hex(4))
-            if self.family == "AF_UNIX" and os.path.exists(self.address):
-                os.unlink(self.address)  # a dead runtime's: we hold the lock
-            listener = mpc.Listener(self.address, self.family, backlog=16)
-            # A Unix socket is woken through its path, which may be removed
-            # under us: accept() there returns every half second.
-            sock = getattr(getattr(listener, "_listener", None), "_socket", None)
-            if isinstance(sock, socket.socket):
-                sock.settimeout(0.5)
+            if self.family == "AF_UNIX":
+                if os.path.exists(self.address):
+                    os.unlink(self.address)  # a dead runtime's: we hold the lock
+                listener = _UnixListener(self.address, backlog=16)
+                self._sock_file = _Owned(Path(self.address))
+            else:
+                listener = mpc.Listener(self.address, self.family)
             self._write_info()
             log.info("runtime %s (pid %d, fcapz %s) on %s", self.runtime_id,
                      os.getpid(), __version__, self.address)
@@ -725,17 +815,17 @@ class Runtime:
                     listener.close()
                 except OSError:
                     pass
-            if self.family == "AF_UNIX" and self.address:
-                try:
-                    os.unlink(self.address)
-                except OSError:
-                    pass
-                if Path(self.address).parent != self.dir:
-                    try:
-                        os.rmdir(Path(self.address).parent)
-                    except OSError:
-                        pass
+            # Only what is still this runtime's own is removed: after its
+            # directory was removed and made again, the same names there are
+            # the next runtime's.
+            if self._sock_file is not None:
+                self._sock_file.remove()
+                if self._sock_file.path.parent != self.dir:
+                    self._sock_file.remove_dir()
+                self._sock_file.close()
             self._remove_info()
+            if self._info_file is not None:
+                self._info_file.close()
             self.close_engines()
             election.close()
             log.info("runtime %s stopped", self.runtime_id)

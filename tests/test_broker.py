@@ -49,6 +49,7 @@ from fcapz.broker import (  # noqa: E402
 )
 from fcapz.broker import coreref as broker_coreref  # noqa: E402
 from fcapz.broker import operations as broker_operations  # noqa: E402
+from fcapz.broker import runtime as broker_runtime  # noqa: E402
 from fcapz.broker import session as broker_session  # noqa: E402
 from fcapz.broker import wire  # noqa: E402
 from fcapz.broker.operations import Engine  # noqa: E402
@@ -829,6 +830,44 @@ def test_a_spawn_that_never_published_is_stopped_when_its_start_fails(tmp_path, 
     with pytest.raises(BrokerStartError, match="did not answer"):
         BrokerSession.connect(rdir, start_timeout=0.5)
     assert spawn is not slow_spawn and procs[0].wait(10) is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a directory removed under its runtime")
+def test_an_orphan_leaves_its_successors_files_alone(monkeypatch):
+    # The directory is removed and made again; the next runtime binds the
+    # same socket path.  The first one, leaving, must not unlink it.
+    monkeypatch.setattr(broker_runtime, "OWN_CHECK_S", 0.1)
+    base = Path(tempfile.mkdtemp(dir="/tmp"))      # short: the socket is in rt
+    rdir = base / "rt"
+
+    def runtime():
+        return Runtime(rdir, transport_factory=lambda s: FakeElaTransport())
+
+    try:
+        orphan = threading.Thread(target=runtime().serve, daemon=True)
+        orphan.start()
+        first = _wait_for(lambda: read_info(rdir), what="runtime up")
+        assert Path(first["address"]).parent == rdir
+        shutil.rmtree(rdir)
+        successor = runtime()
+        served = threading.Thread(target=successor.serve, daemon=True)
+        served.start()
+        _wait_for(lambda: (read_info(rdir) or {}).get("runtime_id") == successor.runtime_id,
+                  what="the next runtime up")
+        orphan.join(15)
+        assert not orphan.is_alive(), "the orphan was to leave"
+        info = read_info(rdir)
+        assert info and info["runtime_id"] == successor.runtime_id
+        assert info["address"] == first["address"] and os.path.exists(info["address"])
+        with BrokerSession.connect(rdir, autostart=False) as s:
+            assert s.runtime_id == successor.runtime_id
+            _use_the_cable(s)
+            s.stop(wait=0)       # in-process: the runtime stays in this process
+        served.join(10)
+        assert not served.is_alive()
+        assert not os.path.exists(info["address"]) and read_info(rdir) is None
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_shutdown_opens_no_new_cable(tmp_path):
