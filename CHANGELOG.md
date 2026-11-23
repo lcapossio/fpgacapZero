@@ -162,9 +162,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   fewer than 32 sample bits, the value and mask bits above the sample
   width, kept only for readback, move into one small memory. Reads
   return the same values as before. The new `READBACK_RAM` parameter
-  (default 1) of `fcapz_ela` and the `fcapz_debug_multi` hubs keeps
-  them in flip-flops; the Efinix wrappers set it to 0, as should an
-  iCE40 build, since neither family has asynchronous-read LUT RAM.
+  of `fcapz_ela` and the `fcapz_debug_multi` hubs selects that memory
+  (1, the default) or keeps the bits in flip-flops (0); the Efinix
+  wrappers set 0, as should an iCE40 build, since neither family has
+  asynchronous-read LUT RAM.
   Verilog and VHDL.
 
 - **FTDI: a failed USB transfer closes the channel for every transport on
