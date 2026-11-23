@@ -991,8 +991,10 @@ broker instead of opening the cable themselves, so several programs can use
 one board, and one core, at once without corrupting each other's work.  The
 first command starts the broker; a command whose core is busy waits for its
 turn, printing what it waits behind, for up to `--broker-wait` seconds.  The
-other subcommands refuse `--broker` (exit code 2), as does `--program`:
-program the FPGA once without the broker.  Ctrl+C cancels the command's job
+other subcommands that open a cable (`openocd-bridge` among them) refuse
+`--broker` (exit code 2), as does `--program`: program the FPGA once without
+the broker.  `list-ports`, `axi-decode` and `capture-profile` open none and
+run as always.  Ctrl+C cancels the command's job
 in the broker (exit code 130).  See [chapter 21](21_broker.md).
 
 <!-- BEGIN GENERATED cli:broker (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
@@ -1030,7 +1032,8 @@ Usage: `fcapz [global options] broker stop [--force]`
 <!-- END GENERATED cli:broker.stop -->
 
 Neither starts a broker.  `stop` refuses while jobs are running unless
-given `--force`, and exits with 0 when none is running.
+given `--force`, and exits with 0 when none is running.  It returns when the
+broker process has exited (exit code 1 if that takes more than 20 seconds).
 
 ```bash
 # Two terminals capturing from the same ELA: the second waits its turn

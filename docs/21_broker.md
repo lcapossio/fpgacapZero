@@ -30,9 +30,15 @@ its last client goes away.
 
 These commands run through the broker: `probe`, `capture`, `eio-probe`,
 `eio-read`, `eio-write`, `axi-read`, `axi-write`, `axi-dump`, `axi-fill` and
-`axi-load`.  The others (`arm`, `configure`, `stream`, `axi-mon`, the UART
-commands, ...) refuse to run with the broker for now (exit code 2), and so
-does `--program`: program the FPGA once without the broker, then use it.
+`axi-load`.  The other commands that open a cable (`arm`, `configure`,
+`stream`, `axi-mon`, the UART commands, `openocd-bridge`, ...) refuse to run
+with the broker for now (exit code 2), and so does `--program`: program the
+FPGA once without the broker, then use it.  Commands that open no cable
+(`list-ports`, `axi-decode`, `capture-profile`) run as always.
+
+Run a refused command with `--no-broker`.  On a cable only one program can
+open (`ftdi`, `usb_blaster`, `serial`), stop the broker first
+(`fcapz broker stop`): it keeps a cable open until it exits.
 
 The global transport options (`--backend`, `--host`, `--port`, `--tap`,
 `--hardware`, ...) choose the board as usual; the broker opens that board's
@@ -53,24 +59,30 @@ are refused too, because they might be the same adapter.
   and says what it waits behind:
 
   ```text
-  waiting: queued behind job 3 (capture, client 1) on this core
+  waiting: queued behind job 3 (capture, client c1) on this core
   ```
 
   If its turn does not come within `--broker-wait` seconds (default 30), it
   fails with `CoreBusy` instead of disturbing the first one.
 - **Other cores keep running.**  Each slot of an ELA core manager is its own
   core: a capture on slot 1 runs while slot 0 waits for its trigger.  An ELA
-  addressed without `--ela-instance` is slot 0, the same core as
-  `--ela-instance 0`.
+  addressed without `--ela-instance` is the manager's first ELA slot, the
+  same core as naming that slot (slot 0 when the ELA comes first).
 - **A client that goes away loses only its own jobs.**  Ctrl+C on a waiting
   command cancels its job (exit code 130), and a program that crashes has
   its jobs cancelled when its connection drops.  A capture cancelled while
-  waiting for its trigger is disarmed before the next job gets the core.
-  Other programs' jobs are not touched.
+  waiting for its trigger is driven idle before the next job gets the core,
+  also one configured with `--startup-arm` (its STARTUP_ARM register is
+  cleared, so the reset does not re-arm it).  A capture that fails or times
+  out is left as it is, as in direct mode.  Other programs' jobs are not
+  touched, and neither is the cable: a command that names a wrong chain or a
+  core that is not there fails alone.
 - **No silent fallback.**  When the broker cannot start, the command fails
   and shows the end of the broker's log; it never falls back to opening the
   cable itself.  When the broker dies mid-command, the command fails with
-  `BrokerConnectionLost`, and the next command starts a new broker.
+  `BrokerConnectionLost`, and the next command starts a new broker.  A
+  command that arrives while the broker is stopping waits until it has
+  closed its cables, then starts the next one.
 - **A lost cable is a new connection.**  When the cable fails (unplugged,
   server gone), the broker reconnects for the next job, after the jobs still
   running on the old connection have ended, and counts a new *image
@@ -90,7 +102,8 @@ fcapz broker stop            # refused while jobs run; --force cancels them
 ```
 
 Neither command starts a broker.  `status` exits with 1 when none is
-running.  See the [CLI reference](10_cli_reference.md#broker).
+running.  `stop` returns when the broker process has exited and its cables
+are closed.  See the [CLI reference](10_cli_reference.md#broker).
 
 ## From Python
 
@@ -116,7 +129,8 @@ with BrokerSession.connect(name="my script") as s:
 `expect_gen=cap.core.image_gen` to a later call to fail with `ImageChanged`
 if the board was reconnected in between.  `on_event` receives the job's
 progress (`accepted`, `queued`, `running`).  `last_capture(board)` returns
-the last capture any client took on that ELA.
+the most recent capture any client took on that chain's ELAs;
+`last_capture(board, instance=1)` the last one of that slot.
 
 The JSON-RPC server, the desktop GUI, the web interface and the MCP server
 do not use the broker yet.
@@ -126,7 +140,10 @@ do not use the broker yet.
 The broker keeps its files in a per-user directory: `%LOCALAPPDATA%\fcapz\broker`
 on Windows, `$XDG_RUNTIME_DIR/fcapz-broker` on Linux, otherwise a private
 directory under the system temporary directory.  `FCAPZ_BROKER_DIR` sets
-another one.  The directory holds:
+another one (a relative path is taken from the directory the command runs
+in).  On Linux and macOS the directory must be your own, not a symbolic
+link, and writable by nobody else, and so must `runtime.json`: a command
+refuses anything else rather than trust it.  The directory holds:
 
 | File | What it is |
 |---|---|
@@ -141,8 +158,19 @@ the network.  `FCAPZ_BROKER_IDLE_EXIT` sets how many seconds the broker
 stays up after its last client (default 60).
 
 Programs that share a board must use the same broker directory, so run them
-as the same user with the same `FCAPZ_BROKER_DIR`.  A program in direct mode
-does not go through the broker and is not kept out by it.
+as the same user with the same `FCAPZ_BROKER_DIR`.  On Linux the default
+depends on `XDG_RUNTIME_DIR` being set: set `FCAPZ_BROKER_DIR` when some of
+the programs run without a login session (cron, containers).
+
+A program in direct mode does not go through the broker, and the broker does
+not coordinate with it.  hw_server and OpenOCD serve both at once, with no
+protection for a core they both use.  A cable that one program opens (`ftdi`,
+`usb_blaster`, `serial`) stays the broker's from its first job on it until
+the broker exits: a direct-mode command on it fails as busy until then.
+
+The broker keeps what it read from a core while the cable stays connected.
+After reprogramming the FPGA with another design, run `fcapz broker stop`
+before the next command.
 
 ## What's next
 
