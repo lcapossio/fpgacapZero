@@ -922,6 +922,45 @@ def test_stop_spares_other_clients_unless_forced(broker_env):
             _use_the_cable(worker)
 
 
+def test_stop_counts_a_connection_that_has_not_said_hello(tmp_path, monkeypatch):
+    # It is a client about to send its first job as much as one that has.
+    rdir = tmp_path / "rt"
+    rt = Runtime(rdir, transport_factory=lambda s: FakeElaTransport())
+    served = threading.Thread(target=rt.serve, daemon=True)
+    served.start()
+    info = _wait_for(lambda: read_info(rdir), what="runtime up")
+    key = bytes.fromhex(info["authkey"])
+    try:
+        with BrokerSession.connect(rdir, autostart=False, name="admin") as admin:
+            raw = mpc.Client(info["address"], info["family"])
+            try:
+                _wait_for(lambda: len(admin.status()["clients"]) == 2, what="it registered")
+                with pytest.raises(wire.BrokerError, match="1 other client.*connecting"):
+                    admin.stop()
+                mpc.answer_challenge(raw, key)
+                mpc.deliver_challenge(raw, key)
+                raw.send_bytes(wire.encode(
+                    {"v": wire.PROTOCOL, "id": 1, "op": "hello", "pid": 1, "name": "late"}))
+                assert wire.decode(raw.recv_bytes())["ok"], "it is served, not dropped"
+                with pytest.raises(wire.BrokerError, match="1 other client.*late"):
+                    admin.stop()
+            finally:
+                raw.close()
+            # One that never says hello does not count for ever.
+            monkeypatch.setattr(broker_runtime, "HELLO_TIMEOUT_S", 0.3)
+            silent = mpc.Client(info["address"], info["family"])
+            try:
+                _wait_for(lambda: len(admin.status()["clients"]) == 2, what="it registered")
+                _wait_for(lambda: len(admin.status()["clients"]) == 1, what="it was dropped")
+            finally:
+                silent.close()
+            admin.stop(wait=0)       # in-process: the runtime stays in this process
+    finally:
+        rt.stop()
+        served.join(10)
+    assert not served.is_alive()
+
+
 def test_paths_are_the_callers_not_the_runtimes(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     rel = os.path.join("tools", "quartus_stp")

@@ -10,7 +10,10 @@ whitelist of exception classes.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import socket
 from dataclasses import asdict, fields
 from typing import Any
 
@@ -27,6 +30,22 @@ from ..analyzer import (
 from ..transport import ManagerResetError
 
 PROTOCOL = 1
+
+
+def abort_connection(conn: Any) -> None:
+    """Close *conn* so that a thread blocked reading it returns."""
+    if os.name != "nt":
+        # On POSIX close() does not end another thread's recv on the socket
+        # (and the peer would not see us leave until this process exits);
+        # shutdown() does.
+        with contextlib.suppress(OSError, ValueError):
+            sock = socket.socket(fileno=os.dup(conn.fileno()))
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            finally:
+                sock.close()
+    with contextlib.suppress(OSError):
+        conn.close()
 
 
 class BrokerError(RuntimeError):

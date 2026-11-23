@@ -56,6 +56,8 @@ SOCK_NAME = "broker.sock"
 MAX_FRAME = 64 << 20
 #: Longest Unix socket path used, in bytes (sun_path holds 104 on macOS).
 SOCK_PATH_MAX = 100
+#: How long a connection may take to authenticate and say hello.
+HELLO_TIMEOUT_S = 10.0
 #: How often a Unix socket's accept() returns to look at the stop flag.
 ACCEPT_POLL_S = 0.2
 #: How often a runtime checks that its directory still names it, and how many
@@ -361,13 +363,29 @@ class _Client:
         self._out: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._requests: dict[Any, tuple[Engine, Job]] = {}
+        # A connection that never says hello would count as a client for
+        # ever: it keeps the runtime from its idle exit and from a plain stop.
+        self._hello_timer = threading.Timer(HELLO_TIMEOUT_S, self._expire)
+        self._hello_timer.daemon = True
 
     def start(self) -> None:
+        self._hello_timer.start()
         threading.Thread(target=self._reader, name=f"fcapz-client-{self.id}",
                          daemon=True).start()
 
+    def _expire(self) -> None:
+        if not self.hello:
+            log.info("client %s did not say hello in %g s: dropped", self.id,
+                     HELLO_TIMEOUT_S)
+            wire.abort_connection(self.conn)
+
     def describe(self) -> dict[str, Any]:
         return {"id": self.id, "pid": self.pid, "name": self.name}
+
+    def label(self) -> str:
+        if not self.hello:
+            return f"{self.id} (connecting)"
+        return f"{self.id} pid {self.pid} {self.name or ''}".rstrip()
 
     def send(self, msg: dict[str, Any]) -> None:
         self._out.put(msg)
@@ -413,6 +431,7 @@ class _Client:
             self._close()
 
     def _close(self) -> None:
+        self._hello_timer.cancel()
         try:
             self.conn.close()
         except OSError:
@@ -434,7 +453,8 @@ class _Client:
             if op == "hello":
                 self.pid = msg.get("pid")
                 self.name = msg.get("name")
-                self.hello = True
+                self.rt.said_hello(self)
+                self._hello_timer.cancel()
                 self._reply(rid, **self.rt.identity())
             elif not self.hello:
                 raise wire.BrokerError("send hello first")
@@ -458,13 +478,15 @@ class _Client:
                         f"{busy} job(s) are running; stop with force to cancel them"
                     )
                 # A connected client may be between two jobs (a capture's
-                # probe and its capture) or about to send one.
-                others = self.rt.other_clients(self)
+                # probe and its capture) or about to send one, also one that
+                # has not said hello yet.
+                force = bool(msg.get("force"))
+                others = self.rt.begin_stop(self, force)
                 deadline = time.monotonic() + 0.5   # one may just be leaving
-                while others and not msg.get("force") and time.monotonic() < deadline:
+                while others and time.monotonic() < deadline:
                     time.sleep(0.02)
-                    others = self.rt.other_clients(self)
-                if others and not msg.get("force"):
+                    others = self.rt.begin_stop(self, force)
+                if others:
                     raise wire.BrokerError(
                         f"{len(others)} other client(s) are connected "
                         f"({', '.join(others)}); stop with force to drop them"
@@ -611,13 +633,23 @@ class Runtime:
         with self._lock:
             self._clients.pop(client.id, None)
 
-    def other_clients(self, client: _Client) -> list[str]:
-        """The clients that said hello, but for *client*, as text."""
+    def said_hello(self, client: _Client) -> None:
         with self._lock:
-            return [
-                f"{c.id} pid {c.pid} {c.name or ''}".rstrip()
-                for c in self._clients.values() if c is not client and c.hello
-            ]
+            client.hello = True
+
+    def begin_stop(self, client: _Client, force: bool) -> list[str]:
+        """Commit to stopping for *client*, or return the other connections
+        that stand in the way (none with *force*).
+
+        One step under the lock the accept loop registers connections with:
+        every other connection is either seen here, said hello or not, or is
+        refused from now on.  None is taken and then dropped."""
+        with self._lock:
+            others = [c.label() for c in self._clients.values() if c is not client]
+            if others and not force:
+                return others
+            self._refusing = True
+            return []
 
     def close_engines(self) -> None:
         """Close every engine; none is created afterwards."""
