@@ -293,6 +293,33 @@ architecture rtl of fcapz_ela is
 
     type seg_ptr_t is array (0 to NUM_SEGMENTS - 1) of natural range 0 to DEPTH - 1;
     type seg_len_t is array (0 to NUM_SEGMENTS - 1) of unsigned(PTR_W downto 0);
+    function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
+        variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+        variable n : natural := SAMPLE_W;
+    begin
+        if n > 32 then
+            n := 32;
+        end if;
+        r(n - 1 downto 0) := v(n - 1 downto 0);
+        return r;
+    end function;
+
+    -- Reset value of an active comparator mask: ones on the bits the host
+    -- can program (the low 32, or every bit of comparator A with WIDE_TRIG),
+    -- zero above, as every ARM loads them.  Mirrors rtl/fcapz_ela.v.
+    constant NARROW_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) :=
+        expand32(x"FFFFFFFF");
+
+    function trig_mask_reset return std_logic_vector is
+    begin
+        if HAS_WIDE_TRIG then
+            return (SAMPLE_W - 1 downto 0 => '1');
+        end if;
+        return NARROW_MASK_ONES;
+    end function;
+
+    constant TRIG_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) := trig_mask_reset;
+
     type reg32_array_t is array (natural range <>) of std_logic_vector(31 downto 0);
     type sample_array_t is array (natural range <>) of std_logic_vector(SAMPLE_W - 1 downto 0);
     type seq_mode_array_t is array (natural range <>) of std_logic_vector(3 downto 0);
@@ -366,9 +393,9 @@ architecture rtl of fcapz_ela is
     signal trig_cmp_mode_b        : std_logic_vector(3 downto 0) := (others => '0');
     signal trig_combine           : std_logic_vector(1 downto 0) := (others => '0');
     signal trig_value             : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal trig_mask              : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '1');
+    signal trig_mask              : std_logic_vector(SAMPLE_W - 1 downto 0) := TRIG_MASK_ONES;
     signal trig_value_b           : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal trig_mask_b            : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '1');
+    signal trig_mask_b            : std_logic_vector(SAMPLE_W - 1 downto 0) := NARROW_MASK_ONES;
     signal chan_sel               : natural range 0 to 255 := 0;
     signal probe_sel              : natural range 0 to 255 := 0;
     signal decim_ratio            : unsigned(23 downto 0) := (others => '0');
@@ -381,9 +408,9 @@ architecture rtl of fcapz_ela is
     signal seq_mode_b             : seq_mode_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_combine            : seq_combine_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_value_a            : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_mask_a             : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
+    signal seq_mask_a             : sample_array_t(0 to TRIG_STAGES - 1) := (others => NARROW_MASK_ONES);
     signal seq_value_b            : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_mask_b             : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
+    signal seq_mask_b             : sample_array_t(0 to TRIG_STAGES - 1) := (others => NARROW_MASK_ONES);
     signal seq_count_target       : seq_count_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_next_state         : seq_next_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_is_final           : seq_flag_array_t(0 to TRIG_STAGES - 1) := (others => '0');
@@ -689,32 +716,7 @@ architecture rtl of fcapz_ela is
     signal capture_gen            : unsigned(15 downto 0) := (others => '0');
     signal capture_gen_rst_d      : std_logic := '0';
 
-    function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
-        variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-        variable n : natural := SAMPLE_W;
-    begin
-        if n > 32 then
-            n := 32;
-        end if;
-        r(n - 1 downto 0) := v(n - 1 downto 0);
-        return r;
-    end function;
 
-    -- Reset value of an active comparator mask: ones on the bits the host
-    -- can program (the low 32, or every bit of comparator A with WIDE_TRIG),
-    -- zero above, as every ARM loads them.  Mirrors rtl/fcapz_ela.v.
-    constant NARROW_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) :=
-        expand32(x"FFFFFFFF");
-
-    function trig_mask_reset return std_logic_vector is
-    begin
-        if HAS_WIDE_TRIG then
-            return (SAMPLE_W - 1 downto 0 => '1');
-        end if;
-        return NARROW_MASK_ONES;
-    end function;
-
-    constant TRIG_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) := trig_mask_reset;
 
     -- Assemble a SAMPLE_W value from its per-word registers (WIDE_TRIG).
     function wide_assemble(words : reg32_array_t) return std_logic_vector is
