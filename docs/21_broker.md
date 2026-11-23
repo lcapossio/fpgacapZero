@@ -159,6 +159,7 @@ frees its cables.  The directory holds:
 |---|---|
 | `runtime.json` | How clients reach the running broker (address, key, process ID); private to your user |
 | `runtime.lock` | Ensures one broker per directory |
+| `starter-<id>.lock` | Held by a command while it starts the broker; a broker whose starter gave up, and that no other command found, exits by itself |
 | `runtime.log` | The broker's log |
 | `runtime-stderr.log` | What the broker printed while starting |
 

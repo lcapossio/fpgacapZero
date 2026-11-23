@@ -815,21 +815,141 @@ def test_an_interrupted_starter_leaves_the_runtime_others_use(broker_env, monkey
         _use_the_cable(b)
 
 
-def test_a_spawn_that_never_published_is_stopped_when_its_start_fails(tmp_path, monkeypatch):
-    rdir = tmp_path / "rt"
-    procs = []
+def test_a_starter_that_gives_up_never_stops_a_runtime_another_client_found(
+        broker_env, monkeypatch):
+    # The starter gives up before its runtime has published; the runtime
+    # then publishes and another client connects.  A kill decided before
+    # that and landing after it would take the runtime from that client, so
+    # there is none: the runtime decides for itself.
+    rdir, _ = broker_env
     spawn = broker_session.spawn_runtime
+    procs = []
+    found = threading.Event()
 
-    def slow_spawn(directory, spawn_id=None):
-        # A runtime that hangs before it publishes anything.
-        procs.append(subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"]))
+    class Late:
+        """A process whose kill() lands only once another client is there."""
+
+        def __init__(self, proc):
+            self._proc = proc
+
+        def kill(self):
+            found.wait(20)
+            self._proc.kill()
+
+        def __getattr__(self, name):
+            return getattr(self._proc, name)
+
+    def late_spawn(directory, spawn_id=None):
+        procs.append(Late(spawn(directory, spawn_id)))
         return procs[-1]
 
-    monkeypatch.setattr(broker_session, "spawn_runtime", slow_spawn)
-    with pytest.raises(BrokerStartError, match="did not answer"):
-        BrokerSession.connect(rdir, start_timeout=0.5)
-    assert spawn is not slow_spawn and procs[0].wait(10) is not None
+    monkeypatch.setattr(broker_session, "spawn_runtime", late_spawn)
+    gave_up = []
+
+    def starter():
+        try:
+            BrokerSession.connect(rdir, start_timeout=0.05)
+        except BrokerStartError as exc:
+            gave_up.append(exc)
+
+    a = threading.Thread(target=starter)
+    a.start()
+    other = None
+    try:
+        _wait_for(lambda: procs and (procs[0].poll() is not None or read_info(rdir)),
+                  timeout=30, what="the spawn to publish or leave")
+        with contextlib.suppress(BrokerNotRunning):
+            other = BrokerSession.connect(rdir, autostart=False)
+    finally:
+        found.set()
+    a.join(30)
+    assert gave_up, "the starter was to time out"
+    if other is None:
+        # Abandoned before it published: it left by itself, unpublished.
+        assert procs[0].wait(20) is not None and read_info(rdir) is None
+    else:
+        with other:
+            time.sleep(0.5)
+            _use_the_cable(other)
+
+
+def test_a_starter_that_gives_up_spares_a_runtime_closing_its_cables(broker_env, monkeypatch):
+    # A stopping runtime has withdrawn runtime.json: it must not be taken
+    # for a spawn that never published, and killed with its cables open.
+    rdir, ctl = broker_env
+    monkeypatch.setenv("FCAPZ_BROKER_FAKE_CLOSE_S", "2.0")
+    real = broker_session._connect_info
+    blind = threading.local()
+    closing = threading.Event()
+
+    def connect_info(directory, timeout=None):
+        if not getattr(blind, "on", False):
+            return real(directory, timeout)
+        if getattr(blind, "started", False):
+            closing.wait(30)    # the starter, waiting, sees nothing until then
+        blind.started = True
+        return None
+
+    monkeypatch.setattr(broker_session, "_connect_info", connect_info)
+    gave_up = []
+
+    def starter():
+        blind.on = True
+        try:
+            BrokerSession.connect(rdir, start_timeout=0.5)
+        except BrokerStartError as exc:
+            gave_up.append(exc)
+
+    a = threading.Thread(target=starter)
+    t0 = time.monotonic()
+    a.start()
+    _wait_for(lambda: read_info(rdir), timeout=30, what="the runtime to publish")
+    with BrokerSession.connect(rdir, autostart=False) as b:
+        _use_the_cable(b)
+        assert b.stop(wait=0) is False
+        _wait_for(lambda: read_info(rdir) is None, what="the runtime to start leaving")
+        _wait_for(lambda: time.monotonic() - t0 > 0.6, what="the starter's deadline")
+        closing.set()
+        a.join(20)
+        assert gave_up, "the starter was to time out"
+    _wait_for(lambda: (ctl / "closed").exists(), timeout=15,
+              what="the cable to be closed, not dropped")
+
+
+def test_an_unused_runtime_leaves_with_its_starter_and_a_used_one_stays(tmp_path):
+    rdir = ensure_dir(tmp_path / "rt")
+
+    def runtime(spawn_id):
+        return Runtime(rdir, spawn_id=spawn_id, transport_factory=lambda s: FakeElaTransport())
+
+    # Its starter has gone before it could publish: it does not.
+    assert runtime("gone").serve() == 0 and read_info(rdir) is None
+    # Published and found by nobody: it leaves when its starter does.
+    claim = broker_runtime.StarterClaim(rdir, "s1")
+    served = threading.Thread(target=runtime("s1").serve, daemon=True)
+    served.start()
+    _wait_for(lambda: read_info(rdir), what="runtime up")
+    time.sleep(0.6)
+    assert served.is_alive(), "its starter still waits"
+    claim.release()
+    served.join(10)
+    assert not served.is_alive() and read_info(rdir) is None
+    assert not claim.path.exists()
+    # Found by a client: it is the directory's runtime, starter or not.
+    claim = broker_runtime.StarterClaim(rdir, "s2")
+    rt = runtime("s2")
+    served = threading.Thread(target=rt.serve, daemon=True)
+    served.start()
+    _wait_for(lambda: read_info(rdir), what="runtime up")
+    with BrokerSession.connect(rdir, autostart=False) as s:
+        claim.release()
+        time.sleep(0.8)
+        assert s.status()["runtime_id"] == rt.runtime_id
+    time.sleep(0.6)
+    assert served.is_alive(), "used once: it stays until it is idle"
+    rt.stop()
+    served.join(10)
+    assert not served.is_alive()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a directory removed under its runtime")
@@ -1044,7 +1164,7 @@ def test_concurrent_starters_share_one_runtime_and_leave_no_spare(broker_env):
     assert read_info(rdir) is None
 
 
-def test_a_starter_that_finds_another_runtime_stops_its_own_spawn(broker_env, monkeypatch):
+def test_a_starter_that_finds_another_runtime_leaves_no_spawn(broker_env, monkeypatch):
     rdir, _ = broker_env
     from fcapz.broker import session as session_mod
 
@@ -1063,7 +1183,7 @@ def test_a_starter_that_finds_another_runtime_stops_its_own_spawn(broker_env, mo
         conn, info = BrokerSession._start(rdir, 20)
         conn.close()
         assert info["runtime_id"] == first.runtime_id
-        assert spawned and spawned[0].poll() is not None, "spare spawn still running"
+        assert spawned and spawned[0].wait(20) is not None, "spare spawn still running"
 
 
 def test_the_runtime_exits_when_idle(broker_env, monkeypatch):

@@ -6,7 +6,10 @@
 :meth:`BrokerSession.connect` reads ``runtime.json`` in the per-user runtime
 directory and connects.  When no runtime answers it starts one (detached,
 with this fcapz on its ``PYTHONPATH``) and waits for it; a runtime that is
-shutting down at that moment is waited out, and the next one started.  If that runtime
+shutting down at that moment is waited out, and the next one started.  A
+client never kills a runtime it started: it holds a
+:class:`~fcapz.broker.runtime.StarterClaim` while it waits, and a runtime
+whose claim is gone before any client said hello leaves by itself.  If that runtime
 cannot start, :class:`~fcapz.broker.wire.BrokerStartError` says why: there
 is never a silent fallback to a direct transport.
 
@@ -38,6 +41,7 @@ from .coreref import CoreRef, TargetSpec
 from .runtime import (
     EXIT_ALREADY_RUNNING,
     LOG_NAME,
+    StarterClaim,
     check_dir,
     default_dir,
     ensure_dir,
@@ -165,8 +169,9 @@ def _log_tail(directory: Path, lines: int = 15) -> str:
 
 
 def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Popen:
-    """Start a detached runtime for *directory*; *spawn_id* tags it in
-    ``runtime.json``."""
+    """Start a detached runtime for *directory*; *spawn_id* names the
+    :class:`~fcapz.broker.runtime.StarterClaim` its starter holds, and tags
+    it in ``runtime.json``."""
     # Absolute: the runtime's working directory is *directory* itself.
     directory = Path(os.path.abspath(directory))
     ensure_dir(directory)
@@ -209,33 +214,6 @@ def _reap(proc: subprocess.Popen) -> None:
     """Wait for a runtime we started, when it exits: on POSIX it would
     otherwise stay a zombie child of this process for as long as we run."""
     threading.Thread(target=proc.wait, name="fcapz-broker-reaper", daemon=True).start()
-
-
-def _abandon_spawn(proc: subprocess.Popen, directory: Path, spawn_id: str) -> None:
-    """Leave a start that failed or was interrupted.  A spawn that has
-    published itself is the directory's runtime, which other clients may
-    already use: it stays, and exits when idle.  One that has not is
-    stopped."""
-    try:
-        info = read_info(directory)
-    except wire.BrokerError:
-        info = None
-    if info and info.get("spawn_id") == spawn_id:
-        _reap(proc)
-    else:
-        _discard_spawn(proc)
-
-
-def _discard_spawn(proc: subprocess.Popen) -> None:
-    """Stop a runtime this client started when it connected to another
-    starter's.  Left alone, a spawn that reaches the election only after the
-    winner has exited would win it and idle with no client."""
-    if proc.poll() is not None:
-        return
-    with contextlib.suppress(OSError):
-        proc.kill()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(5.0)
 
 
 class BrokerSession:
@@ -282,22 +260,30 @@ class BrokerSession:
     @staticmethod
     def _start(directory: Path, start_timeout: float) -> tuple[Any, dict[str, Any]]:
         spawn_id = secrets.token_hex(8)
+        proc: subprocess.Popen | None = None
         try:
-            proc = spawn_runtime(directory, spawn_id)
+            # Held until this start ends, however it ends: our spawn needs
+            # it to publish itself, and leaves once it is released unless a
+            # client (we, on success) is there.  It is never killed: by the
+            # time we would, it may be the runtime another client uses, or
+            # one that is closing its cables.
+            claim = StarterClaim(ensure_dir(directory), spawn_id)
         except OSError as exc:
             raise wire.BrokerStartError(f"could not start the fcapz broker: {exc}") from exc
-        deadline = time.monotonic() + start_timeout
-        respawn_at: float | None = None
         try:
+            try:
+                proc = spawn_runtime(directory, spawn_id)
+            except OSError as exc:
+                raise wire.BrokerStartError(
+                    f"could not start the fcapz broker: {exc}"
+                ) from exc
+            deadline = time.monotonic() + start_timeout
+            respawn_at: float | None = None
             while True:
                 found = _connect_info(
                     directory, min(AUTH_TIMEOUT_S, max(0.1, deadline - time.monotonic()))
                 )
                 if found is not None:
-                    if found[1].get("spawn_id") != spawn_id:
-                        _discard_spawn(proc)
-                    else:
-                        _reap(proc)
                     return found
                 rc = proc.poll()
                 now = time.monotonic()
@@ -328,9 +314,10 @@ class BrokerSession:
                         f"({directory}):\n{_log_tail(directory)}"
                     )
                 time.sleep(0.05)
-        except BaseException:
-            _abandon_spawn(proc, directory, spawn_id)
-            raise
+        finally:
+            claim.release()
+            if proc is not None:
+                _reap(proc)
 
     # ---- plumbing ------------------------------------------------------
 

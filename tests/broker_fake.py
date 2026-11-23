@@ -13,7 +13,7 @@ once.  ``fail-connect`` in that directory makes ``connect()`` raise, and
 ``fail-io`` makes the next register access raise ``OSError`` once
 (``fail_io = "always"`` in-process: every access, a dead cable).
 ``FCAPZ_BROKER_FAKE_CLOSE_S`` makes ``close()`` take that long, as a real
-cable's does.
+cable's does; a ``close()`` that got to its end leaves a file ``closed`` there.
 
 Chain 3 holds a plain EIO (no manager) whose outputs read back and whose
 inputs read ``0xA5``.  Every access on a chain in ``missing_chains`` raises
@@ -120,6 +120,8 @@ class FakeElaTransport(Transport):
     def close(self) -> None:
         time.sleep(float(os.environ.get("FCAPZ_BROKER_FAKE_CLOSE_S") or 0))
         self.closed += 1
+        if self.ctl_dir is not None:
+            (self.ctl_dir / "closed").write_text("")
 
     def select_chain(self, chain: int) -> None:
         self.chain = int(chain)

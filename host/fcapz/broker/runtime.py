@@ -6,7 +6,9 @@
 Started by the first client that needs it (see :mod:`fcapz.broker.session`)
 as ``python -m fcapz.broker --dir DIR``.  One runtime per directory
 wins an OS-held lock on ``runtime.lock``; a second one exits with code 3
-and its starter connects to the winner.
+and its starter connects to the winner.  A runtime whose starter has gone
+(it holds a lock on ``starter-<id>.lock`` while it waits) before any client
+said hello leaves on its own: nobody ever has to kill a runtime.
 
 It listens on a local IPC endpoint (a named pipe on Windows, a Unix socket
 elsewhere) through :mod:`multiprocessing.connection`.  Every connection must
@@ -213,11 +215,15 @@ class ElectionLock:
     """An exclusive, non-blocking OS lock on a file, held until closed.
 
     The OS drops it when the process dies, so a crashed runtime never keeps
-    the next one out.  The file itself is never deleted.
+    the next one out.  The election's file itself is never deleted.
     """
 
-    def __init__(self, path: Path) -> None:
-        self._f = open(path, "a+b")  # noqa: SIM115 - held for the lifetime
+    def __init__(self, path: Path, *, create: bool = True) -> None:
+        if create:
+            self._f = open(path, "a+b")  # noqa: SIM115 - held for the lifetime
+        else:
+            fd = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+            self._f = os.fdopen(fd, "r+b")
 
     def try_acquire(self) -> bool:
         try:
@@ -242,17 +248,60 @@ def lock_held(directory: Path) -> bool:
     """Whether a runtime holds *directory*'s election lock: one that
     answers, one still starting, or one that is closing its cables after it
     has withdrawn ``runtime.json``."""
-    path = directory / LOCK_NAME
-    if not path.exists():
-        return False
+    return _locked(directory / LOCK_NAME)
+
+
+def _locked(path: Path) -> bool:
+    """Whether somebody holds the lock on *path*; False without the file,
+    which is not created."""
     try:
-        probe = ElectionLock(path)
+        probe = ElectionLock(path, create=False)
     except OSError:
         return False
     try:
         return not probe.try_acquire()
     finally:
         probe.close()
+
+
+def claim_path(directory: Path, spawn_id: str) -> Path:
+    return directory / f"starter-{spawn_id}.lock"
+
+
+class StarterClaim:
+    """What a client holds from before it starts a runtime until it has
+    connected to one or given up: an OS lock on ``starter-<id>.lock``.
+
+    The runtime started with that id publishes itself only while the claim is
+    held, and leaves when it is released (or its holder dies) before any
+    client has said hello.  The decision is the runtime's own, taken under
+    the lock it registers clients with: its starter never kills it, so a
+    runtime that another client found in the meantime is never taken away,
+    and neither is one that is closing its cables."""
+
+    def __init__(self, directory: Path, spawn_id: str) -> None:
+        self.path = claim_path(directory, spawn_id)
+        self._lock = ElectionLock(self.path)
+        if not self._lock.try_acquire():
+            self._lock.close()
+            raise OSError(f"{self.path} is locked by another process")
+
+    def release(self) -> None:
+        self._lock.close()
+        for _ in range(25):
+            try:
+                self.path.unlink()
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                time.sleep(0.02)    # Windows: the runtime is looking at it
+
+
+def starter_waits(directory: Path, spawn_id: str) -> bool:
+    """Whether the client that started runtime *spawn_id* still holds its
+    :class:`StarterClaim`."""
+    return _locked(claim_path(directory, spawn_id))
 
 
 class _Owned:
@@ -579,6 +628,8 @@ class Runtime:
         # Set (with ``_lock``) when the engines are being closed: no engine
         # is created from then on.
         self._closing = False
+        # Set (with ``_lock``) by the first client that says hello.
+        self._served = False
         self.family: str | None = None
         self.address: str | None = None
         # POSIX: the socket and runtime.json, as this runtime made them.
@@ -636,6 +687,7 @@ class Runtime:
     def said_hello(self, client: _Client) -> None:
         with self._lock:
             client.hello = True
+            self._served = True
 
     def begin_stop(self, client: _Client, force: bool) -> list[str]:
         """Commit to stopping for *client*, or return the other connections
@@ -703,6 +755,9 @@ class Runtime:
 
         threading.Thread(target=go, daemon=True).start()
 
+    def _starter_waits(self) -> bool:
+        return self.spawn_id is None or starter_waits(self.dir, self.spawn_id)
+
     def _owns_directory(self) -> bool:
         """Whether ``runtime.json`` still names this runtime."""
         try:
@@ -716,6 +771,18 @@ class Runtime:
         next_check = idle_since + OWN_CHECK_S
         misses = 0
         while not self._stopping.wait(0.2):
+            # Started for a client that has given up, and found by no other:
+            # leave.  Decided as the idle exit below is.
+            if not self._served and not self._starter_waits():
+                with self._lock:
+                    unused = not self._clients and not self._served
+                    if unused:
+                        self._refusing = True
+                if unused:
+                    log.info("the client that started this runtime has left and "
+                             "no other came: exiting")
+                    self.stop()
+                    return
             # A runtime whose directory was removed (a deleted
             # XDG_RUNTIME_DIR), or names another runtime, can be found by
             # no client: it leaves, busy or not, and frees its cables.
@@ -797,6 +864,9 @@ class Runtime:
             return EXIT_ALREADY_RUNNING
         listener: Any = None
         try:
+            if not self._starter_waits():
+                log.info("the client that started this runtime has left: not needed")
+                return 0
             self.family, self.address = endpoint(self.dir, secrets.token_hex(4))
             if self.family == "AF_UNIX":
                 if os.path.exists(self.address):
@@ -859,6 +929,11 @@ class Runtime:
             if self._info_file is not None:
                 self._info_file.close()
             self.close_engines()
+            if self.spawn_id and not starter_waits(self.dir, self.spawn_id):
+                try:    # left by a starter that died
+                    claim_path(self.dir, self.spawn_id).unlink()
+                except OSError:
+                    pass
             election.close()
             log.info("runtime %s stopped", self.runtime_id)
         return 0
