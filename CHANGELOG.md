@@ -19,7 +19,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   interfering. A client that exits or crashes loses only its own jobs, a
   broker that cannot start is reported with its log (never a silent
   fallback to direct mode), and a lost cable reconnects as a new image
-  generation. `fcapz broker status|stop` show and stop it. Python:
+  generation. `fcapz broker status|stop` show and stop it; a plain
+  `stop` refuses while other programs are connected (`--force`
+  overrides) and waits until the cables are closed. Python:
   `fcapz.broker.BrokerSession`. Direct mode stays the default; the RPC
   server, GUIs and MCP server do not use the broker yet.
 - **Resource comparison against the AMD/Xilinx ILA.**
