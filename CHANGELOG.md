@@ -243,7 +243,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   burst's response was the last beat's RRESP, so a SLVERR or DECERR on an
   earlier beat came back OKAY and `burst_read()` returned that beat's data
   without an error. The response is now the first non-OKAY RRESP of the
-  burst, as for streaming reads (Verilog and VHDL).
+  burst, as for streaming reads (Verilog and VHDL). `burst_read()` now
+  also waits for a response that comes after the last word (a burst
+  still running at the scan after RSTART), so the error raises there
+  and not on the next command.
 
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
