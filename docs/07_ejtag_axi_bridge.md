@@ -192,7 +192,7 @@ polling.
 | Bit | Meaning |
 |---|---|
 | 0 | `prev_valid` — `rdata`/`resp` are from a completed operation |
-| 1 | `busy` — AXI transaction in flight (should not normally be seen) |
+| 1 | `busy` — work still pending: a RESET in flight, a full command queue, or AXI responses still owed. A scan that shows a result does not count owed responses; use `CFG_AXI_STATUS[5]` to know the bus is idle |
 | 2 | `error` — sticky, last operation got non-OKAY AXI response |
 | 3 | `fifo_notempty` — burst read FIFO has data available |
 
@@ -336,7 +336,9 @@ beat per JTAG scan.
 
 The burst's response is the first non-OKAY `RRESP` of its beats, not
 the last beat's, so an error on any beat sets the error bit and
-`burst_read()` raises `AXIError`.
+`burst_read()` raises `AXIError`.  When the burst is still running at
+the scan after RSTART, the words come first and the response after the
+last one; `burst_read()` waits for it before returning.
 
 ### AXI4 burst write
 
