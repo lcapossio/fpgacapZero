@@ -78,7 +78,18 @@ architecture rtl of jtag_pipe_iface is
     constant SEG_PTR_W        : positive := fcapz_clog2(SEG_DEPTH);
     constant TS_W_SAFE        : positive := fcapz_nonzero_width(TIMESTAMP_W);
     constant SAMPLES_PER_SCAN : positive := BURST_W / SAMPLE_W;
-    constant TS_PER_SCAN      : positive := BURST_W / TS_W_SAFE;
+    -- Without an aux lane (TIMESTAMP_W = 0) a timestamp-lane request reads
+    -- samples: the lane path, its 256-bit shift mux and the wider load
+    -- counter are left out.
+    constant HAS_TS           : boolean  := TIMESTAMP_W > 0;
+    function ts_per_scan_f return positive is
+    begin
+        if HAS_TS then
+            return BURST_W / TS_W_SAFE;
+        end if;
+        return SAMPLES_PER_SCAN;
+    end function;
+    constant TS_PER_SCAN      : positive := ts_per_scan_f;
     constant MAX_PER_SCAN     : positive := max_positive(SAMPLES_PER_SCAN, TS_PER_SCAN);
     constant LOAD_CTR_W       : positive := fcapz_clog2(MAX_PER_SCAN + 1);
     constant SHIFT_CTR_W      : positive := fcapz_clog2(BURST_W + 1);
@@ -134,7 +145,7 @@ begin
         when burst_timestamp_r = '1'
         else to_unsigned(SAMPLES_PER_SCAN, LOAD_CTR_W);
     start_words_per_scan <= to_unsigned(TS_PER_SCAN, LOAD_CTR_W)
-        when burst_timestamp = '1'
+        when burst_timestamp = '1' and HAS_TS
         else to_unsigned(SAMPLES_PER_SCAN, LOAD_CTR_W);
 
     g_seg_base_flat : if SEG_DEPTH >= DEPTH generate
@@ -191,7 +202,11 @@ begin
                             to_unsigned(1, SEG_PTR_W);
                         next_off <= burst_ptr_off + resize(start_words_per_scan, SEG_PTR_W);
                         load_cnt <= (others => '0');
-                        burst_timestamp_r <= burst_timestamp;
+                        if HAS_TS then
+                            burst_timestamp_r <= burst_timestamp;
+                        else
+                            burst_timestamp_r <= '0';
+                        end if;
                         loading <= '1';
                         if HEADER_EN /= 0 then
                             sr <= burst_header;

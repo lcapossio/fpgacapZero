@@ -163,6 +163,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Before, two such writes close together could arm with a mix of their
   settings. Verilog and VHDL.
 
+- **ELA: smaller comparators, stream ring and burst readout.** On
+  Artix-7, against the ILA comparison builds before this change:
+  8-bit basic and dual builds take 130-175 fewer LUTs and 94 fewer FFs,
+  the 8-bit sequenced build 184 fewer LUTs and 555 fewer FFs, and the
+  64-bit sequenced build 1,068 fewer LUTs and 110 fewer FFs. The
+  relational compares share one `<` with the equality. The sequencer
+  compares only the 32 bits it can program, so the comparator masks
+  above bit 31 now reset to 0 (bits that no compare ever used). The
+  stream ring reports a change through one registered event. A burst
+  reader without a timestamp or run-count lane drops that lane's path:
+  a request for the lane there reads samples. With the sequencer and
+  fewer than 32 sample bits, the value and mask bits above the sample
+  width, kept only for readback, move into one small memory. Reads
+  return the same values as before. The new `READBACK_RAM` parameter
+  of `fcapz_ela` and the `fcapz_debug_multi` hubs selects that memory
+  (1, the default) or keeps the bits in flip-flops (0); the Efinix
+  wrappers set 0, as should an iCE40 build, since neither family has
+  asynchronous-read LUT RAM.
+  Verilog and VHDL.
+
 - **FTDI: a failed USB transfer closes the channel for every transport on
   it.** Each refuses I/O until it connects again, which opens the channel
   afresh; before, only the transport that saw the failure (and only during
@@ -236,6 +256,32 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   word came back on the next BURST_RDATA. The word a scan shows is now
   popped on that scan's UPDATE, whatever the new command (Verilog and
   VHDL). The host's `burst_read` drains the FIFO, so it was not affected.
+
+- **EJTAG-AXI: WSTRB outside the transfer.** The bridge passed the host's
+  strobes to the bus as given, so a write to an unaligned address, or a
+  narrow INCR, FIXED or WRAP burst, could strobe bytes outside the beat's
+  transfer, which AXI forbids (a slave may write them or reject the
+  beat). Each beat's strobes are now ANDed with the lanes allowed for its
+  address, size and burst type: a `WRITE` to `0x101` with strobes `0xF`
+  writes bytes `0x101`-`0x103` only. Verilog and VHDL; the cocotb
+  AxiTrace now checks the lanes of every W beat.
+
+- **Verilog EJTAG-AXI: a CONFIG scan could swallow an AXI response.** The
+  scan after a CONFIG showed the CONFIG data but also popped a response
+  that had arrived meanwhile, so reading `CFG_AXI_STATUS` while a read was
+  in flight could lose that read's answer. A CONFIG scan now leaves the
+  response for the next scan, as the VHDL bridge already did, and like
+  VHDL a scan that shows a result no longer reports `busy` for responses
+  still owed.
+
+- **EJTAG-AXI: a burst read hid errors on all but its last beat.** The
+  burst's response was the last beat's RRESP, so a SLVERR or DECERR on an
+  earlier beat came back OKAY and `burst_read()` returned that beat's data
+  without an error. The response is now the first non-OKAY RRESP of the
+  burst, as for streaming reads (Verilog and VHDL). `burst_read()` now
+  also waits for a response that comes after the last word (a burst
+  still running at the scan after RSTART), so the error raises there
+  and not on the next command.
 
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as

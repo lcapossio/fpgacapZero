@@ -205,12 +205,26 @@ TARGETS: tuple[Target, ...] = (
     Target("trig_compare_full", "trig_compare", _TRIG_COMPARE_SRC,
            "trig_compare_full", {"W": 8, "REL_COMPARE": 1},
            (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
+    Target("trig_compare_sweep_rel", "trig_compare", _TRIG_COMPARE_SRC,
+           "trig_compare_sweep", {"W": 4, "REL_COMPARE": 1, "BOTH_MODE": 0},
+           (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
+    Target("trig_compare_sweep_both", "trig_compare", _TRIG_COMPARE_SRC,
+           "trig_compare_sweep", {"W": 4, "REL_COMPARE": 0, "BOTH_MODE": 1},
+           (RTL / "vhdl" / "core" / "trig_compare.vhd",)),
     Target(
         "jtag_burst_read",
         "jtag_burst_read",
         (RTL / "jtag_burst_read.v",),
         "jtag_burst_read_protocol",
         {"SAMPLE_W": 8, "TIMESTAMP_W": 32, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
+        (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_burst_read.vhd"),
+    ),
+    Target(
+        "jtag_burst_read_no_ts",
+        "jtag_burst_read",
+        (RTL / "jtag_burst_read.v",),
+        "jtag_burst_read_protocol",
+        {"SAMPLE_W": 8, "TIMESTAMP_W": 0, "DEPTH": 1024, "BURST_W": 256, "SEG_DEPTH": 256},
         (*_VHDL_UTIL_PKG, RTL / "vhdl" / "core" / "jtag_burst_read.vhd"),
     ),
     Target(
@@ -541,6 +555,23 @@ TARGETS: tuple[Target, ...] = (
         ),
     ),
     Target(
+        "fcapz_ejtagaxi_axi_rules",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        ("fcapz_ejtagaxi_wstrb_lanes", "fcapz_ejtagaxi_config_keeps_resp",
+         "fcapz_ejtagaxi_burst_rresp"),
+        {"FIFO_DEPTH": 16, "TIMEOUT": 1024},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
         "fcapz_ejtaguart",
         "fcapz_ejtaguart",
         (RTL / "fcapz_async_fifo.v", RTL / "fcapz_ejtaguart.v"),
@@ -627,6 +658,11 @@ COVERAGE_TARGETS = {
         "EJTAG_AXI_COCOTB_RUN",
     ),
     "fcapz_ejtagaxi_tck_order": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_axi_rules": (
         "fcapz_ejtagaxi",
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",

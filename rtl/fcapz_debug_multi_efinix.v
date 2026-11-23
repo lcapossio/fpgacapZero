@@ -115,6 +115,7 @@ module fcapz_debug_multi_efinix #(
         .ELA_DEFAULT_TRIG_EXTS(ELA_DEFAULT_TRIG_EXTS),
         .ELA_REL_COMPARES(ELA_REL_COMPARES), .ELA_DUAL_COMPARES(ELA_DUAL_COMPARES),
         .ELA_USER1_DATA_ENS(ELA_USER1_DATA_ENS), .EIO_IN_WS(EIO_IN_WS),
+        .READBACK_RAM(0),  // no async-read LUT RAM on Efinix
         .EIO_OUT_WS(EIO_OUT_WS)
     ) u_multi (
         .tck(tap_tck), .tdi(tap_tdi), .tdo(tap_tdo), .tdo_next(),

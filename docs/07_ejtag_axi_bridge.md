@@ -102,6 +102,12 @@ keeps these rules whatever the host does (bridges with `FEATURES[25]`):
   one 4 KB page.  A write burst longer than `FIFO_DEPTH` is refused too.
   A refused burst answers SLVERR (every beat, for a write) and never
   reaches the bus.
+- `WSTRB` strobes only bytes inside each beat's transfer.  The host's
+  strobes are ANDed with the lanes AXI allows for the beat's address,
+  size and burst type: a `WRITE` to `0x101` with strobes `0xF` goes out
+  as `0xE`, and a byte-wide INCR burst strobes one lane per beat.  Lanes
+  outside the transfer are dropped, not refused; a beat may end up with
+  no strobe at all.
 
 When a write times out (`TIMEOUT` cycles with no AW, W or B handshake)
 the host gets SLVERR, and the write engine carries on by itself: it
@@ -178,7 +184,7 @@ polling.
 | `0x8` | BURST_RDATA | Pop one word from burst read FIFO (the word a scan captures after a BURST_RDATA is popped on that scan's update, whatever its command) |
 | `0x9` | BURST_RSTART | Initiate burst read (starts the address phase) |
 | `0xA` | STREAM_RSTART | Start a streaming read (addr = start, payload = word count); `STREAM_EN=1` only |
-| `0xE` | CONFIG | Read bridge config register (addr selects which) |
+| `0xE` | CONFIG | Read bridge config register (addr selects which); the next scan shows it and leaves any queued AXI response for the scan after |
 | `0xF` | RESET | Reset bridge state machines (until the AXI side has acknowledged it, status `busy`, a further RESET is folded into it, no command is queued and no response is captured: wait for `busy` to clear) |
 
 **Status bits `[71:68]`:**
@@ -186,7 +192,7 @@ polling.
 | Bit | Meaning |
 |---|---|
 | 0 | `prev_valid` — `rdata`/`resp` are from a completed operation |
-| 1 | `busy` — AXI transaction in flight (should not normally be seen) |
+| 1 | `busy` — work still pending: a RESET in flight, a full command queue, or AXI responses still owed. A scan that shows a result does not count owed responses; use `CFG_AXI_STATUS[5]` to know the bus is idle |
 | 2 | `error` — sticky, last operation got non-OKAY AXI response |
 | 3 | `fifo_notempty` — burst read FIFO has data available |
 
@@ -327,6 +333,12 @@ beat per JTAG scan.
   FIFO by an aborted read count against the room until a RESET (the
   host sends one after any error).
 - `count ≤ 256` — AXI4 maximum burst length.
+
+The burst's response is the first non-OKAY `RRESP` of its beats, not
+the last beat's, so an error on any beat sets the error bit and
+`burst_read()` raises `AXIError`.  When the burst is still running at
+the scan after RSTART, the words come first and the response after the
+last one; `burst_read()` waits for it before returning.
 
 ### AXI4 burst write
 

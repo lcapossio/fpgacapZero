@@ -39,7 +39,11 @@ entity fcapz_ela is
         DUAL_COMPARE     : natural  := 1;
         USER1_DATA_EN    : natural  := 1;
         RLE_W            : natural  := 0;   -- 0 = no run-length capture, 1..16 = run-count width
-        WIDE_TRIG        : natural  := 0
+        WIDE_TRIG        : natural  := 0;
+        -- 1 = readback-only upper bits of the value/mask registers (SAMPLE_W < 32)
+        -- in a small inferred RAM (with the sequencer); 0 = in flops.  Use 0 on families without
+        -- async-read LUT RAM (iCE40, Efinix).
+        READBACK_RAM     : natural  := 1
     );
     port (
         sample_clk       : in  std_logic;
@@ -128,26 +132,31 @@ architecture rtl of fcapz_ela is
         variable mpp       : unsigned(probe_prev'range);
         variable zero_cur  : boolean;
         variable zero_prev : boolean;
+        variable eq        : boolean;
+        variable lt        : boolean;
     begin
         mp := unsigned(probe and mask);
         mv := unsigned(value and mask);
         mpp := unsigned(probe_prev and mask);
         zero_cur := mp = 0;
         zero_prev := mpp = 0;
+        -- One magnitude compare (<) plus the equality, as rtl/trig_compare.v.
+        eq := mp = mv;
+        lt := REL_COMPARE /= 0 and mp < mv;
 
         case to_integer(unsigned(mode)) is
-            when 0 => if mp = mv then return '1'; end if;
-            when 1 => if mp /= mv then return '1'; end if;
-            when 2 => if REL_COMPARE /= 0 and mp < mv then return '1'; end if;
-            when 3 => if REL_COMPARE /= 0 and mp > mv then return '1'; end if;
-            when 4 => if REL_COMPARE /= 0 and mp <= mv then return '1'; end if;
-            when 5 => if REL_COMPARE /= 0 and mp >= mv then return '1'; end if;
+            when 0 => if eq then return '1'; end if;
+            when 1 => if not eq then return '1'; end if;
+            when 2 => if lt then return '1'; end if;
+            when 3 => if REL_COMPARE /= 0 and not (lt or eq) then return '1'; end if;
+            when 4 => if REL_COMPARE /= 0 and (lt or eq) then return '1'; end if;
+            when 5 => if REL_COMPARE /= 0 and not lt then return '1'; end if;
             when 6 => if zero_prev and not zero_cur then return '1'; end if;
             when 7 => if not zero_prev and zero_cur then return '1'; end if;
             when 8 => if mp /= mpp then return '1'; end if;
             -- EQ or CHANGED: the legacy TRIG_MODE "both", single-stage
             -- comparator A only (rtl/trig_compare.v BOTH_MODE)
-            when 9 => if both_mode and (mp = mv or mp /= mpp) then return '1'; end if;
+            when 9 => if both_mode and (eq or mp /= mpp) then return '1'; end if;
             when others => null;
         end case;
         return '0';
@@ -284,6 +293,33 @@ architecture rtl of fcapz_ela is
 
     type seg_ptr_t is array (0 to NUM_SEGMENTS - 1) of natural range 0 to DEPTH - 1;
     type seg_len_t is array (0 to NUM_SEGMENTS - 1) of unsigned(PTR_W downto 0);
+    function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
+        variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
+        variable n : natural := SAMPLE_W;
+    begin
+        if n > 32 then
+            n := 32;
+        end if;
+        r(n - 1 downto 0) := v(n - 1 downto 0);
+        return r;
+    end function;
+
+    -- Reset value of an active comparator mask: ones on the bits the host
+    -- can program (the low 32, or every bit of comparator A with WIDE_TRIG),
+    -- zero above, as every ARM loads them.  Mirrors rtl/fcapz_ela.v.
+    constant NARROW_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) :=
+        expand32(x"FFFFFFFF");
+
+    function trig_mask_reset return std_logic_vector is
+    begin
+        if HAS_WIDE_TRIG then
+            return (SAMPLE_W - 1 downto 0 => '1');
+        end if;
+        return NARROW_MASK_ONES;
+    end function;
+
+    constant TRIG_MASK_ONES : std_logic_vector(SAMPLE_W - 1 downto 0) := trig_mask_reset;
+
     type reg32_array_t is array (natural range <>) of std_logic_vector(31 downto 0);
     type sample_array_t is array (natural range <>) of std_logic_vector(SAMPLE_W - 1 downto 0);
     type seq_mode_array_t is array (natural range <>) of std_logic_vector(3 downto 0);
@@ -357,9 +393,9 @@ architecture rtl of fcapz_ela is
     signal trig_cmp_mode_b        : std_logic_vector(3 downto 0) := (others => '0');
     signal trig_combine           : std_logic_vector(1 downto 0) := (others => '0');
     signal trig_value             : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal trig_mask              : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '1');
+    signal trig_mask              : std_logic_vector(SAMPLE_W - 1 downto 0) := TRIG_MASK_ONES;
     signal trig_value_b           : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-    signal trig_mask_b            : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '1');
+    signal trig_mask_b            : std_logic_vector(SAMPLE_W - 1 downto 0) := NARROW_MASK_ONES;
     signal chan_sel               : natural range 0 to 255 := 0;
     signal probe_sel              : natural range 0 to 255 := 0;
     signal decim_ratio            : unsigned(23 downto 0) := (others => '0');
@@ -372,9 +408,9 @@ architecture rtl of fcapz_ela is
     signal seq_mode_b             : seq_mode_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_combine            : seq_combine_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_value_a            : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_mask_a             : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
+    signal seq_mask_a             : sample_array_t(0 to TRIG_STAGES - 1) := (others => NARROW_MASK_ONES);
     signal seq_value_b            : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
-    signal seq_mask_b             : sample_array_t(0 to TRIG_STAGES - 1) := (others => (others => '1'));
+    signal seq_mask_b             : sample_array_t(0 to TRIG_STAGES - 1) := (others => NARROW_MASK_ONES);
     signal seq_count_target       : seq_count_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_next_state         : seq_next_array_t(0 to TRIG_STAGES - 1) := (others => (others => '0'));
     signal seq_is_final           : seq_flag_array_t(0 to TRIG_STAGES - 1) := (others => '0');
@@ -524,6 +560,33 @@ architecture rtl of fcapz_ela is
     signal aux_rle_b         : std_logic_vector(AUX_DATA_W - 1 downto 0);
     signal sel_flush_count   : natural range 0 to SEL_FLUSH_LEN - 1 := 0;
     signal jtag_rdata_mux    : std_logic_vector(31 downto 0) := (others => '0');
+
+    -- Readback-only upper bits of the value / mask registers (SAMPLE_W < 32,
+    -- with the sequencer): one small inferred memory plus a written-since-reset
+    -- bit per entry.  Mirrors the Verilog core; READBACK_RAM = 0 keeps flops.
+    -- Entries: 0 TRIG_VALUE, 1 TRIG_MASK, 2 SQ_VALUE, 3 SQ_MASK, then per
+    -- sequencer stage s: 4+4s VALUE_A, +1 MASK_A, +2 VALUE_B, +3 MASK_B.
+    constant HAS_CFG_HI : boolean := SAMPLE_W < 32 and READBACK_RAM /= 0 and TRIG_STAGES > 1;
+    constant CFG_HI_W   : positive := maximum(1, 32 - SAMPLE_W);
+    constant CFG_HI_N   : positive := 4 + 4 * TRIG_STAGES;
+    type cfg_hi_mem_t is array (0 to CFG_HI_N - 1) of std_logic_vector(CFG_HI_W - 1 downto 0);
+    signal cfg_hi_mem  : cfg_hi_mem_t;
+    signal cfg_hi_set  : std_logic_vector(CFG_HI_N - 1 downto 0) := (others => '0');
+    signal cfg_hi_hit  : std_logic;
+    signal cfg_hi_idx  : natural range 0 to CFG_HI_N - 1;
+    signal cfg_hi_word : std_logic_vector(31 downto 0);
+
+    function cfg_lo_mask_f return std_logic_vector is
+        variable m : std_logic_vector(31 downto 0) := (others => '1');
+    begin
+        if HAS_CFG_HI then
+            m := (others => '0');
+            m(SAMPLE_W - 1 downto 0) := (others => '1');
+        end if;
+        return m;
+    end function;
+    -- The flops keep only the low bits once the upper ones read from memory.
+    constant CFG_LO_MASK : std_logic_vector(31 downto 0) := cfg_lo_mask_f;
     signal jtag_rdata_i      : std_logic_vector(31 downto 0) := (others => '0');
     signal mem_we_a          : std_logic := '0';
     signal mem_we_a_q        : std_logic := '0';
@@ -618,10 +681,9 @@ architecture rtl of fcapz_ela is
     signal rel_req_sync3          : std_logic := '0';
     signal rel_ack_sample         : std_logic := '0';
     signal stream_rel_err         : std_logic := '0';  -- a release was refused since arm
-    signal stream_r_d             : unsigned(23 downto 0) := (others => '0');
-    signal stream_w_pub_d         : unsigned(23 downto 0) := (others => '0');
-    signal stream_session_d       : unsigned(7 downto 0) := (others => '0');
-    signal stream_lost_d          : unsigned(31 downto 0) := (others => '0');
+    -- Set on the clock edge that changes stream_w_pub, stream_r,
+    -- stream_session or stream_lost (rtl/fcapz_ela.v stream_ev_q).
+    signal stream_ev_q            : std_logic := '0';
     signal stream_flags_d         : std_logic_vector(3 downto 0) := (others => '0');
     signal rb_stream_w_sample       : unsigned(23 downto 0) := (others => '0');
     signal rb_stream_r_sample       : unsigned(23 downto 0) := (others => '0');
@@ -654,16 +716,7 @@ architecture rtl of fcapz_ela is
     signal capture_gen            : unsigned(15 downto 0) := (others => '0');
     signal capture_gen_rst_d      : std_logic := '0';
 
-    function expand32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
-        variable r : std_logic_vector(SAMPLE_W - 1 downto 0) := (others => '0');
-        variable n : natural := SAMPLE_W;
-    begin
-        if n > 32 then
-            n := 32;
-        end if;
-        r(n - 1 downto 0) := v(n - 1 downto 0);
-        return r;
-    end function;
+
 
     -- Assemble a SAMPLE_W value from its per-word registers (WIDE_TRIG).
     function wide_assemble(words : reg32_array_t) return std_logic_vector is
@@ -846,9 +899,7 @@ begin
     -- window the host sees counted always has its descriptor in place.
     stream_flags <= stream_rel_err & stream_hold & stream_raw & stream_on;
     stream_event_sample <= '1' when NUM_SEGMENTS > 1 and
-                                    (stream_w_pub /= stream_w_pub_d or stream_r /= stream_r_d or
-                                     stream_session /= stream_session_d or
-                                     stream_lost /= stream_lost_d or
+                                    (stream_ev_q = '1' or
                                      stream_flags /= stream_flags_d) else '0';
     stream_owned <= stream_w(STREAM_OWNED_W-1 downto 0) -
                     stream_r(STREAM_OWNED_W-1 downto 0);
@@ -1358,9 +1409,9 @@ begin
             trig_cmp_mode_b <= (others => '0');
             trig_combine <= (others => '0');
             trig_value <= (others => '0');
-            trig_mask <= (others => '1');
+            trig_mask <= TRIG_MASK_ONES;
             trig_value_b <= (others => '0');
-            trig_mask_b <= (others => '1');
+            trig_mask_b <= NARROW_MASK_ONES;
             rle_active <= '0';
             rle_post_clks <= (others => '0');
             post_clk_en <= '0';
@@ -1377,9 +1428,9 @@ begin
             seq_mode_b <= (others => (others => '0'));
             seq_combine <= (others => (others => '0'));
             seq_value_a <= (others => (others => '0'));
-            seq_mask_a <= (others => (others => '1'));
+            seq_mask_a <= (others => NARROW_MASK_ONES);
             seq_value_b <= (others => (others => '0'));
-            seq_mask_b <= (others => (others => '1'));
+            seq_mask_b <= (others => NARROW_MASK_ONES);
             seq_count_target <= (others => (others => '0'));
             seq_next_state <= (others => (others => '0'));
             seq_is_final <= (others => '0');
@@ -1422,7 +1473,7 @@ begin
                     trig_mask_b <= seq_mask_b_hold(0);
                 else
                     trig_value_b <= (others => '0');
-                    trig_mask_b <= (others => '1');
+                    trig_mask_b <= NARROW_MASK_ONES;
                 end if;
                 rle_active <= rle_active_next;
                 rle_post_clks <= rle_post_clks_stage;
@@ -1472,7 +1523,7 @@ begin
                         seq_is_final(i) <= '0';
                         seq_count_target(i) <= (others => '0');
                         seq_value_a(i) <= (others => '0');
-                        seq_mask_a(i) <= (others => '1');
+                        seq_mask_a(i) <= NARROW_MASK_ONES;
                     end if;
                     if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
                         seq_mode_b(i) <= seq_cfg_hold(i)(7 downto 4);
@@ -1483,7 +1534,7 @@ begin
                         seq_mode_b(i) <= (others => '0');
                         seq_combine(i) <= (others => '0');
                         seq_value_b(i) <= (others => '0');
-                        seq_mask_b(i) <= (others => '1');
+                        seq_mask_b(i) <= NARROW_MASK_ONES;
                     end if;
                 end loop;
             end if;
@@ -1791,10 +1842,6 @@ begin
             rb_start_ptr_sample <= 0;
             rb_seg_start_ptr_sample <= (others => 0);
             rb_seg_len_sample <= (others => (others => '0'));
-            stream_r_d <= (others => '0');
-            stream_w_pub_d <= (others => '0');
-            stream_session_d <= (others => '0');
-            stream_lost_d <= (others => '0');
             stream_flags_d <= (others => '0');
             rb_stream_w_sample <= (others => '0');
             rb_stream_r_sample <= (others => '0');
@@ -1805,10 +1852,6 @@ begin
         elsif rising_edge(sample_clk) then
             rb_done_d <= done;
             rb_seg_count_d <= seg_count;
-            stream_r_d <= stream_r;
-            stream_w_pub_d <= stream_w_pub;
-            stream_session_d <= stream_session;
-            stream_lost_d <= stream_lost;
             stream_flags_d <= stream_flags;
             rb_meta_ack_sync1 <= rb_meta_ack_toggle_jtag;
             rb_meta_ack_sync2 <= rb_meta_ack_sync1;
@@ -1944,7 +1987,10 @@ begin
     -- session and only up to the windows completed so far; a repeat is
     -- harmless.
     p_stream_sample : process(sample_clk, sample_rst)
-        variable rel_seq : unsigned(23 downto 0);
+        variable rel_seq  : unsigned(23 downto 0);
+        variable lost_inc : boolean;
+        variable rel_take : boolean;
+        variable arm_rst  : boolean;
     begin
         if sample_rst = '1' then
             stream_cfg_stage <= "00";
@@ -1958,10 +2004,24 @@ begin
             rel_req_sync2 <= '0';
             rel_req_sync3 <= '0';
             rel_ack_sample <= '0';
+            stream_ev_q <= '0';
         elsif rising_edge(sample_clk) then
             if cfg_stage_en = '1' then
                 stream_cfg_stage <= stream_cfg_hold;
             end if;
+            rel_seq := unsigned(jtag_rel_payload(23 downto 0));
+            lost_inc := stream_hold = '1' and stream_lost /= x"FFFFFFFF" and
+                        (stream_raw = '0' or comb_store_eligible = '1');
+            rel_take := (rel_req_sync2 xor rel_req_sync3) = '1' and stream_on = '1' and
+                        unsigned(jtag_rel_payload(31 downto 24)) = stream_session and
+                        rel_seq - stream_r <= stream_owned;
+            arm_rst := arm_sync_pulse = '1' or startup_arm_pending = '1' or
+                       reset_sync_pulse = '1';
+            -- An ARM / reset always moves stream_session; otherwise each
+            -- term is exactly the condition under which its register below
+            -- takes a new value.
+            stream_ev_q <= bool_to_sl(arm_rst or stream_w_d1 /= stream_w_pub or lost_inc or
+                                      (rel_take and rel_seq /= stream_r));
             rel_req_sync1 <= jtag_rel_req;
             rel_req_sync2 <= rel_req_sync1;
             rel_req_sync3 <= rel_req_sync2;
@@ -1969,24 +2029,20 @@ begin
             -- window (queued with INPUT_PIPE) has landed by then.
             stream_w_d1 <= stream_w;
             stream_w_pub <= stream_w_d1;
-            if stream_hold = '1' and stream_lost /= x"FFFFFFFF" and
-               (stream_raw = '0' or comb_store_eligible = '1') then
+            if lost_inc then
                 stream_lost <= stream_lost + 1;
             end if;
             if (rel_req_sync2 xor rel_req_sync3) = '1' then
                 -- The payload is stable: jtag_clk holds it until this
                 -- acknowledgement returns.
                 rel_ack_sample <= rel_req_sync2;
-                rel_seq := unsigned(jtag_rel_payload(23 downto 0));
-                if stream_on = '1' and
-                   unsigned(jtag_rel_payload(31 downto 24)) = stream_session and
-                   rel_seq - stream_r <= stream_owned then
+                if rel_take then
                     stream_r <= rel_seq;
                 else
                     stream_rel_err <= '1';
                 end if;
             end if;
-            if arm_sync_pulse = '1' or startup_arm_pending = '1' or reset_sync_pulse = '1' then
+            if arm_rst then
                 stream_r <= (others => '0');
                 stream_w_d1 <= (others => '0');
                 stream_w_pub <= (others => '0');
@@ -2063,14 +2119,14 @@ begin
                         seq_mask_a_hold(i) <= expand32(jtag_seq_mask_a(i));
                     else
                         seq_value_a_hold(i) <= (others => '0');
-                        seq_mask_a_hold(i) <= (others => '1');
+                        seq_mask_a_hold(i) <= NARROW_MASK_ONES;
                     end if;
                     if TRIG_STAGES > 1 and DUAL_COMPARE /= 0 then
                         seq_value_b_hold(i) <= expand32(jtag_seq_value_b(i));
                         seq_mask_b_hold(i) <= expand32(jtag_seq_mask_b(i));
                     else
                         seq_value_b_hold(i) <= (others => '0');
-                        seq_mask_b_hold(i) <= (others => '1');
+                        seq_mask_b_hold(i) <= NARROW_MASK_ONES;
                     end if;
                 end loop;
             end if;
@@ -2600,6 +2656,85 @@ begin
         end if;
     end process;
 
+    p_cfg_hi_dec : process(all)
+        variable addr : natural;
+    begin
+        addr := to_integer(unsigned(jtag_addr));
+        cfg_hi_hit <= '0';
+        cfg_hi_idx <= 0;
+        if addr = ADDR_TRIG_VALUE then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 0;
+        end if;
+        if addr = ADDR_TRIG_MASK then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 1;
+        end if;
+        if STOR_QUAL /= 0 and addr = ADDR_SQ_VALUE then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 2;
+        end if;
+        if STOR_QUAL /= 0 and addr = ADDR_SQ_MASK then
+            cfg_hi_hit <= '1'; cfg_hi_idx <= 3;
+        end if;
+        if TRIG_STAGES > 1 then
+            for st in 0 to TRIG_STAGES - 1 loop
+                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 4 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 4 + 4 * st;
+                end if;
+                if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 8 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 5 + 4 * st;
+                end if;
+                if DUAL_COMPARE /= 0 and addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 12 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 6 + 4 * st;
+                end if;
+                if DUAL_COMPARE /= 0 and addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 16 then
+                    cfg_hi_hit <= '1'; cfg_hi_idx <= 7 + 4 * st;
+                end if;
+            end loop;
+        end if;
+    end process;
+
+    g_cfg_hi : if HAS_CFG_HI generate
+        p_cfg_hi_mem : process(jtag_clk)
+        begin
+            if rising_edge(jtag_clk) then
+                if jtag_wr_en = '1' and cfg_hi_hit = '1' then
+                    cfg_hi_mem(cfg_hi_idx) <= jtag_wdata(31 downto SAMPLE_W);
+                end if;
+            end if;
+        end process;
+
+        p_cfg_hi_set : process(jtag_clk, jtag_rst)
+        begin
+            if jtag_rst = '1' then
+                cfg_hi_set <= (others => '0');
+            elsif rising_edge(jtag_clk) then
+                if jtag_wr_en = '1' and cfg_hi_hit = '1' then
+                    cfg_hi_set(cfg_hi_idx) <= '1';
+                end if;
+            end if;
+        end process;
+
+        -- Reset values: masks all ones, except SQ_MASK (0); values 0.
+        p_cfg_hi_rd : process(all)
+            variable rd : std_logic_vector(CFG_HI_W - 1 downto 0);
+        begin
+            if cfg_hi_set(cfg_hi_idx) = '1' then
+                rd := cfg_hi_mem(cfg_hi_idx);
+            elsif cfg_hi_idx mod 2 = 1 and cfg_hi_idx /= 3 then
+                rd := (others => '1');
+            else
+                rd := (others => '0');
+            end if;
+            cfg_hi_word <= (others => '0');
+            if cfg_hi_hit = '1' then
+                cfg_hi_word(31 downto SAMPLE_W) <= rd;
+            end if;
+        end process;
+    end generate;
+
+    g_no_cfg_hi : if not HAS_CFG_HI generate
+        cfg_hi_word <= (others => '0');
+    end generate;
+
     p_read_mux : process(all)
         variable addr : natural;
         variable r : std_logic_vector(31 downto 0);
@@ -2622,11 +2757,13 @@ begin
             when ADDR_POSTTRIG => r := jtag_posttrig_len;
             when ADDR_CAPTURE_LEN => r := u32(rb_window_len_jtag);
             when ADDR_TRIG_MODE => r := jtag_trig_mode;
-            when ADDR_TRIG_VALUE => r := jtag_trig_value;
-            when ADDR_TRIG_MASK => r := jtag_trig_mask;
+            when ADDR_TRIG_VALUE => r := (jtag_trig_value and CFG_LO_MASK) or cfg_hi_word;
+            when ADDR_TRIG_MASK => r := (jtag_trig_mask and CFG_LO_MASK) or cfg_hi_word;
             when ADDR_SQ_MODE => r := jtag_sq_mode when STOR_QUAL /= 0 else x"00000000";
-            when ADDR_SQ_VALUE => r := jtag_sq_value when STOR_QUAL /= 0 else x"00000000";
-            when ADDR_SQ_MASK => r := jtag_sq_mask when STOR_QUAL /= 0 else x"00000000";
+            when ADDR_SQ_VALUE =>
+                r := (jtag_sq_value and CFG_LO_MASK) or cfg_hi_word when STOR_QUAL /= 0 else x"00000000";
+            when ADDR_SQ_MASK =>
+                r := (jtag_sq_mask and CFG_LO_MASK) or cfg_hi_word when STOR_QUAL /= 0 else x"00000000";
             when ADDR_FEATURES => r := FEATURES;
             when ADDR_CHAN_SEL => r := u32(jtag_chan_sel) when NUM_CHANNELS > 1 else x"00000000";
             when ADDR_NUM_CHAN => r := u32(NUM_CHANNELS);
@@ -2725,17 +2862,17 @@ begin
                             r := jtag_seq_cfg(st);
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 4 then
-                            r := jtag_seq_value_a(st);
+                            r := (jtag_seq_value_a(st) and CFG_LO_MASK) or cfg_hi_word;
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 8 then
-                            r := jtag_seq_mask_a(st);
+                            r := (jtag_seq_mask_a(st) and CFG_LO_MASK) or cfg_hi_word;
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 12 and DUAL_COMPARE /= 0 then
-                            r := jtag_seq_value_b(st);
+                            r := (jtag_seq_value_b(st) and CFG_LO_MASK) or cfg_hi_word;
                         end if;
                         if addr = ADDR_SEQ_BASE + st * SEQ_STRIDE + 16 then
                             if DUAL_COMPARE /= 0 then
-                                r := jtag_seq_mask_b(st);
+                                r := (jtag_seq_mask_b(st) and CFG_LO_MASK) or cfg_hi_word;
                             else
                                 r := x"FFFFFFFF";
                             end if;
