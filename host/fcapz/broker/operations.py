@@ -106,6 +106,8 @@ class Job:
         self.params = params
         self.owner = owner
         self.queue_timeout = float(queue_timeout)
+        # From submit: the wait for the jobs submitted before counts too.
+        self.deadline = time.monotonic() + self.queue_timeout
         self.expect_gen = expect_gen
         self.on_event = on_event
         self.state = "new"
@@ -171,6 +173,9 @@ class Engine:
         self._snapshot_seq = itertools.count(1)
         # Jobs in submit order that have not joined a core queue yet.
         self._admission: deque[Job] = deque()
+        # An ELA/EIO controller that has answered on this connection: what
+        # a link check reads, whatever chain the failed job named.
+        self._proven: Any = None
         self._closed = False
 
     # ---- connection --------------------------------------------------
@@ -194,6 +199,7 @@ class Engine:
                 self._cv.wait(min(remaining, 0.1))
             old, self._transport = self._transport, None
             self._controllers.clear()
+            self._proven = None
         if old is not None:
             try:
                 old.close()
@@ -260,6 +266,8 @@ class Engine:
                 with self._cv:
                     self._stale = True
             raise
+        if self._proven is None and isinstance(ctrl, (Analyzer, EioController)):
+            self._proven = ctrl
         return ctrl
 
     @staticmethod
@@ -335,12 +343,18 @@ class Engine:
     def _link_alive(self, exc: BaseException, ctrl: Any) -> bool:
         """Whether the connection survived *exc*, raised on *ctrl*: logical
         failures leave it, link errors do not, and anything else is checked
-        with a VERSION read of an ELA/EIO (an EJTAG-AXI chain has no such
-        read)."""
+        with a VERSION read.
+
+        The read goes to a core that has already answered on this connection
+        when there is one, not to the one the failed job named: a chain or
+        virtual-JTAG instance that does not exist fails every read, on a
+        cable that is fine.  Without one, *ctrl* itself is read if it is an
+        ELA/EIO (an EJTAG-AXI chain has no such read)."""
         if isinstance(exc, _LOGICAL_ERRORS):
             return True
         if isinstance(exc, _LINK_ERRORS):
             return False
+        ctrl = self._proven or ctrl
         if not isinstance(ctrl, (Analyzer, EioController)):
             return not isinstance(exc, OSError)
         try:
@@ -406,7 +420,16 @@ class Engine:
             while self._admission and self._admission[0] is not job:
                 if job.cancel_event.is_set():
                     raise JobCancelled(f"job {job.id} cancelled while queued")
-                self._cv.wait(0.1)
+                remaining = job.deadline - time.monotonic()
+                if remaining <= 0:
+                    head = self._admission[0]
+                    raise CoreBusy(
+                        f"{self.spec.key()} is busy: job {job.id} waited "
+                        f"{job.queue_timeout:g} s behind job {head.id} "
+                        f"({head.kind}, client {head.owner}), which is still "
+                        "looking up its core"
+                    )
+                self._cv.wait(min(remaining, 0.1))
 
     def _leave_admission(self, job: Job) -> None:
         with self._cv:
@@ -421,7 +444,7 @@ class Engine:
 
     def _wait_turn(self, job: Job, key: tuple) -> None:
         """Wait until *job*, already in its core's queue, is at its head."""
-        deadline = time.monotonic() + job.queue_timeout
+        deadline = job.deadline
         with self._cv:
             q = self._queues[key]
             reported = None

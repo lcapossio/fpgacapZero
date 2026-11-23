@@ -16,7 +16,9 @@ once.  ``fail-connect`` in that directory makes ``connect()`` raise, and
 cable's does.
 
 Chain 3 holds a plain EIO (no manager) whose outputs read back and whose
-inputs read ``0xA5``.
+inputs read ``0xA5``.  Every access on a chain in ``missing_chains`` raises
+``RuntimeError``, as quartus_stp does for a virtual JTAG instance that is
+not there.
 """
 
 from __future__ import annotations
@@ -71,6 +73,7 @@ class FakeElaTransport(Transport):
         self.connects = 0
         self.closed = 0
         self.fail_io = False
+        self.missing_chains: set[int] = set()
         self._triggers = {0: threading.Event(), 1: threading.Event()}
         self._mgr = {
             0xF000: ((_version_tuple()[0] & 0xFF) << 24)
@@ -100,6 +103,8 @@ class FakeElaTransport(Transport):
         return False
 
     def _maybe_fail(self) -> None:
+        if self.chain in self.missing_chains:
+            raise RuntimeError(f"no virtual JTAG instance {self.chain}")
         if self.fail_io or self._ctl("fail-io"):
             if self.fail_io != "always":
                 self.fail_io = False

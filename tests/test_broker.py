@@ -300,6 +300,44 @@ def test_a_wrong_chain_is_that_clients_error_only(engine):
     assert a.wait(5)["core"].image_gen == 1 and t.connects == 1 and t.closed == 0
 
 
+def test_a_chain_that_is_not_there_is_that_clients_error_only(engine):
+    # quartus_stp: a missing virtual JTAG instance fails every access on it.
+    # The link check must read a core that has answered, not that chain.
+    t = engine.fake
+    t.missing_chains = {7}
+    a = _capture(engine, "a")
+    _wait_for(_state(a, "running"))
+    with pytest.raises(RuntimeError, match="no virtual JTAG instance 7"):
+        engine.submit("eio", {"chain": 7, "op": "read"}, owner="b").wait(5)
+    assert engine.status()["connected"]
+    assert engine.submit("eio", {"chain": 3, "op": "read"}, owner="c").wait(5)["value"] == 0xA5
+    t.trigger(0)
+    assert a.wait(5)["core"].image_gen == 1 and t.connects == 1 and t.closed == 0
+
+
+def test_a_job_waiting_for_earlier_ones_to_find_their_core_has_a_deadline(engine):
+    holder = _capture(engine, "h")
+    _wait_for(_state(holder, "running"))
+    find = engine._get_controller
+
+    def slow_find(job, kind, *, cached):
+        if job.owner == "slow":
+            time.sleep(1.5)
+        return find(job, kind, cached=cached)
+
+    engine._get_controller = slow_find
+    slow = _capture(engine, "slow")
+    t0 = time.monotonic()
+    late = _capture(engine, "late", queue_timeout=0.3)
+    with pytest.raises(CoreBusy, match=f"behind job {slow.id}"):
+        late.wait(5)
+    assert time.monotonic() - t0 < 1.2, "failed at its deadline, not after the slow job"
+    assert engine.fake.arms[0] == 1, "the expired job never ran"
+    engine.cancel(slow.id)
+    engine.fake.trigger(0)
+    holder.wait(5)
+
+
 def test_a_wrong_chain_as_the_first_job_keeps_the_target_usable(engine):
     with pytest.raises(RuntimeError, match="no EIO slot"):
         engine.submit("eio", {"chain": 1, "op": "read"}, owner="b").wait(5)
