@@ -20,7 +20,7 @@ and waits briefly for it to stop before re-raising.
 
 from __future__ import annotations
 
-import contextlib
+import errno
 import itertools
 import os
 import queue
@@ -84,32 +84,20 @@ class BrokerCapture:
         return a
 
 
-def _abort(conn: Any) -> None:
-    """Close *conn* so that a thread blocked reading it returns."""
-    if os.name != "nt":
-        # On POSIX close() does not end another thread's recv on the socket
-        # (and the peer would not see us leave until this process exits);
-        # shutdown() does.
-        with contextlib.suppress(OSError, ValueError):
-            sock = socket.socket(fileno=os.dup(conn.fileno()))
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            finally:
-                sock.close()
-    with contextlib.suppress(OSError):
-        conn.close()
+_abort = wire.abort_connection
+
+_CONNECT_AGAIN = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINPROGRESS,
+                  errno.EALREADY, errno.EINTR)
 
 
 def _connect_info(
     directory: Path, timeout: float | None = None
 ) -> tuple[Any, dict[str, Any]] | None:
     """An authenticated connection to the runtime ``runtime.json`` names,
-    or None when none answers within *timeout* (``AUTH_TIMEOUT_S``).
-
-    Connecting and the handshake both run in a helper thread: a runtime that
-    stops accepting (a busy pipe, a full socket backlog) or stalls in the
-    handshake must not hold the caller.  A connection that comes too late is
-    closed by that thread."""
+    or None when none answers within *timeout* (``AUTH_TIMEOUT_S``): a
+    runtime that stops accepting (a full socket backlog, a busy pipe) or
+    stalls in the handshake must not hold the caller, nor leave a socket or
+    a thread behind each time it is tried."""
     info = read_info(directory)
     if not info:
         return None
@@ -118,6 +106,79 @@ def _connect_info(
         address, family = info["address"], info["family"]
     except (KeyError, ValueError, TypeError):
         return None
+    if timeout is None:
+        timeout = AUTH_TIMEOUT_S
+    if family == "AF_UNIX":
+        conn = _unix_connect(address, key, timeout)
+    else:
+        conn = _pipe_connect(address, family, key, timeout)
+    return None if conn is None else (conn, info)
+
+
+def _unix_connect(address: Any, key: bytes, timeout: float) -> Any:
+    """Connect to a Unix socket and authenticate, all within *timeout*.
+
+    The socket is this function's own and non-blocking while it connects (a
+    full backlog answers EAGAIN, tried again until the deadline), so it is
+    closed whatever happens.  The handshake blocks under a timer that shuts
+    the socket down at the deadline; the timer ends with the call."""
+    deadline = time.monotonic() + timeout
+    try:
+        sock = socket.socket(socket.AF_UNIX)
+    except OSError:
+        return None
+    try:
+        sock.setblocking(False)
+        while True:
+            err = sock.connect_ex(address)
+            if err in (0, errno.EISCONN):
+                break
+            if err not in _CONNECT_AGAIN or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+        sock.setblocking(True)
+        conn = mpc.Connection(sock.detach())
+    except Exception:  # noqa: BLE001 - nobody there
+        return None
+    finally:
+        sock.close()        # nothing to close once detached
+    lock = threading.Lock()
+    state = {"late": False, "done": False}
+
+    def expire() -> None:
+        with lock:
+            if not state["done"]:
+                state["late"] = True
+                _abort(conn)        # ends the handshake's read
+
+    timer = threading.Timer(max(0.0, deadline - time.monotonic()), expire)
+    timer.name = "fcapz-broker-connect"
+    timer.daemon = True
+    timer.start()
+    try:
+        mpc.answer_challenge(conn, key)
+        mpc.deliver_challenge(conn, key)
+        ok = True
+    except Exception:  # noqa: BLE001 - not our runtime, gone, or too late
+        ok = False
+    finally:
+        timer.cancel()
+    with lock:
+        state["done"] = True
+        if ok and not state["late"]:
+            return conn
+        _abort(conn)
+    return None
+
+
+def _pipe_connect(address: Any, family: str, key: bytes, timeout: float) -> Any:
+    """Connect to a named pipe and authenticate, in a helper thread the
+    caller leaves after *timeout*.
+
+    The thread does not stay: a pipe that is not there fails at once, a busy
+    one makes ``multiprocessing`` give up after its own 20 seconds, and a
+    connection is closed here at the timeout, which ends the handshake's
+    read; one that comes later is closed by the thread."""
     lock = threading.Lock()
     state: dict[str, Any] = {"conn": None, "ok": False, "abandoned": False}
 
@@ -144,11 +205,11 @@ def _connect_info(
 
     t = threading.Thread(target=work, name="fcapz-broker-connect", daemon=True)
     t.start()
-    t.join(AUTH_TIMEOUT_S if timeout is None else timeout)
+    t.join(timeout)
     with lock:
         conn = state["conn"]
         if state["ok"]:
-            return conn, info
+            return conn
         state["abandoned"] = True
     if conn is not None:
         _abort(conn)

@@ -775,6 +775,16 @@ def test_a_runtime_that_stops_accepting_does_not_hold_the_client(tmp_path, monke
         with pytest.raises(BrokerNotRunning):
             BrokerSession.connect(rdir, autostart=False)
         assert time.monotonic() - t0 < 5.0
+        # Nor does each try leave a thread and its socket behind.
+        monkeypatch.setattr(broker_session, "AUTH_TIMEOUT_S", 0.1)
+        fds = "/proc/self/fd"
+        before = len(os.listdir(fds)) if os.path.isdir(fds) else None
+        for _ in range(3):
+            with pytest.raises(BrokerNotRunning):
+                BrokerSession.connect(rdir, autostart=False)
+        assert not [t for t in threading.enumerate() if t.name == "fcapz-broker-connect"], \
+            "a connect is still in flight"
+        assert before is None or len(os.listdir(fds)) <= before, "sockets were left open"
     finally:
         for c in fill:
             c.close()
