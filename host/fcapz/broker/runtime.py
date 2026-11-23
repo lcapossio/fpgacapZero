@@ -54,7 +54,7 @@ LOCK_NAME = "runtime.lock"
 LOG_NAME = "runtime.log"
 SOCK_NAME = "broker.sock"
 MAX_FRAME = 64 << 20
-#: Longest Unix socket path used (sun_path holds 104 bytes on macOS).
+#: Longest Unix socket path used, in bytes (sun_path holds 104 on macOS).
 SOCK_PATH_MAX = 100
 #: How often a runtime checks that its directory still names it, and how many
 #: checks in a row must fail before it leaves.
@@ -155,6 +155,11 @@ def _digest(directory: Path) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _socket_path_fits(path: str) -> bool:
+    # sun_path counts bytes, and a path may hold multi-byte characters.
+    return len(os.fsencode(path)) <= SOCK_PATH_MAX
+
+
 def endpoint(directory: Path, nonce: str) -> tuple[str, str]:
     """(family, address) of a new IPC endpoint for *directory*.
 
@@ -165,13 +170,13 @@ def endpoint(directory: Path, nonce: str) -> tuple[str, str]:
     if os.name == "nt":
         return "AF_PIPE", rf"\\.\pipe\fcapz-broker-{_digest(directory)}-{nonce}"
     path = str(directory / SOCK_NAME)
-    if len(path) <= SOCK_PATH_MAX:
+    if _socket_path_fits(path):
         return "AF_UNIX", path
     for base in (None, "/tmp"):
         private = tempfile.mkdtemp(prefix="fcapz-broker-", dir=base)
         os.chmod(private, 0o700)
         path = str(Path(private) / SOCK_NAME)
-        if len(path) <= SOCK_PATH_MAX:
+        if _socket_path_fits(path):
             return "AF_UNIX", path
         os.rmdir(private)
     raise OSError(f"no directory short enough for the broker's socket ({path})")

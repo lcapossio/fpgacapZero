@@ -11,6 +11,7 @@ import json
 import ntpath
 import os
 import posixpath
+import shutil
 import signal
 import socket
 import subprocess
@@ -722,6 +723,29 @@ def test_a_deep_directory_gets_its_socket_in_a_private_one(tmp_path, monkeypatch
     finally:
         for p in made:
             p.rmdir()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix socket paths")
+def test_the_socket_path_limit_counts_bytes():
+    base = Path(tempfile.mkdtemp(dir="/tmp"))
+    try:
+        deep = base / ("\u00e9" * 45)       # two bytes each in UTF-8
+        path = str(deep / "broker.sock")
+        assert len(path) <= SOCK_PATH_MAX < len(os.fsencode(path))
+        deep.mkdir()
+        family, address = endpoint(deep, "n")
+        private = Path(address).parent
+        try:
+            assert private != deep, "a path of over 100 bytes was used for the socket"
+            assert len(os.fsencode(address)) <= SOCK_PATH_MAX
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(address)
+            os.unlink(address)
+        finally:
+            if private != deep:
+                private.rmdir()
+    finally:
+        shutil.rmtree(base)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a full Unix socket backlog")
