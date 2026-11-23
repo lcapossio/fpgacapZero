@@ -42,6 +42,25 @@ _USB_BLASTER_AUTO = ("", "auto", "xc7a100t.tap")
 _LOOPBACK = ("", "localhost", "127.0.0.1", "::1", "[::1]")
 
 
+# The options that may name a file.
+_PATH_FIELDS = ("quartus_stp", "serial_port")
+
+
+def is_relative_path(value: str, pathmod: Any = os.path) -> bool:
+    """Whether *value* names a file relative to the working directory, and
+    not a bare name: it holds a separator, starts with a dot, or (Windows)
+    has a drive without a root, as ``C:quartus_stp.exe`` does."""
+    value = str(value)
+    if pathmod.isabs(value):
+        return False
+    seps = [s for s in (pathmod.sep, pathmod.altsep) if s]
+    return (
+        any(s in value for s in seps)
+        or value.startswith(".")
+        or bool(pathmod.splitdrive(value)[0])
+    )
+
+
 def _host(host: str) -> str:
     """*host* with the loopback spellings folded into one."""
     h = str(host or "").strip().lower()
@@ -79,15 +98,16 @@ class TargetSpec:
         return asdict(self)
 
     def resolved(self) -> TargetSpec:
-        """This spec with its paths made absolute, for the runtime, whose
-        working directory is not the caller's.  A bare program name
-        (``quartus_stp``) is left to the search path."""
-        stp = self.quartus_stp
-        if stp and not os.path.isabs(stp) and (
-            os.sep in stp or (os.altsep and os.altsep in stp)
-        ):
-            return replace(self, quartus_stp=os.path.abspath(stp))
-        return self
+        """This spec with its paths (``quartus_stp``, ``serial_port``) made
+        absolute, for the runtime, whose working directory is not the
+        caller's.  A bare name (``quartus_stp`` on the search path, ``COM3``)
+        is left alone."""
+        changes = {}
+        for name in _PATH_FIELDS:
+            value = getattr(self, name)
+            if value and is_relative_path(value):
+                changes[name] = os.path.abspath(value)
+        return replace(self, **changes) if changes else self
 
     def identity(self) -> tuple:
         """The physical cable and device, with the CLI's defaults resolved."""

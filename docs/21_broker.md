@@ -168,8 +168,9 @@ the network.  `FCAPZ_BROKER_IDLE_EXIT` sets how many seconds the broker
 stays up after its last client (default 60).
 
 The broker runs in its own directory, with the environment of the command
-that started it.  A relative `--quartus-stp` path and relative `PYTHONPATH`
-entries are taken from the directory of the command that names them.
+that started it.  Relative `--quartus-stp` and `--serial-port` paths and
+relative `PYTHONPATH` entries are taken from the directory of the command
+that names them.
 
 Programs that share a board must use the same broker directory, so run them
 as the same user with the same `FCAPZ_BROKER_DIR`.  On Linux the default
