@@ -30,6 +30,7 @@ import logging
 import os
 import queue
 import secrets
+import socket
 import sys
 import tempfile
 import threading
@@ -228,6 +229,23 @@ class ElectionLock:
         self._f.close()
 
 
+def lock_held(directory: Path) -> bool:
+    """Whether a runtime holds *directory*'s election lock: one that
+    answers, one still starting, or one that is closing its cables after it
+    has withdrawn ``runtime.json``."""
+    path = directory / LOCK_NAME
+    if not path.exists():
+        return False
+    try:
+        probe = ElectionLock(path)
+    except OSError:
+        return False
+    try:
+        return not probe.try_acquire()
+    finally:
+        probe.close()
+
+
 def default_transport_factory() -> Callable[[TargetSpec], Any]:
     """Build transports as the CLI does.  ``FCAPZ_BROKER_TRANSPORT_FACTORY``
     (``module:function``) replaces it, for tests."""
@@ -354,6 +372,18 @@ class _Client:
                     raise wire.BrokerError(
                         f"{busy} job(s) are running; stop with force to cancel them"
                     )
+                # A connected client may be between two jobs (a capture's
+                # probe and its capture) or about to send one.
+                others = self.rt.other_clients(self)
+                deadline = time.monotonic() + 0.5   # one may just be leaving
+                while others and not msg.get("force") and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                    others = self.rt.other_clients(self)
+                if others and not msg.get("force"):
+                    raise wire.BrokerError(
+                        f"{len(others)} other client(s) are connected "
+                        f"({', '.join(others)}); stop with force to drop them"
+                    )
                 self._reply(rid, stopping=True)
                 self.rt.stop(delay=0.2)
             else:
@@ -439,6 +469,9 @@ class Runtime:
         # Set (with ``_lock``) once the runtime has decided to stop: no new
         # client is taken from then on.
         self._refusing = False
+        # Set (with ``_lock``) when the engines are being closed: no engine
+        # is created from then on.
+        self._closing = False
         self.family: str | None = None
         self.address: str | None = None
 
@@ -461,6 +494,9 @@ class Runtime:
         """
         ident = spec.identity()
         with self._lock:
+            if self._closing:
+                # Created now, it would open a cable nobody closes.
+                raise RuntimeError("the broker is shutting down")
             eng = self._engines.get(ident)
             if eng is not None:
                 if eng.spec.settings() != spec.settings():
@@ -486,6 +522,22 @@ class Runtime:
     def drop_client(self, client: _Client) -> None:
         with self._lock:
             self._clients.pop(client.id, None)
+
+    def other_clients(self, client: _Client) -> list[str]:
+        """The clients that said hello, but for *client*, as text."""
+        with self._lock:
+            return [
+                f"{c.id} pid {c.pid} {c.name or ''}".rstrip()
+                for c in self._clients.values() if c is not client and c.hello
+            ]
+
+    def close_engines(self) -> None:
+        """Close every engine; none is created afterwards."""
+        with self._lock:
+            self._closing = True
+            engines = list(self._engines.values())
+        for eng in engines:
+            eng.close()
 
     def identity(self) -> dict[str, Any]:
         return {
@@ -520,16 +572,40 @@ class Runtime:
             if delay:
                 time.sleep(delay)
             self._stopping.set()
-            try:  # wake accept(): a bare connection, closed at once
+            # Wake accept() with a bare connection, closed at once.  A Unix
+            # socket whose path is gone cannot be reached this way: there
+            # accept() times out instead (see serve).
+            try:
                 mpc.Client(self.address, self.family).close()
             except Exception:  # noqa: BLE001 - accept is not waiting
                 pass
 
         threading.Thread(target=go, daemon=True).start()
 
+    def _owns_directory(self) -> bool:
+        """Whether ``runtime.json`` still names this runtime."""
+        try:
+            info = read_info(self.dir)
+        except wire.BrokerError:
+            return False
+        return bool(info) and info.get("runtime_id") == self.runtime_id
+
     def _idle_watch(self) -> None:
         idle_since = time.monotonic()
+        next_check = idle_since + OWN_CHECK_S
+        misses = 0
         while not self._stopping.wait(0.2):
+            # A runtime whose directory was removed (a deleted
+            # XDG_RUNTIME_DIR), or names another runtime, can be found by
+            # no client: it leaves, busy or not, and frees its cables.
+            if time.monotonic() >= next_check:
+                next_check = time.monotonic() + OWN_CHECK_S
+                misses = 0 if self._owns_directory() else misses + 1
+                if misses >= OWN_CHECK_MISSES:
+                    log.warning("%s no longer names this runtime: exiting",
+                                self.dir / INFO_NAME)
+                    self.stop()
+                    return
             # Decided with the lock the accept loop registers clients under:
             # a client is either seen here or refused, never dropped.
             with self._lock:
@@ -597,6 +673,11 @@ class Runtime:
             if self.family == "AF_UNIX" and os.path.exists(self.address):
                 os.unlink(self.address)  # a dead runtime's: we hold the lock
             listener = mpc.Listener(self.address, self.family, backlog=16)
+            # A Unix socket is woken through its path, which may be removed
+            # under us: accept() there returns every half second.
+            sock = getattr(getattr(listener, "_listener", None), "_socket", None)
+            if isinstance(sock, socket.socket):
+                sock.settimeout(0.5)
             self._write_info()
             log.info("runtime %s (pid %d, fcapz %s) on %s", self.runtime_id,
                      os.getpid(), __version__, self.address)
@@ -604,9 +685,11 @@ class Runtime:
             while not self._stopping.is_set():
                 try:
                     conn = listener.accept()
-                except OSError:
+                except OSError as exc:
                     if self._stopping.is_set():
                         break
+                    if isinstance(exc, (TimeoutError, socket.timeout)):
+                        continue
                     log.warning("accept failed", exc_info=True)
                     time.sleep(0.1)
                     continue
@@ -648,8 +731,7 @@ class Runtime:
                     except OSError:
                         pass
             self._remove_info()
-            for eng in self.engines():
-                eng.close()
+            self.close_engines()
             election.close()
             log.info("runtime %s stopped", self.runtime_id)
         return 0

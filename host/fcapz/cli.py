@@ -8,6 +8,7 @@ import dataclasses
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from .analyzer import (
@@ -457,7 +458,10 @@ def build_parser() -> argparse.ArgumentParser:
     broker_stop = broker_sub.add_parser("stop", help="Stop the running broker")
     broker_stop.add_argument(
         "--force", action="store_true",
-        help="Stop even with jobs running (they are cancelled)",
+        help=(
+            "Stop even with jobs running (they are cancelled) or other "
+            "programs connected (they lose the broker)"
+        ),
     )
 
     sub.add_parser(
@@ -1511,11 +1515,29 @@ def _run_broker_admin(args: argparse.Namespace) -> int:
     try:
         session = BrokerSession.connect(autostart=False, name=f"fcapz broker {args.broker_cmd}")
     except BrokerNotRunning as exc:
-        if args.broker_cmd == "status" and args.json:
-            print(json.dumps({"running": False}))
+        # A runtime that has withdrawn runtime.json may still be closing
+        # its cables.
+        stopping = BrokerSession.shutting_down()
+        if args.broker_cmd == "stop":
+            if stopping:
+                deadline = time.monotonic() + 20.0
+                while BrokerSession.shutting_down():
+                    if time.monotonic() >= deadline:
+                        print("error: the fcapz broker is still shutting down",
+                              file=sys.stderr)
+                        return 1
+                    time.sleep(0.1)
+                print("the fcapz broker was shutting down: it has stopped")
+            else:
+                print(str(exc))
+            return 0
+        if args.json:
+            print(json.dumps({"running": False, "stopping": stopping}))
+        elif stopping:
+            print("the fcapz broker is shutting down (closing its cables)")
         else:
             print(str(exc))
-        return 0 if args.broker_cmd == "stop" else 1
+        return 1
     except BrokerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

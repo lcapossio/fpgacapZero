@@ -41,6 +41,7 @@ from .runtime import (
     check_dir,
     default_dir,
     ensure_dir,
+    lock_held,
     read_info,
 )
 
@@ -437,6 +438,14 @@ class BrokerSession:
     # ---- operations ----------------------------------------------------
 
     @staticmethod
+    def shutting_down(directory: Path | str | None = None) -> bool:
+        """Whether a runtime holds the directory without answering: it is
+        closing its cables after a stop or an idle exit (or, for an instant,
+        starting)."""
+        d = Path(os.path.abspath(directory)) if directory is not None else default_dir()
+        return lock_held(d)
+
+    @staticmethod
     def _target(target: TargetSpec | dict[str, Any]) -> dict[str, Any]:
         spec = target if isinstance(target, TargetSpec) else TargetSpec.from_dict(target)
         return spec.resolved().to_dict()
@@ -536,7 +545,8 @@ class BrokerSession:
     def stop(self, *, force: bool = False, wait: float = STOP_WAIT_S) -> bool:
         """Stop the runtime.  True once its process has exited: its cables
         are closed and the next client starts a new runtime.  False if it is
-        still shutting down after *wait* seconds."""
+        still shutting down after *wait* seconds.  Without *force* the
+        runtime refuses while jobs run or other clients are connected."""
         self.request("stop", force=force)
         return self._gone.wait(wait)
 

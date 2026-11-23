@@ -54,6 +54,7 @@ from fcapz.broker.runtime import (  # noqa: E402
     Runtime,
     endpoint,
     ensure_dir,
+    lock_held,
     read_info,
 )
 
@@ -731,6 +732,58 @@ def test_a_spawn_that_never_published_is_stopped_when_its_start_fails(tmp_path, 
     with pytest.raises(BrokerStartError, match="did not answer"):
         BrokerSession.connect(rdir, start_timeout=0.5)
     assert spawn is not slow_spawn and procs[0].wait(10) is not None
+
+
+def test_shutdown_opens_no_new_cable(tmp_path):
+    # A connected client's first job for another board, sent while the
+    # runtime closes its engines, must not open a cable nobody closes.
+    made = []
+
+    def factory(spec):
+        made.append(FakeElaTransport())
+        return made[-1]
+
+    rt = Runtime(tmp_path / "rt", transport_factory=factory)
+    eng = rt.engine_for(TargetSpec())
+    eng.submit("eio", {"chain": 3, "op": "read"}, owner="a").wait(5)
+    rt.close_engines()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        rt.engine_for(TargetSpec(tap="xc7a35t"))
+    assert [t.closed for t in made] == [1] and not rt.engines()[1:]
+
+
+def test_a_runtime_whose_directory_no_longer_names_it_exits(broker_env):
+    # A removed runtime directory (XDG_RUNTIME_DIR at logout) leaves a
+    # runtime no client can find, or wake through its socket path: it must
+    # leave on its own, clients or not, and free the cable.
+    rdir, _ = broker_env
+    with BrokerSession.connect(rdir) as s:
+        _use_the_cable(s)
+        pid = s.runtime_pid
+        info = read_info(rdir)
+
+        def remove():
+            with contextlib.suppress(PermissionError):
+                (rdir / INFO_NAME).unlink()
+            return not (rdir / INFO_NAME).exists()
+
+        _wait_for(remove, what="runtime.json removed")
+        if info["family"] == "AF_UNIX":
+            os.unlink(info["address"])
+        _wait_for(lambda: not _alive(pid), timeout=20, what="the orphan to exit")
+        _wait_for(lambda: not lock_held(rdir), what="the lock to be free")
+
+
+def test_stop_spares_other_clients_unless_forced(broker_env):
+    rdir, _ = broker_env
+    with BrokerSession.connect(rdir, name="worker") as worker:
+        with BrokerSession.connect(rdir, name="admin") as admin:
+            with pytest.raises(wire.BrokerError, match="1 other client.*worker"):
+                admin.stop()
+            _use_the_cable(worker)
+            assert admin.stop(force=True)
+        with pytest.raises(BrokerConnectionLost):
+            _use_the_cable(worker)
 
 
 def test_paths_are_the_callers_not_the_runtimes(tmp_path, monkeypatch):
