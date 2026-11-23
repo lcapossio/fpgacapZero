@@ -22,8 +22,11 @@ Cores on the same cable run interleaved: the cable is the transport's own
 access and released between trigger polls.  ``probe`` reads registers only
 and takes no core ownership.
 
-A job that has not reached the head of its queue by its deadline fails with
-:class:`~fcapz.broker.wire.CoreBusy`.  Cancelling a job (or its client going
+A job still waiting for other jobs at its deadline (its queue timeout,
+counted from submit) fails with :class:`~fcapz.broker.wire.CoreBusy` and
+never runs, whatever it waits for: the jobs submitted before it, the
+connection another job is looking a core up on, or its core.  The time it
+takes to find its own core is not waiting.  Cancelling a job (or its client going
 away) stops only that job, and the job keeps the core until its own access
 has stopped; a capture cancelled while it waits for its trigger is driven
 idle first.  A failure that the link itself caused marks the connection
@@ -180,9 +183,10 @@ class Engine:
 
     # ---- connection --------------------------------------------------
 
-    def _connect_locked(self) -> None:
+    def _connect_locked(self, job: Job) -> None:
         """With ``_conn_lock``: reconnect if stale, once the jobs still on
-        the old connection have ended."""
+        the old connection have ended (*job* waits for them no longer than
+        its own deadline allows)."""
         with self._cv:
             if self._closed:
                 raise RuntimeError("the broker is shutting down")
@@ -190,6 +194,7 @@ class Engine:
                 return
             deadline = time.monotonic() + RECOVERY_WAIT_S
             while self._holders:
+                self._check_waiting(job, "for the connection to recover")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError(
@@ -213,6 +218,32 @@ class Engine:
             self.image_gen += 1
         log.info("target %s: connection %d", self.spec.key(), self.image_gen)
 
+    def _check_waiting(self, job: Job, what: str) -> None:
+        """Raise if *job* was cancelled, or is past its deadline, while it
+        waits *what*."""
+        if job.cancel_event.is_set():
+            raise JobCancelled(f"job {job.id} cancelled while queued")
+        if time.monotonic() >= job.deadline:
+            raise CoreBusy(
+                f"{self.spec.key()} is busy: job {job.id} waited "
+                f"{job.queue_timeout:g} s {what}"
+            )
+
+    def _lock_connection(self, job: Job) -> None:
+        """Take ``_conn_lock`` for *job*, which another job may hold while
+        it opens the cable or looks its core up: no longer than the job's
+        deadline, and not at all once that has passed.  A job that gets it
+        only after its deadline gives it back and fails."""
+        while True:
+            self._check_waiting(job, "for another job to look up its core")
+            if self._conn_lock.acquire(timeout=0.05):
+                break
+        try:
+            self._check_waiting(job, "for another job to look up its core")
+        except BaseException:
+            self._conn_lock.release()
+            raise
+
     def _hold(self, job: Job) -> None:
         with self._cv:
             self._holders += 1
@@ -233,14 +264,17 @@ class Engine:
         instance = p.get("instance")
         base_addr = int(p.get("base_addr") or 0)
         req = (kind, chain, instance, base_addr)
-        with self._conn_lock:
-            self._connect_locked()
+        self._lock_connection(job)
+        try:
+            self._connect_locked(job)
             ctrl = self._controllers.get(req) if cached else None
             if ctrl is None:
                 ctrl = self._new_controller(kind, chain, instance, base_addr)
                 if cached:
                     self._controllers[req] = ctrl
             self._hold(job)
+        finally:
+            self._conn_lock.release()
         return ctrl, self._core_key(kind, ctrl, base_addr)
 
     def _new_controller(self, kind, chain, instance, base_addr):
@@ -253,8 +287,9 @@ class Engine:
             ctrl = EjtagAxiController(t, chain=self._axi_chain(chain))
         else:
             raise ValueError(f"unknown core kind {kind!r}")
+        opening = self._needs_open
         try:
-            if self._needs_open:
+            if opening:
                 ctrl.connect()
                 self._needs_open = False
             else:
@@ -262,7 +297,7 @@ class Engine:
         except Exception as exc:
             # A wrong chain or a missing core is this job's error: only a
             # link that no longer answers takes the connection down.
-            if not self._link_alive(exc, ctrl):
+            if not self._link_alive(exc, ctrl, opening=opening):
                 with self._cv:
                     self._stale = True
             raise
@@ -340,21 +375,27 @@ class Engine:
             job.done_event.set()
             job._emit({"event": "end", "state": job.state})
 
-    def _link_alive(self, exc: BaseException, ctrl: Any) -> bool:
+    def _link_alive(self, exc: BaseException, ctrl: Any, *, opening: bool = False) -> bool:
         """Whether the connection survived *exc*, raised on *ctrl*: logical
         failures leave it, link errors do not, and anything else is checked
         with a VERSION read.
 
-        The read goes to a core that has already answered on this connection
-        when there is one, not to the one the failed job named: a chain or
-        virtual-JTAG instance that does not exist fails every read, on a
-        cable that is fine.  Without one, *ctrl* itself is read if it is an
-        ELA/EIO (an EJTAG-AXI chain has no such read)."""
+        The read goes to a core that has already answered on this connection,
+        never to the one the failed job named: a chain or virtual-JTAG
+        instance that does not exist fails every read, on a cable that is
+        fine.  When none has (only EJTAG-AXI jobs ran, and a bridge has no
+        such read) there is nothing to check with: an I/O error then counts
+        as the link's, anything else as the job's own.  The one exception is
+        the job that opens the connection (*opening*): nobody else is on it
+        yet, so its own core is read."""
         if isinstance(exc, _LOGICAL_ERRORS):
             return True
         if isinstance(exc, _LINK_ERRORS):
             return False
-        ctrl = self._proven or ctrl
+        probe = self._proven
+        if probe is None and opening:
+            probe = ctrl
+        ctrl = probe
         if not isinstance(ctrl, (Analyzer, EioController)):
             return not isinstance(exc, OSError)
         try:

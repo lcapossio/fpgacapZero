@@ -44,6 +44,7 @@ from fcapz.broker import (  # noqa: E402
     TargetMismatch,
     TargetSpec,
 )
+from fcapz.broker import operations as broker_operations  # noqa: E402
 from fcapz.broker import session as broker_session  # noqa: E402
 from fcapz.broker import wire  # noqa: E402
 from fcapz.broker.operations import Engine  # noqa: E402
@@ -337,6 +338,75 @@ def test_a_job_waiting_for_earlier_ones_to_find_their_core_has_a_deadline(engine
     engine.cancel(slow.id)
     engine.fake.trigger(0)
     holder.wait(5)
+
+
+def test_a_job_waiting_for_the_connection_has_a_deadline(engine):
+    # A probe skips the queues and holds the connection while it looks its
+    # core up.  A job behind it must fail at its deadline and never run:
+    # not wait without limit, then find its core free and go.
+    t = engine.fake
+    engine.submit("eio", {"chain": 3, "op": "read"}, owner="a").wait(5)
+    new = engine._new_controller
+    inside = threading.Event()
+
+    def slow_new(kind, chain, instance, base_addr):
+        if kind == "ela":
+            inside.set()
+            time.sleep(0.8)
+        return new(kind, chain, instance, base_addr)
+
+    engine._new_controller = slow_new
+    probe = engine.submit("probe", {"core": "ela"}, owner="p")
+    assert inside.wait(5)
+    t0 = time.monotonic()
+    late = engine.submit("eio", {"chain": 3, "op": "write", "value": 0x55}, owner="b",
+                         queue_timeout=0.1)
+    with pytest.raises(CoreBusy, match="look up its core"):
+        late.wait(5)
+    assert time.monotonic() - t0 < 0.6, "failed at its deadline, not after the probe"
+    probe.wait(5)
+    cancelled = engine.submit("probe", {"core": "ela"}, owner="p")
+    again = engine.submit("eio", {"chain": 3, "op": "write", "value": 0x66}, owner="b")
+    time.sleep(0.1)
+    assert engine.cancel(again.id)
+    with pytest.raises(JobCancelled):
+        again.wait(0.5)         # while the probe still holds the connection
+    cancelled.wait(5)
+    time.sleep(0.2)
+    assert t.eio[0x0100] == 0, "neither job ever ran"
+
+
+def test_a_chain_that_is_not_there_leaves_an_axi_only_connection(engine, monkeypatch):
+    # Only EJTAG-AXI jobs have run: no ELA or EIO has answered that a link
+    # check could read.  The missing chain must not be read instead.
+    class Bridge:
+        def __init__(self, transport, chain=4):
+            self._t, self._chain = transport, chain
+
+        def connect(self):
+            self._t.connect()
+
+        def attach(self):
+            pass
+
+        def axi_read(self, addr):
+            return 0x1234
+
+    monkeypatch.setattr(broker_operations, "EjtagAxiController", Bridge)
+    t = engine.fake
+    t.missing_chains = {7}
+    first = engine.submit("axi", {"op": "read", "addr": 0}, owner="a").wait(5)
+    assert first["value"] == 0x1234 and first["core"].image_gen == 1
+    with pytest.raises(RuntimeError, match="no virtual JTAG instance 7"):
+        engine.submit("eio", {"chain": 7, "op": "read"}, owner="b").wait(5)
+    assert engine.status()["connected"]
+    again = engine.submit("axi", {"op": "read", "addr": 0}, owner="a", expect_gen=1).wait(5)
+    assert again["core"].image_gen == 1 and t.connects == 1 and t.closed == 0
+    # An I/O error is still the link's, with nothing to check it against.
+    t.fail_io = "always"
+    with pytest.raises(OSError):
+        engine.submit("eio", {"chain": 3, "op": "read"}, owner="b").wait(5)
+    assert not engine.status()["connected"]
 
 
 def test_a_wrong_chain_as_the_first_job_keeps_the_target_usable(engine):
