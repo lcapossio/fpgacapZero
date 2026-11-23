@@ -18,7 +18,8 @@ on a core that may now hold another bitstream.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import os
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 # The CLI's global transport options, with their CLI defaults.
@@ -76,6 +77,17 @@ class TargetSpec:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def resolved(self) -> TargetSpec:
+        """This spec with its paths made absolute, for the runtime, whose
+        working directory is not the caller's.  A bare program name
+        (``quartus_stp``) is left to the search path."""
+        stp = self.quartus_stp
+        if stp and not os.path.isabs(stp) and (
+            os.sep in stp or (os.altsep and os.altsep in stp)
+        ):
+            return replace(self, quartus_stp=os.path.abspath(stp))
+        return self
 
     def identity(self) -> tuple:
         """The physical cable and device, with the CLI's defaults resolved."""

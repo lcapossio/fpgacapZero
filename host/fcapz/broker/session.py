@@ -99,34 +99,55 @@ def _connect_info(
     directory: Path, timeout: float | None = None
 ) -> tuple[Any, dict[str, Any]] | None:
     """An authenticated connection to the runtime ``runtime.json`` names,
-    or None when none answers within *timeout* (``AUTH_TIMEOUT_S``): a runtime that accepts and
-    then stalls in the handshake must not hold the caller forever."""
+    or None when none answers within *timeout* (``AUTH_TIMEOUT_S``).
+
+    Connecting and the handshake both run in a helper thread: a runtime that
+    stops accepting (a busy pipe, a full socket backlog) or stalls in the
+    handshake must not hold the caller.  A connection that comes too late is
+    closed by that thread."""
     info = read_info(directory)
     if not info:
         return None
     try:
         key = bytes.fromhex(info["authkey"])
-        conn = mpc.Client(info["address"], info["family"])
-    except (OSError, EOFError, KeyError, ValueError, TypeError):
+        address, family = info["address"], info["family"]
+    except (KeyError, ValueError, TypeError):
         return None
-    done: list[bool] = []
+    lock = threading.Lock()
+    state: dict[str, Any] = {"conn": None, "ok": False, "abandoned": False}
 
-    def handshake() -> None:
+    def work() -> None:
+        try:
+            conn = mpc.Client(address, family)
+        except Exception:  # noqa: BLE001 - nobody there
+            return
+        with lock:
+            if state["abandoned"]:
+                _abort(conn)
+                return
+            state["conn"] = conn
         try:
             mpc.answer_challenge(conn, key)
             mpc.deliver_challenge(conn, key)
         except Exception:  # noqa: BLE001 - not our runtime, or gone
-            done.append(False)
-        else:
-            done.append(True)
+            return
+        with lock:
+            if state["abandoned"]:
+                _abort(conn)
+            else:
+                state["ok"] = True
 
-    t = threading.Thread(target=handshake, name="fcapz-broker-auth", daemon=True)
+    t = threading.Thread(target=work, name="fcapz-broker-connect", daemon=True)
     t.start()
     t.join(AUTH_TIMEOUT_S if timeout is None else timeout)
-    if done != [True]:
+    with lock:
+        conn = state["conn"]
+        if state["ok"]:
+            return conn, info
+        state["abandoned"] = True
+    if conn is not None:
         _abort(conn)
-        return None
-    return conn, info
+    return None
 
 
 def _log_tail(directory: Path, lines: int = 15) -> str:
@@ -152,9 +173,11 @@ def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Po
 
     env = dict(os.environ)
     pkg_parent = str(Path(fcapz.__file__).resolve().parent.parent)
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (pkg_parent, env.get("PYTHONPATH", "")) if p
-    )
+    # Absolute, like *directory*: relative entries are the caller's.
+    inherited = [
+        os.path.abspath(p) for p in env.get("PYTHONPATH", "").split(os.pathsep) if p
+    ]
+    env["PYTHONPATH"] = os.pathsep.join([pkg_parent, *inherited])
     args = [sys.executable, "-m", "fcapz.broker", "--dir", str(directory)]
     if spawn_id:
         args += ["--spawn-id", spawn_id]
@@ -179,6 +202,27 @@ def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Po
         return subprocess.Popen(args, start_new_session=True, **kw)
     finally:
         stderr.close()
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """Wait for a runtime we started, when it exits: on POSIX it would
+    otherwise stay a zombie child of this process for as long as we run."""
+    threading.Thread(target=proc.wait, name="fcapz-broker-reaper", daemon=True).start()
+
+
+def _abandon_spawn(proc: subprocess.Popen, directory: Path, spawn_id: str) -> None:
+    """Leave a start that failed or was interrupted.  A spawn that has
+    published itself is the directory's runtime, which other clients may
+    already use: it stays, and exits when idle.  One that has not is
+    stopped."""
+    try:
+        info = read_info(directory)
+    except wire.BrokerError:
+        info = None
+    if info and info.get("spawn_id") == spawn_id:
+        _reap(proc)
+    else:
+        _discard_spawn(proc)
 
 
 def _discard_spawn(proc: subprocess.Popen) -> None:
@@ -252,10 +296,7 @@ class BrokerSession:
                     if found[1].get("spawn_id") != spawn_id:
                         _discard_spawn(proc)
                     else:
-                        # Reap our runtime when it exits, or on POSIX it stays
-                        # a zombie child of this process for as long as we run.
-                        threading.Thread(target=proc.wait, name="fcapz-broker-reaper",
-                                         daemon=True).start()
+                        _reap(proc)
                     return found
                 rc = proc.poll()
                 now = time.monotonic()
@@ -287,7 +328,7 @@ class BrokerSession:
                     )
                 time.sleep(0.05)
         except BaseException:
-            _discard_spawn(proc)    # no runtime of ours is left behind
+            _abandon_spawn(proc, directory, spawn_id)
             raise
 
     # ---- plumbing ------------------------------------------------------
@@ -397,7 +438,8 @@ class BrokerSession:
 
     @staticmethod
     def _target(target: TargetSpec | dict[str, Any]) -> dict[str, Any]:
-        return target.to_dict() if isinstance(target, TargetSpec) else dict(target)
+        spec = target if isinstance(target, TargetSpec) else TargetSpec.from_dict(target)
+        return spec.resolved().to_dict()
 
     def probe(
         self,

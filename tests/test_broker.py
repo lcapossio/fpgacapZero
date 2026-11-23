@@ -650,6 +650,117 @@ def test_a_deep_directory_gets_its_socket_in_a_private_one(tmp_path, monkeypatch
             p.rmdir()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a full Unix socket backlog")
+def test_a_runtime_that_stops_accepting_does_not_hold_the_client(tmp_path, monkeypatch):
+    rdir = ensure_dir(tmp_path / "rt")
+    _, address = endpoint(rdir, "full")
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(address)
+    server.listen(0)
+    fill = []
+    try:
+        for _ in range(8):          # until a connect would block
+            c = socket.socket(socket.AF_UNIX)
+            c.setblocking(False)
+            fill.append(c)
+            if c.connect_ex(address):
+                break
+        else:
+            pytest.skip("this system never fills the backlog")
+        info = {"address": address, "family": "AF_UNIX", "authkey": "00" * 32, "pid": 0}
+        fd = os.open(rdir / INFO_NAME, os.O_WRONLY | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(info, fh)
+        monkeypatch.setattr(broker_session, "AUTH_TIMEOUT_S", 0.5)
+        t0 = time.monotonic()
+        with pytest.raises(BrokerNotRunning):
+            BrokerSession.connect(rdir, autostart=False)
+        assert time.monotonic() - t0 < 5.0
+    finally:
+        for c in fill:
+            c.close()
+        server.close()
+        os.unlink(address)
+        if Path(address).parent != rdir:
+            Path(address).parent.rmdir()
+
+
+def test_an_interrupted_starter_leaves_the_runtime_others_use(broker_env, monkeypatch):
+    # A starts the runtime; B finds and uses it before A has connected; A
+    # gives up.  The runtime is the directory's, not A's to stop.
+    rdir, _ = broker_env
+    real = broker_session._connect_info
+    blind = threading.local()
+
+    def connect_info(directory, timeout=None):
+        return None if getattr(blind, "on", False) else real(directory, timeout)
+
+    monkeypatch.setattr(broker_session, "_connect_info", connect_info)
+    gave_up = []
+
+    def starter():
+        blind.on = True
+        try:
+            BrokerSession.connect(rdir, start_timeout=3.0)
+        except BrokerStartError as exc:
+            gave_up.append(exc)
+
+    a = threading.Thread(target=starter)
+    a.start()
+    info = _wait_for(lambda: read_info(rdir), what="the runtime to publish")
+    with BrokerSession.connect(rdir, autostart=False) as b:
+        a.join(20)
+        assert gave_up, "the starter was to time out"
+        time.sleep(0.5)
+        assert b.runtime_id == info["runtime_id"]
+        _use_the_cable(b)
+
+
+def test_a_spawn_that_never_published_is_stopped_when_its_start_fails(tmp_path, monkeypatch):
+    rdir = tmp_path / "rt"
+    procs = []
+    spawn = broker_session.spawn_runtime
+
+    def slow_spawn(directory, spawn_id=None):
+        # A runtime that hangs before it publishes anything.
+        procs.append(subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"]))
+        return procs[-1]
+
+    monkeypatch.setattr(broker_session, "spawn_runtime", slow_spawn)
+    with pytest.raises(BrokerStartError, match="did not answer"):
+        BrokerSession.connect(rdir, start_timeout=0.5)
+    assert spawn is not slow_spawn and procs[0].wait(10) is not None
+
+
+def test_paths_are_the_callers_not_the_runtimes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rel = os.path.join("tools", "quartus_stp")
+    spec = TargetSpec(backend="usb_blaster", quartus_stp=rel)
+    assert spec.resolved().quartus_stp == str(tmp_path / "tools" / "quartus_stp")
+    assert BrokerSession._target(spec)["quartus_stp"] == str(tmp_path / "tools" / "quartus_stp")
+    assert BrokerSession._target({"quartus_stp": rel})["quartus_stp"] == \
+        str(tmp_path / "tools" / "quartus_stp")
+    # A bare program name is looked up on PATH, an absolute path is kept.
+    assert TargetSpec(quartus_stp="quartus_stp").resolved().quartus_stp == "quartus_stp"
+    absolute = str(tmp_path / "q")
+    assert TargetSpec(quartus_stp=absolute).resolved().quartus_stp == absolute
+    assert TargetSpec().resolved() == TargetSpec()
+
+    seen = []
+
+    def popen(args, **kw):
+        seen.append(kw["env"]["PYTHONPATH"].split(os.pathsep))
+        raise OSError("not started")
+
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["rel", str(tmp_path / "abs")]))
+    monkeypatch.setattr(broker_session.subprocess, "Popen", popen)
+    with pytest.raises(BrokerStartError, match="could not start"):
+        BrokerSession.connect(tmp_path / "rt")
+    assert seen and all(os.path.isabs(p) for p in seen[0])
+    assert str(tmp_path / "rel") in seen[0] and str(tmp_path / "abs") in seen[0]
+
+
 def test_a_second_runtime_loses_the_election(broker_env):
     rdir, _ = broker_env
     with BrokerSession.connect(rdir) as s:
