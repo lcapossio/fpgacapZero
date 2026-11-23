@@ -3,9 +3,11 @@
 
 """A fake ELA transport for the broker tests, in-process and in the runtime.
 
-The core manager holds two ELA slots.  An ARM leaves a slot armed until it is
-triggered: by :meth:`FakeElaTransport.trigger` in-process, or, in a runtime
-subprocess, by a file ``trigger-<slot>`` in ``FCAPZ_BROKER_FAKE_DIR``
+The core manager holds two ELA slots.  A RESET leaves a slot idle, or armed
+again when its runtime STARTUP_ARM register is set, as the core does.  An ARM
+leaves a slot armed until it is triggered: by
+:meth:`FakeElaTransport.trigger` in-process, or, in a runtime subprocess, by
+a file ``trigger-<slot>`` in ``FCAPZ_BROKER_FAKE_DIR``
 (removed when taken).  ``FCAPZ_BROKER_FAKE_AUTO=1`` triggers every arm at
 once.  ``fail-connect`` in that directory makes ``connect()`` raise, and
 ``fail-io`` makes the next register access raise ``OSError`` once
@@ -29,6 +31,7 @@ from fcapz.transport import Transport
 _CTRL, _STATUS = 0x0004, 0x0008
 _ARMED, _DONE = 0x1, 0x4
 _MGR_ACTIVE = 0xF008
+_STARTUP_ARM = 0x00D8
 
 
 def _slot_regs() -> dict[int, int]:
@@ -152,8 +155,8 @@ class FakeElaTransport(Transport):
             return
         regs = self.slots[self.active]
         if addr == _CTRL:
-            if value & 0x2:      # RESET
-                regs[_STATUS] = 0
+            if value & 0x2:      # RESET: re-arms at once with STARTUP_ARM set
+                regs[_STATUS] = _ARMED if regs.get(_STARTUP_ARM, 0) & 1 else 0
             if value & 0x1:      # ARM
                 regs[_STATUS] = _ARMED
                 self.arms[self.active] += 1

@@ -214,6 +214,97 @@ def test_cancelling_a_client_stops_only_its_jobs(engine):
     assert engine.image_gen == 1
 
 
+def test_a_cancelled_startup_arm_capture_leaves_the_core_idle(engine):
+    # A plain RESET re-arms a core whose STARTUP_ARM register is set.
+    t = engine.fake
+    a = _capture(engine, "a", config=_cfg(startup_arm=True))
+    _wait_for(_state(a, "running"))
+    _wait_for(lambda: t.arms[0] == 1, what="a armed")
+    b = _capture(engine, "b")
+    _wait_for(_state(b, "queued"))
+    idle_at_handover = []
+    arm = t.write_reg
+
+    def write_reg(addr, value):
+        if addr == 0x0004 and value & 0x1 and t.arms[0] == 1:
+            idle_at_handover.append(t.slots[0][0x0008] == 0)
+        arm(addr, value)
+
+    t.write_reg = write_reg
+    assert engine.cancel(a.id)
+    with pytest.raises(JobCancelled):
+        a.wait(5)
+    _wait_for(lambda: t.arms[0] == 2, what="b armed")
+    assert idle_at_handover == [True], "b got the core while a's capture was armed"
+    assert engine.status()["connected"] and engine.image_gen == 1
+    t.trigger(0)
+    b.wait(5)
+
+
+def test_jobs_take_their_core_in_submit_order(engine):
+    # Each job finds its core in its own thread; a slow one must not be
+    # overtaken by a job submitted after it.
+    t = engine.fake
+    holder = _capture(engine, "h")
+    _wait_for(_state(holder, "running"))
+    find = engine._get_controller
+
+    def slow_find(job, kind, *, cached):
+        if job.owner == "slow":
+            time.sleep(0.3)
+        return find(job, kind, cached=cached)
+
+    engine._get_controller = slow_find
+    first = _capture(engine, "slow")
+    rest = [_capture(engine, f"fast{i}", instance=0) for i in range(3)]
+    _wait_for(lambda: all(j.state == "queued" for j in [first, *rest]), what="all queued")
+    queued = engine.status()["cores"][0]["queued"]
+    assert [j["job"] for j in queued] == [first.id, *(j.id for j in rest)]
+    order = []
+    for _ in range(5):
+        running = _wait_for(
+            lambda: next((j for j in [holder, first, *rest]
+                          if j.state == "running" and j.id not in order), None),
+            what="next job running")
+        order.append(running.id)
+        _wait_for(lambda: t.slots[0][0x0008] & 0x1, what="armed")
+        t.trigger(0)
+        running.wait(5)
+    assert order == [holder.id, first.id, *(j.id for j in rest)]
+
+
+def test_a_wrong_chain_is_that_clients_error_only(engine):
+    # No EIO behind chain 1's manager: a mistake, not a dead cable.
+    t = engine.fake
+    a = _capture(engine, "a")
+    _wait_for(_state(a, "running"))
+    with pytest.raises(RuntimeError, match="no EIO slot"):
+        engine.submit("eio", {"chain": 1, "op": "read"}, owner="b").wait(5)
+    assert engine.status()["connected"]
+    ok = engine.submit("eio", {"chain": 3, "op": "read"}, owner="c").wait(5)
+    assert ok["value"] == 0xA5 and ok["core"].image_gen == 1
+    t.trigger(0)
+    assert a.wait(5)["core"].image_gen == 1 and t.connects == 1 and t.closed == 0
+
+
+def test_a_wrong_chain_as_the_first_job_keeps_the_target_usable(engine):
+    with pytest.raises(RuntimeError, match="no EIO slot"):
+        engine.submit("eio", {"chain": 1, "op": "read"}, owner="b").wait(5)
+    assert engine.submit("eio", {"chain": 3, "op": "read"}, owner="c").wait(5)["value"] == 0xA5
+
+
+def test_a_dead_cable_at_attach_still_reconnects(engine):
+    t = engine.fake
+    t.auto = True
+    _capture(engine, "a").wait(5)
+    t.fail_io = "always"
+    with pytest.raises(OSError):
+        engine.submit("eio", {"chain": 3, "op": "read"}, owner="b").wait(5)
+    assert not engine.status()["connected"]
+    t.fail_io = False
+    assert _capture(engine, "a").wait(5)["core"].image_gen == 2
+
+
 def test_a_missing_trigger_does_not_reconnect(engine):
     a = _capture(engine, "a", timeout=0.2)
     with pytest.raises(CaptureNotReady):
@@ -250,6 +341,16 @@ def test_the_last_capture_is_published_with_its_core(engine):
     snap = engine.last_capture({"chain": 1})
     assert snap["result"] is r["result"] and snap["owner"] == "a"
     assert snap["core"].image_gen == 1
+
+
+def test_the_last_capture_without_a_slot_is_the_most_recent(engine):
+    engine.fake.auto = True
+    _capture(engine, "a", instance=0).wait(5)
+    r1 = _capture(engine, "a", instance=1).wait(5)
+    assert engine.last_capture({})["result"] is r1["result"]
+    r0 = _capture(engine, "a", instance=0).wait(5)
+    assert engine.last_capture({"chain": 1})["result"] is r0["result"]
+    assert engine.last_capture({"instance": 1})["result"] is r1["result"]
 
 
 def test_eio_operations_run_as_jobs(engine):

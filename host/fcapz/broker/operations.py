@@ -14,6 +14,9 @@ on it:
 
 Each core has a FIFO queue; the job at its head owns the core, so another
 client's capture cannot reconfigure, re-arm or read a capture this one armed.
+Jobs join their core's queue in the order :meth:`Engine.submit` took them,
+whatever their threads do: a job finds its core (which may read the board)
+only when every job submitted before it has joined a queue.
 Cores on the same cable run interleaved: the cable is the transport's own
 :meth:`~fcapz.transport.Transport.transaction_lock`, held for each register
 access and released between trigger polls.  ``probe`` reads registers only
@@ -22,8 +25,10 @@ and takes no core ownership.
 A job that has not reached the head of its queue by its deadline fails with
 :class:`~fcapz.broker.wire.CoreBusy`.  Cancelling a job (or its client going
 away) stops only that job, and the job keeps the core until its own access
-has stopped.  A failure that the link itself caused marks the connection
-stale: the next job waits for the jobs still running on it to end, then
+has stopped; a capture cancelled while it waits for its trigger is driven
+idle first.  A failure that the link itself caused marks the connection
+stale (a wrong chain or a missing core is the job's own error and leaves the
+connection to the others): the next job waits for the jobs still running on it to end, then
 reconnects, which raises the target's image generation.  Nothing is retried
 or re-armed on its own.
 """
@@ -38,6 +43,7 @@ from collections import deque
 from typing import Any, Callable
 
 from ..analyzer import (
+    _ADDR_STARTUP_ARM,
     _ADDR_VERSION,
     Analyzer,
     CaptureChangedError,
@@ -162,6 +168,9 @@ class Engine:
         self._jobs: dict[int, Job] = {}
         self._controllers: dict[tuple, Any] = {}
         self._snapshots: dict[tuple, dict[str, Any]] = {}
+        self._snapshot_seq = itertools.count(1)
+        # Jobs in submit order that have not joined a core queue yet.
+        self._admission: deque[Job] = deque()
         self._closed = False
 
     # ---- connection --------------------------------------------------
@@ -245,7 +254,9 @@ class Engine:
             else:
                 ctrl.attach()
         except Exception as exc:
-            if not isinstance(exc, _LOGICAL_ERRORS):
+            # A wrong chain or a missing core is this job's error: only a
+            # link that no longer answers takes the connection down.
+            if not self._link_alive(exc, ctrl):
                 with self._cv:
                     self._stale = True
             raise
@@ -289,6 +300,8 @@ class Engine:
             if self._closed:
                 raise RuntimeError("the broker is shutting down")
             self._jobs[job.id] = job
+            if kind != "probe":
+                self._admission.append(job)
         threading.Thread(target=self._run, args=(job,), name=f"fcapz-job-{job.id}",
                          daemon=True).start()
         return job
@@ -301,7 +314,8 @@ class Engine:
         except BaseException as exc:  # noqa: BLE001 - delivered to the client
             job.error = exc
             job.state = "cancelled" if isinstance(exc, JobCancelled) else "failed"
-            if job.holding and not self._link_alive(exc, job, ctrl_box):
+            ctrl = ctrl_box[0] if ctrl_box else None
+            if job.holding and not self._link_alive(exc, ctrl):
                 log.warning("target %s: link failed in job %s: %s",
                             self.spec.key(), job.id, exc)
                 with self._cv:
@@ -309,6 +323,8 @@ class Engine:
         finally:
             with self._cv:
                 self._jobs.pop(job.id, None)
+                if job in self._admission:
+                    self._admission.remove(job)
                 if job.holding:
                     job.holding = False
                     self._holders -= 1
@@ -316,21 +332,22 @@ class Engine:
             job.done_event.set()
             job._emit({"event": "end", "state": job.state})
 
-    def _link_alive(self, exc: BaseException, job: Job, ctrl_box: list[Any]) -> bool:
-        """Whether the connection survived *exc*: logical failures leave it,
-        link errors do not, and anything else is checked with a VERSION read
-        of an ELA/EIO (an EJTAG-AXI chain has no such read)."""
+    def _link_alive(self, exc: BaseException, ctrl: Any) -> bool:
+        """Whether the connection survived *exc*, raised on *ctrl*: logical
+        failures leave it, link errors do not, and anything else is checked
+        with a VERSION read of an ELA/EIO (an EJTAG-AXI chain has no such
+        read)."""
         if isinstance(exc, _LOGICAL_ERRORS):
             return True
         if isinstance(exc, _LINK_ERRORS):
             return False
-        ctrl = ctrl_box[0] if ctrl_box else None
         if not isinstance(ctrl, (Analyzer, EioController)):
             return not isinstance(exc, OSError)
         try:
             with ctrl._selected():  # noqa: SLF001 - the controller's own scope
                 base = getattr(ctrl, "_base_addr", 0)
-                self._transport.read_reg(base | _ADDR_VERSION)
+                transport = ctrl.transport if isinstance(ctrl, Analyzer) else ctrl._t
+                transport.read_reg(base | _ADDR_VERSION)
         except Exception:  # noqa: BLE001 - the link is gone
             return False
         return True
@@ -345,24 +362,27 @@ class Engine:
     def _execute(self, job: Job, ctrl_box: list[Any]) -> Any:
         if job.kind == "probe":
             return self._probe(job, ctrl_box)
-        if job.kind == "axi":
-            # An EJTAG-AXI attach resets and primes the bridge: only under
-            # ownership of the bridge, never ahead of the queue.
-            key = ("axi", self._axi_chain(job.params.get("chain")), None, 0)
+        axi = job.kind == "axi"
+        ctrl: Any = None
+        self._await_admission(job)
+        try:
+            if axi:
+                # An EJTAG-AXI attach resets and primes the bridge: only
+                # under ownership of the bridge, never ahead of the queue.
+                key = ("axi", self._axi_chain(job.params.get("chain")), None, 0)
+            else:
+                kind = "ela" if job.kind == "capture" else job.kind
+                ctrl, key = self._get_controller(job, kind, cached=True)
+                ctrl_box.append(ctrl)
             job.core = key
-            self._acquire(job, key)
-            try:
+            self._enqueue(job, key)
+        finally:
+            self._leave_admission(job)
+        try:
+            self._wait_turn(job, key)
+            if axi:
                 ctrl, _ = self._get_controller(job, "axi", cached=False)
                 ctrl_box.append(ctrl)
-                return self._start_and_run(job, key, ctrl)
-            finally:
-                self._release(job, key)
-        kind = "ela" if job.kind == "capture" else job.kind
-        ctrl, key = self._get_controller(job, kind, cached=True)
-        ctrl_box.append(ctrl)
-        job.core = key
-        self._acquire(job, key)
-        try:
             return self._start_and_run(job, key, ctrl)
         finally:
             self._release(job, key)
@@ -379,12 +399,31 @@ class Engine:
             return self._eio(job, ctrl, key)
         return self._axi(job, ctrl, key)
 
-    def _acquire(self, job: Job, key: tuple) -> None:
+    def _await_admission(self, job: Job) -> None:
+        """Wait until every job submitted before *job* has joined a core
+        queue (or ended), so queues fill in submit order."""
+        with self._cv:
+            while self._admission and self._admission[0] is not job:
+                if job.cancel_event.is_set():
+                    raise JobCancelled(f"job {job.id} cancelled while queued")
+                self._cv.wait(0.1)
+
+    def _leave_admission(self, job: Job) -> None:
+        with self._cv:
+            if job in self._admission:
+                self._admission.remove(job)
+            self._cv.notify_all()
+
+    def _enqueue(self, job: Job, key: tuple) -> None:
+        with self._cv:
+            self._queues.setdefault(key, deque()).append(job)
+            job.state = "queued"
+
+    def _wait_turn(self, job: Job, key: tuple) -> None:
+        """Wait until *job*, already in its core's queue, is at its head."""
         deadline = time.monotonic() + job.queue_timeout
         with self._cv:
-            q = self._queues.setdefault(key, deque())
-            q.append(job)
-            job.state = "queued"
+            q = self._queues[key]
             reported = None
             try:
                 while q[0] is not job:
@@ -446,15 +485,9 @@ class Engine:
         deadline = time.monotonic() + timeout
         while True:
             if job.cancel_event.is_set():
-                # Disarm before giving the core up, so the next owner does not
-                # find this capture running; a core that cannot be disarmed
-                # takes the connection down with it.
-                try:
-                    analyzer.reset()
-                except Exception:  # noqa: BLE001 - reported as a link failure
-                    log.warning("job %s: reset after cancel failed", job.id, exc_info=True)
-                    with self._cv:
-                        self._stale = True
+                # Idle before giving the core up, so the next owner does not
+                # find this capture running.
+                self._disarm(job, analyzer, cfg)
                 raise JobCancelled(f"job {job.id} cancelled while waiting for the trigger")
             if analyzer.status()["done"]:
                 break
@@ -470,8 +503,26 @@ class Engine:
         }
         with self._cv:
             self._snapshots[key] = {**out, "job": job.id, "owner": job.owner,
-                                    "time": time.time()}
+                                    "time": time.time(), "seq": next(self._snapshot_seq)}
         return out
+
+    def _disarm(self, job: Job, analyzer: Analyzer, cfg: CaptureConfig) -> None:
+        """Drive a cancelled capture's core to a verified idle.  A plain
+        reset re-arms a core whose runtime STARTUP_ARM register is set, so
+        that register is cleared first.  A link that fails here takes the
+        connection down; a core that stays busy on a live link (a stopped
+        sample clock) is logged and left to the next job to report."""
+        try:
+            if cfg.startup_arm:
+                with analyzer._selected():  # noqa: SLF001 - the controller's own scope
+                    analyzer.transport.write_reg(_ADDR_STARTUP_ARM, 0)
+            analyzer.force_idle()
+        except Exception as exc:  # noqa: BLE001 - the job ends as cancelled
+            log.warning("job %s: could not idle the core after cancel", job.id,
+                        exc_info=True)
+            if not self._link_alive(exc, analyzer):
+                with self._cv:
+                    self._stale = True
 
     def _eio(self, job: Job, eio: EioController, key: tuple) -> dict[str, Any]:
         p = job.params
@@ -524,17 +575,19 @@ class Engine:
     # ---- queries and lifetime -----------------------------------------
 
     def last_capture(self, params: dict[str, Any]) -> dict[str, Any] | None:
-        """The last capture published for the ELA *params* names, or None.
+        """The last capture published for the ELA *params* names, or None:
+        with no ``instance``, the most recent one of any ELA on the chain.
         Its ``core`` keeps the image generation it was taken under."""
         chain = 1 if params.get("chain") is None else int(params["chain"])
         instance = params.get("instance")
         with self._cv:
-            for key, snap in self._snapshots.items():
+            found = [
+                snap for key, snap in self._snapshots.items()
                 if key[0] == "ela" and key[1] == chain and (
-                    instance is None or key[2] == instance
-                ):
-                    return snap
-        return None
+                    instance is None or key[2] == int(instance)
+                )
+            ]
+        return max(found, key=lambda snap: snap["seq"]) if found else None
 
     def cancel(self, job_id: int, owner: str | None = None) -> bool:
         with self._cv:
