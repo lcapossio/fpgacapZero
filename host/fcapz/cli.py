@@ -1458,6 +1458,15 @@ def _use_broker(args: argparse.Namespace) -> bool:
     return os.environ.get("FCAPZ_BROKER", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _refuse_broker(args: argparse.Namespace) -> int:
+    print(
+        f"error: {args.cmd} does not run through the broker yet; run it "
+        "without it (--no-broker, or unset FCAPZ_BROKER)",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def _broker_target(args: argparse.Namespace):
     from .broker import TargetSpec
 
@@ -1530,12 +1539,7 @@ def _run_broker_admin(args: argparse.Namespace) -> int:
 def _run_via_broker(args: argparse.Namespace) -> int:
     """Run *args.cmd* as broker jobs instead of on a transport of its own."""
     if args.cmd not in _BROKER_CMDS:
-        print(
-            f"error: {args.cmd} does not run through the broker yet; run it "
-            "without it (--no-broker, or unset FCAPZ_BROKER)",
-            file=sys.stderr,
-        )
-        return 2
+        return _refuse_broker(args)
     if getattr(args, "program", None):
         print(
             "error: --program does not run through the broker: program the "
@@ -1651,6 +1655,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_axi_decode(args)
 
     if args.cmd == "openocd-bridge":
+        # It opens the adapter itself: never beside a broker asked for.
+        if _use_broker(args):
+            return _refuse_broker(args)
         return _run_openocd_bridge(args)
 
     # Needs no transport, and deliberately opens nothing: opening a port

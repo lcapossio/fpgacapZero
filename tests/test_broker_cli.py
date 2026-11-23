@@ -52,6 +52,8 @@ def test_cli_broker_env_and_refusals(monkeypatch):
     monkeypatch.setenv("FCAPZ_BROKER", "1")
     code, _, err = _cli("arm")
     assert code == 2 and "does not run through the broker" in err
+    code, _, err = _cli("openocd-bridge")       # it would open the adapter itself
+    assert code == 2 and "does not run through the broker" in err
     code, _, err = _cli("--program", "x.bit", "probe")
     assert code == 2 and "--program" in err
     code, out, _ = _cli("broker", "status")
