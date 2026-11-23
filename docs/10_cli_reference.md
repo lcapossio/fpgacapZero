@@ -1019,7 +1019,8 @@ Usage: `fcapz [global options] broker status [--json]`
 <!-- END GENERATED cli:broker.status -->
 
 `status` exits with 1 when no broker is running (`--json` then prints
-`{"running": false}`).
+`{"running": false, "stopping": false}`; `"stopping": true` while a broker
+that no longer answers is still closing its cables).
 
 <!-- BEGIN GENERATED cli:broker.stop (tools/gen_docs.py from fcapz/cli.py; do not edit) -->
 
@@ -1027,13 +1028,15 @@ Usage: `fcapz [global options] broker stop [--force]`
 
 | Option | Default | Description |
 |---|---|---|
-| `--force` | off | Stop even with jobs running (they are cancelled) |
+| `--force` | off | Stop even with jobs running (they are cancelled) or other programs connected (they lose the broker) |
 
 <!-- END GENERATED cli:broker.stop -->
 
-Neither starts a broker.  `stop` refuses while jobs are running unless
-given `--force`, and exits with 0 when none is running.  It returns when the
-broker process has exited (exit code 1 if that takes more than 20 seconds).
+Neither starts a broker.  `stop` refuses while jobs are running or other
+programs are connected unless given `--force`, and exits with 0 when none is
+running.  It returns when the broker process has exited, also for a broker
+that was already shutting down (exit code 1 if that takes more than 20
+seconds).
 
 ```bash
 # Two terminals capturing from the same ELA: the second waits its turn

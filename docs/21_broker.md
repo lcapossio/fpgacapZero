@@ -98,12 +98,19 @@ Nothing is retried or re-armed on its own.
 ```bash
 fcapz broker status          # the broker, its clients, cores and queues
 fcapz broker status --json
-fcapz broker stop            # refused while jobs run; --force cancels them
+fcapz broker stop            # refused while it is in use; --force stops it anyway
 ```
 
 Neither command starts a broker.  `status` exits with 1 when none is
-running.  `stop` returns when the broker process has exited and its cables
-are closed.  See the [CLI reference](10_cli_reference.md#broker).
+running, and says so when one is still shutting down (closing its cables).
+
+`stop` is refused while jobs run or while another program is connected: a
+program between two jobs (a `capture` reads the core's size, then captures)
+would lose its broker.  `--force` cancels the jobs and drops those programs,
+which then fail with `BrokerConnectionLost`.  `stop` returns when the broker
+process has exited and its cables are closed, also when it finds a broker
+that was already shutting down.  See the
+[CLI reference](10_cli_reference.md#broker).
 
 ## From Python
 
@@ -143,7 +150,10 @@ directory under the system temporary directory.  `FCAPZ_BROKER_DIR` sets
 another one (a relative path is taken from the directory the command runs
 in).  On Linux and macOS the directory must be your own, not a symbolic
 link, and writable by nobody else, and so must `runtime.json`: a command
-refuses anything else rather than trust it.  The directory holds:
+refuses anything else rather than trust it.  A broker whose directory or
+`runtime.json` is removed (Linux deletes `$XDG_RUNTIME_DIR` at logout), or
+taken over by another broker, exits within a few seconds, with its jobs, and
+frees its cables.  The directory holds:
 
 | File | What it is |
 |---|---|
@@ -156,6 +166,10 @@ Clients and the broker talk over a local named pipe (Windows) or Unix
 socket, authenticated with the key in `runtime.json`; nothing listens on
 the network.  `FCAPZ_BROKER_IDLE_EXIT` sets how many seconds the broker
 stays up after its last client (default 60).
+
+The broker runs in its own directory, with the environment of the command
+that started it.  A relative `--quartus-stp` path and relative `PYTHONPATH`
+entries are taken from the directory of the command that names them.
 
 Programs that share a board must use the same broker directory, so run them
 as the same user with the same `FCAPZ_BROKER_DIR`.  On Linux the default
