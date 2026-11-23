@@ -35,7 +35,14 @@ from typing import Any, Callable
 from ..analyzer import Analyzer, CaptureConfig, CaptureResult
 from . import wire
 from .coreref import CoreRef, TargetSpec
-from .runtime import EXIT_ALREADY_RUNNING, LOG_NAME, default_dir, ensure_dir, read_info
+from .runtime import (
+    EXIT_ALREADY_RUNNING,
+    LOG_NAME,
+    check_dir,
+    default_dir,
+    ensure_dir,
+    read_info,
+)
 
 START_TIMEOUT_S = 20.0
 #: Longest a runtime may take over the authentication handshake.
@@ -138,6 +145,8 @@ def _log_tail(directory: Path, lines: int = 15) -> str:
 def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Popen:
     """Start a detached runtime for *directory*; *spawn_id* tags it in
     ``runtime.json``."""
+    # Absolute: the runtime's working directory is *directory* itself.
+    directory = Path(os.path.abspath(directory))
     ensure_dir(directory)
     import fcapz
 
@@ -215,7 +224,8 @@ class BrokerSession:
         start_timeout: float = START_TIMEOUT_S,
         name: str = "fcapz",
     ) -> BrokerSession:
-        d = Path(directory) if directory is not None else default_dir()
+        d = Path(os.path.abspath(directory)) if directory is not None else default_dir()
+        check_dir(d)
         found = _connect_info(d)
         if found is None:
             if not autostart:

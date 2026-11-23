@@ -12,7 +12,9 @@ It listens on a local IPC endpoint (a named pipe on Windows, a Unix socket
 elsewhere) through :mod:`multiprocessing.connection`.  Every connection must
 pass the HMAC challenge with the key in ``runtime.json`` (written 0600 into
 the per-user directory) before it is served; messages are JSON frames, never
-pickle.  Each target (cable) gets one :class:`~fcapz.broker.operations.Engine`.
+pickle.  On POSIX the directory and ``runtime.json`` must belong to the user
+and be writable by nobody else, or both sides refuse them.  Each target
+(cable) gets one :class:`~fcapz.broker.operations.Engine`.
 A client that disconnects has its jobs cancelled.  The runtime exits
 ``--idle-exit`` seconds (default 60) after its last client and job.
 """
@@ -59,10 +61,11 @@ _JOB_FIELDS = (
 
 
 def default_dir() -> Path:
-    """The per-user runtime directory (``FCAPZ_BROKER_DIR`` overrides it)."""
+    """The per-user runtime directory (``FCAPZ_BROKER_DIR`` overrides it),
+    as an absolute path: the runtime runs with another working directory."""
     env = os.environ.get("FCAPZ_BROKER_DIR")
     if env:
-        return Path(env)
+        return Path(os.path.abspath(env))
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "fcapz" / "broker"
@@ -72,14 +75,70 @@ def default_dir() -> Path:
     return Path(tempfile.gettempdir()) / f"fcapz-broker-{os.getuid()}"
 
 
+def _refuse_foreign(st: os.stat_result, what: Path) -> None:
+    """Raise unless *st* is this user's own (POSIX)."""
+    if st.st_uid != os.getuid():
+        raise wire.BrokerStartError(
+            f"{what} belongs to another user (uid {st.st_uid}): refusing to use "
+            "it for the fcapz broker; set FCAPZ_BROKER_DIR to a directory of your own"
+        )
+
+
+def _refuse_writable(st: os.stat_result, what: Path) -> None:
+    if st.st_mode & 0o022:
+        raise wire.BrokerStartError(
+            f"{what} is writable by other users (mode {st.st_mode & 0o777:o}): "
+            "refusing to use it for the fcapz broker (chmod go-w it, or set "
+            "FCAPZ_BROKER_DIR to a private directory)"
+        )
+
+
+def _open_dir(directory: Path) -> int:
+    """A descriptor of *directory* itself, never of a symbolic link's
+    target: what is checked is then what is used (POSIX)."""
+    try:
+        return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise wire.BrokerStartError(
+            f"{directory} is not a directory (a symbolic link?): refusing to use "
+            f"it for the fcapz broker ({exc})"
+        ) from exc
+
+
+def check_dir(directory: Path) -> None:
+    """Refuse a runtime directory that is not private to this user: on
+    POSIX it must be a real directory of the user's own that nobody else can
+    write.  A directory that does not exist yet passes."""
+    if os.name == "nt":
+        return
+    try:
+        fd = _open_dir(directory)
+    except FileNotFoundError:
+        return
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    _refuse_foreign(st, directory)
+    _refuse_writable(st, directory)
+
+
 def ensure_dir(directory: Path) -> Path:
-    """Create *directory* for this user only (0700 where POSIX modes apply)."""
-    directory.mkdir(parents=True, exist_ok=True)
+    """Create *directory* for this user only (0700 where POSIX modes apply).
+    An existing one is checked before it is touched: it must be a real
+    directory (not a symbolic link) of the user's own."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name != "nt":
-        os.chmod(directory, 0o700)
-        st = directory.stat()
-        if st.st_uid != os.getuid():
-            raise PermissionError(f"{directory} belongs to another user")
+        fd = _open_dir(directory)
+        try:
+            st = os.fstat(fd)
+            _refuse_foreign(st, directory)
+            if st.st_mode & 0o077:
+                os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
     return directory
 
 
@@ -90,20 +149,42 @@ def _digest(directory: Path) -> str:
 
 
 def endpoint(directory: Path, nonce: str) -> tuple[str, str]:
-    """(family, address) of the IPC endpoint for *directory*."""
+    """(family, address) of a new IPC endpoint for *directory*.
+
+    A directory too deep for a Unix socket path gets its socket in a new
+    private (0700, randomly named) directory under the system temporary
+    directory, which the caller removes with the socket."""
     if os.name == "nt":
         return "AF_PIPE", rf"\\.\pipe\fcapz-broker-{_digest(directory)}-{nonce}"
     path = str(directory / SOCK_NAME)
     if len(path) > 100:  # sun_path limit
-        path = str(Path(tempfile.gettempdir()) / f"fcapz-broker-{_digest(directory)}.sock")
+        private = tempfile.mkdtemp(prefix="fcapz-broker-")
+        os.chmod(private, 0o700)
+        path = str(Path(private) / SOCK_NAME)
     return "AF_UNIX", path
 
 
 def read_info(directory: Path) -> dict[str, Any] | None:
+    """``runtime.json`` of *directory*, or None without a readable one.
+
+    On POSIX the file must be the user's own and writable by nobody else
+    (checked on the open file): :class:`~fcapz.broker.wire.BrokerStartError`
+    otherwise, since it names the endpoint and key a client then trusts."""
+    path = directory / INFO_NAME
     try:
-        return json.loads((directory / INFO_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
         return None
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        if os.name != "nt":
+            st = os.fstat(fd)
+            _refuse_foreign(st, path)
+            _refuse_writable(st, path)
+        try:
+            info = json.load(fh)
+        except (OSError, ValueError):
+            return None
+    return info if isinstance(info, dict) else None
 
 
 class ElectionLock:
@@ -572,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--spawn-id", default=None, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
-    directory = ensure_dir(args.dir or default_dir())
+    directory = ensure_dir(Path(os.path.abspath(args.dir)) if args.dir else default_dir())
     logging.basicConfig(
         filename=str(directory / LOG_NAME),
         level=logging.INFO,

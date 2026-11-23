@@ -506,6 +506,21 @@ def test_a_runtime_that_stalls_in_the_handshake_does_not_hold_the_client(
         listener.close()
 
 
+def test_a_relative_directory_is_the_callers_not_the_runtimes(broker_env, monkeypatch):
+    # The runtime's working directory is its directory: "rt" must not
+    # become rt/rt there.
+    rdir, _ = broker_env
+    monkeypatch.chdir(rdir.parent)
+    monkeypatch.setenv("FCAPZ_BROKER_DIR", rdir.name)
+    with BrokerSession.connect() as s:
+        assert Path(s.status()["dir"]) == rdir
+        assert read_info(rdir)["runtime_id"] == s.runtime_id
+        with BrokerSession.connect(rdir.name, autostart=False) as s2:
+            assert s2.runtime_id == s.runtime_id
+        s.stop()
+    assert not (rdir / rdir.name).exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows process creation flags")
 def test_the_runtime_gets_a_windowless_console(tmp_path, monkeypatch):
     # Without a console (DETACHED_PROCESS) every console program the runtime
@@ -522,6 +537,61 @@ def test_the_runtime_gets_a_windowless_console(tmp_path, monkeypatch):
     assert seen and all(f & subprocess.CREATE_NO_WINDOW for f in seen)
     assert not any(f & subprocess.DETACHED_PROCESS for f in seen)
     assert seen[0] & subprocess.CREATE_BREAKAWAY_FROM_JOB
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and modes")
+def test_a_directory_or_info_file_others_can_write_is_refused(tmp_path, monkeypatch):
+    rdir = ensure_dir(tmp_path / "rt")
+    assert rdir.stat().st_mode & 0o777 == 0o700
+    info = rdir / INFO_NAME
+    info.write_text("{}", encoding="utf-8")
+    os.chmod(info, 0o666)
+    with pytest.raises(BrokerStartError, match="writable by other users"):
+        BrokerSession.connect(rdir, autostart=False)
+    os.chmod(info, 0o600)
+    os.chmod(rdir, 0o777)
+    with pytest.raises(BrokerStartError, match="writable by other users"):
+        BrokerSession.connect(rdir, autostart=False)
+    os.chmod(rdir, 0o700)
+    with pytest.raises(BrokerNotRunning):
+        BrokerSession.connect(rdir, autostart=False)
+    # Another user's directory: its runtime.json names their endpoint and key.
+    uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    with pytest.raises(BrokerStartError, match="belongs to another user"):
+        BrokerSession.connect(rdir, autostart=False)
+    with pytest.raises(BrokerStartError, match="belongs to another user"):
+        ensure_dir(rdir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symbolic links")
+def test_a_symlinked_directory_is_refused_before_it_is_touched(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    os.chmod(real, 0o755)
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(BrokerStartError, match="symbolic link"):
+        ensure_dir(link)
+    with pytest.raises(BrokerStartError, match="symbolic link"):
+        BrokerSession.connect(link, autostart=False)
+    assert real.stat().st_mode & 0o777 == 0o755, "not chmod-ed through the link"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix socket paths")
+def test_a_deep_directory_gets_its_socket_in_a_private_one(tmp_path):
+    deep = tmp_path / ("d" * 120)
+    made = []
+    try:
+        for _ in range(2):
+            family, address = endpoint(deep, "n")
+            made.append(Path(address).parent)
+            assert family == "AF_UNIX" and len(address) <= 100
+            assert made[-1].stat().st_mode & 0o777 == 0o700
+        assert made[0] != made[1], "not a predictable path"
+    finally:
+        for p in made:
+            p.rmdir()
 
 
 def test_a_second_runtime_loses_the_election(broker_env):
