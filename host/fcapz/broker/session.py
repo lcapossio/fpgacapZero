@@ -5,7 +5,8 @@
 
 :meth:`BrokerSession.connect` reads ``runtime.json`` in the per-user runtime
 directory and connects.  When no runtime answers it starts one (detached,
-with this fcapz on its ``PYTHONPATH``) and waits for it.  If that runtime
+with this fcapz on its ``PYTHONPATH``) and waits for it; a runtime that is
+shutting down at that moment is waited out, and the next one started.  If that runtime
 cannot start, :class:`~fcapz.broker.wire.BrokerStartError` says why: there
 is never a silent fallback to a direct transport.
 
@@ -37,6 +38,13 @@ from .coreref import CoreRef, TargetSpec
 from .runtime import EXIT_ALREADY_RUNNING, LOG_NAME, default_dir, ensure_dir, read_info
 
 START_TIMEOUT_S = 20.0
+#: Longest a runtime may take over the authentication handshake.
+AUTH_TIMEOUT_S = 5.0
+#: After a spawn lost the election with no runtime answering: how long until
+#: the next spawn.
+RESPAWN_DELAY_S = 0.25
+#: How long :meth:`BrokerSession.stop` waits for the runtime to exit.
+STOP_WAIT_S = 20.0
 _LOST = object()
 
 EventSink = Callable[[dict[str, Any]], None]
@@ -64,15 +72,52 @@ class BrokerCapture:
         return a
 
 
-def _connect_info(directory: Path) -> tuple[Any, dict[str, Any]] | None:
+def _abort(conn: Any) -> None:
+    """Close *conn* so that a thread blocked reading it returns."""
+    if os.name != "nt":
+        # On POSIX close() does not end another thread's recv on the socket
+        # (and the peer would not see us leave until this process exits);
+        # shutdown() does.
+        with contextlib.suppress(OSError, ValueError):
+            sock = socket.socket(fileno=os.dup(conn.fileno()))
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            finally:
+                sock.close()
+    with contextlib.suppress(OSError):
+        conn.close()
+
+
+def _connect_info(
+    directory: Path, timeout: float | None = None
+) -> tuple[Any, dict[str, Any]] | None:
+    """An authenticated connection to the runtime ``runtime.json`` names,
+    or None when none answers within *timeout* (``AUTH_TIMEOUT_S``): a runtime that accepts and
+    then stalls in the handshake must not hold the caller forever."""
     info = read_info(directory)
     if not info:
         return None
     try:
-        conn = mpc.Client(
-            info["address"], info["family"], authkey=bytes.fromhex(info["authkey"])
-        )
-    except (OSError, EOFError, KeyError, ValueError, mpc.AuthenticationError):
+        key = bytes.fromhex(info["authkey"])
+        conn = mpc.Client(info["address"], info["family"])
+    except (OSError, EOFError, KeyError, ValueError, TypeError):
+        return None
+    done: list[bool] = []
+
+    def handshake() -> None:
+        try:
+            mpc.answer_challenge(conn, key)
+            mpc.deliver_challenge(conn, key)
+        except Exception:  # noqa: BLE001 - not our runtime, or gone
+            done.append(False)
+        else:
+            done.append(True)
+
+    t = threading.Thread(target=handshake, name="fcapz-broker-auth", daemon=True)
+    t.start()
+    t.join(AUTH_TIMEOUT_S if timeout is None else timeout)
+    if done != [True]:
+        _abort(conn)
         return None
     return conn, info
 
@@ -111,7 +156,10 @@ def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Po
     )
     try:
         if os.name == "nt":
-            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            # A console of its own, with no window: DETACHED_PROCESS would
+            # leave the runtime without one, and each console program it
+            # starts (xsdb, quartus_stp) would then open a visible one.
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
             try:
                 # Outlive a job object that kills its members with the shell.
                 return subprocess.Popen(
@@ -148,6 +196,7 @@ class BrokerSession:
         self._inbox: dict[Any, queue.Queue] = {}
         self._inbox_lock = threading.Lock()
         self._lost: BaseException | None = None
+        self._gone = threading.Event()
         self._closed = False
         threading.Thread(target=self._read_loop, name="fcapz-broker-recv",
                          daemon=True).start()
@@ -183,31 +232,53 @@ class BrokerSession:
         except OSError as exc:
             raise wire.BrokerStartError(f"could not start the fcapz broker: {exc}") from exc
         deadline = time.monotonic() + start_timeout
-        while True:
-            found = _connect_info(directory)
-            if found is not None:
-                if found[1].get("spawn_id") != spawn_id:
-                    _discard_spawn(proc)
-                else:
-                    # Reap our runtime when it exits, or on POSIX it stays a
-                    # zombie child of this process for as long as we run.
-                    threading.Thread(target=proc.wait, name="fcapz-broker-reaper",
-                                     daemon=True).start()
-                return found
-            rc = proc.poll()
-            # Losing the election is fine: another starter's runtime won,
-            # and it answers shortly.
-            if rc is not None and rc != EXIT_ALREADY_RUNNING:
-                raise wire.BrokerStartError(
-                    f"the fcapz broker exited with code {rc} while starting:\n"
-                    f"{_log_tail(directory)}"
+        respawn_at: float | None = None
+        try:
+            while True:
+                found = _connect_info(
+                    directory, min(AUTH_TIMEOUT_S, max(0.1, deadline - time.monotonic()))
                 )
-            if time.monotonic() >= deadline:
-                raise wire.BrokerStartError(
-                    f"the fcapz broker did not answer within {start_timeout:g} s "
-                    f"({directory}):\n{_log_tail(directory)}"
-                )
-            time.sleep(0.05)
+                if found is not None:
+                    if found[1].get("spawn_id") != spawn_id:
+                        _discard_spawn(proc)
+                    else:
+                        # Reap our runtime when it exits, or on POSIX it stays
+                        # a zombie child of this process for as long as we run.
+                        threading.Thread(target=proc.wait, name="fcapz-broker-reaper",
+                                         daemon=True).start()
+                    return found
+                rc = proc.poll()
+                now = time.monotonic()
+                if rc is not None and rc != EXIT_ALREADY_RUNNING:
+                    raise wire.BrokerStartError(
+                        f"the fcapz broker exited with code {rc} while starting:\n"
+                        f"{_log_tail(directory)}"
+                    )
+                if rc is None:
+                    respawn_at = None
+                elif respawn_at is None:
+                    # Our spawn lost the election.  Another starter's runtime
+                    # answers shortly; a runtime that is shutting down never
+                    # will, and frees the directory when its cables are
+                    # closed: try again then.
+                    respawn_at = now + RESPAWN_DELAY_S
+                elif now >= respawn_at:
+                    try:
+                        proc = spawn_runtime(directory, spawn_id)
+                    except OSError as exc:
+                        raise wire.BrokerStartError(
+                            f"could not start the fcapz broker: {exc}"
+                        ) from exc
+                    respawn_at = None
+                if now >= deadline:
+                    raise wire.BrokerStartError(
+                        f"the fcapz broker did not answer within {start_timeout:g} s "
+                        f"({directory}):\n{_log_tail(directory)}"
+                    )
+                time.sleep(0.05)
+        except BaseException:
+            _discard_spawn(proc)    # no runtime of ours is left behind
+            raise
 
     # ---- plumbing ------------------------------------------------------
 
@@ -222,6 +293,7 @@ class BrokerSession:
         except (EOFError, OSError, ValueError) as exc:
             self._lost = exc
         finally:
+            self._gone.set()
             with self._inbox_lock:
                 for q in self._inbox.values():
                     q.put(_LOST)
@@ -302,20 +374,8 @@ class BrokerSession:
 
     def close(self) -> None:
         self._closed = True
-        if os.name != "nt":
-            # Our receive thread is blocked in recv on this socket, and on
-            # POSIX close() does not end that call, so the runtime would not
-            # see us leave until this process exits.  shutdown() ends it.
-            with contextlib.suppress(OSError, ValueError):
-                sock = socket.socket(fileno=os.dup(self._conn.fileno()))
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                finally:
-                    sock.close()
-        try:
-            self._conn.close()
-        except OSError:
-            pass
+        # Our receive thread is blocked reading the connection.
+        _abort(self._conn)
 
     def __enter__(self) -> BrokerSession:
         return self
@@ -421,8 +481,12 @@ class BrokerSession:
         msg = self.request("status")
         return {k: v for k, v in msg.items() if k not in ("id", "ok")}
 
-    def stop(self, *, force: bool = False) -> None:
+    def stop(self, *, force: bool = False, wait: float = STOP_WAIT_S) -> bool:
+        """Stop the runtime.  True once its process has exited: its cables
+        are closed and the next client starts a new runtime.  False if it is
+        still shutting down after *wait* seconds."""
         self.request("stop", force=force)
+        return self._gone.wait(wait)
 
 
 def _capture_from(payload: dict[str, Any], job: int | None) -> BrokerCapture:

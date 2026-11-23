@@ -7,12 +7,14 @@ its clients as real processes (on a fake transport, no board)."""
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
 import sys
 import threading
 import time
+from multiprocessing import connection as mpc
 from pathlib import Path
 
 import pytest
@@ -40,9 +42,17 @@ from fcapz.broker import (  # noqa: E402
     TargetMismatch,
     TargetSpec,
 )
+from fcapz.broker import session as broker_session  # noqa: E402
 from fcapz.broker import wire  # noqa: E402
 from fcapz.broker.operations import Engine  # noqa: E402
-from fcapz.broker.runtime import EXIT_ALREADY_RUNNING, Runtime, read_info  # noqa: E402
+from fcapz.broker.runtime import (  # noqa: E402
+    EXIT_ALREADY_RUNNING,
+    INFO_NAME,
+    Runtime,
+    endpoint,
+    ensure_dir,
+    read_info,
+)
 
 TESTS_DIR = Path(__file__).resolve().parent
 
@@ -378,6 +388,7 @@ def broker_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FCAPZ_BROKER_TRANSPORT_FACTORY", "broker_fake:make_transport")
     monkeypatch.setenv("FCAPZ_BROKER_FAKE_DIR", str(ctl))
     monkeypatch.delenv("FCAPZ_BROKER_FAKE_AUTO", raising=False)
+    monkeypatch.delenv("FCAPZ_BROKER_FAKE_CLOSE_S", raising=False)
     monkeypatch.setenv("FCAPZ_BROKER_IDLE_EXIT", "30")
     monkeypatch.setenv(
         "PYTHONPATH",
@@ -417,11 +428,100 @@ def test_first_client_starts_the_runtime_and_status_stop_do_not(broker_env):
         assert [c["name"] for c in st["clients"]] == ["t1"]
         assert st["runtime_id"] == read_info(rdir)["runtime_id"]
         pid = s.runtime_pid
-        s.stop()
-    _wait_for(lambda: not _alive(pid), what="runtime exit")
-    assert read_info(rdir) is None
+        assert s.stop(), "stop() returns once the runtime is gone"
+        assert read_info(rdir) is None
+    _wait_for(lambda: not _alive(pid), timeout=2.0, what="runtime exit")
     with pytest.raises(BrokerNotRunning):
         BrokerSession.connect(rdir, autostart=False)
+
+
+def _use_the_cable(session):
+    assert session.eio(TargetSpec(), "read", chain=3)["value"] == 0xA5
+
+
+def test_a_client_arriving_while_the_runtime_stops_gets_the_next_one(broker_env, monkeypatch):
+    # The stopping runtime keeps the election lock while it closes its
+    # cables: a client's spawn loses to it, and must be tried again.
+    rdir, _ = broker_env
+    monkeypatch.setenv("FCAPZ_BROKER_FAKE_CLOSE_S", "1.5")
+    with BrokerSession.connect(rdir) as s:
+        _use_the_cable(s)
+        old = s.runtime_id
+        assert s.stop(wait=0) is False
+        _wait_for(lambda: read_info(rdir) is None, what="the runtime to start leaving")
+        with BrokerSession.connect(rdir, start_timeout=15.0) as s2:
+            assert s2.runtime_id != old
+            _use_the_cable(s2)
+
+
+def test_a_client_arriving_at_the_idle_exit_gets_the_next_one(broker_env, monkeypatch):
+    rdir, _ = broker_env
+    monkeypatch.setenv("FCAPZ_BROKER_IDLE_EXIT", "0.3")
+    monkeypatch.setenv("FCAPZ_BROKER_FAKE_CLOSE_S", "1.5")
+    with BrokerSession.connect(rdir) as s:
+        _use_the_cable(s)
+        old = s.runtime_id
+    _wait_for(lambda: read_info(rdir) is None, what="the idle exit to begin")
+    monkeypatch.setenv("FCAPZ_BROKER_IDLE_EXIT", "30")
+    with BrokerSession.connect(rdir, start_timeout=15.0) as s2:
+        assert s2.runtime_id != old
+        _use_the_cable(s2)
+
+
+def test_a_stopping_runtime_takes_no_new_client(tmp_path):
+    rdir = tmp_path / "rt"
+    rt = Runtime(rdir, transport_factory=lambda s: FakeElaTransport())
+    served = threading.Thread(target=rt.serve, daemon=True)
+    served.start()
+    _wait_for(lambda: read_info(rdir), what="runtime up")
+    with BrokerSession.connect(rdir, autostart=False) as s:
+        rt.stop(delay=1.0)          # decided to stop, still listening
+        with pytest.raises(BrokerNotRunning):
+            BrokerSession.connect(rdir, autostart=False)
+        assert s.status()["clients"], "the clients it has are still served"
+    served.join(10)
+    assert not served.is_alive()
+
+
+def test_a_runtime_that_stalls_in_the_handshake_does_not_hold_the_client(
+        tmp_path, monkeypatch):
+    rdir = ensure_dir(tmp_path / "rt")
+    family, address = endpoint(rdir, "stall")
+    listener = mpc.Listener(address, family)
+    held = []
+    threading.Thread(target=lambda: held.append(listener.accept()), daemon=True).start()
+    info = {"address": address, "family": family, "authkey": "00" * 32, "pid": 0}
+    fd = os.open(rdir / INFO_NAME, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(info, fh)
+    monkeypatch.setattr(broker_session, "AUTH_TIMEOUT_S", 0.5)
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(BrokerNotRunning):
+            BrokerSession.connect(rdir, autostart=False)
+        assert time.monotonic() - t0 < 5.0
+    finally:
+        for conn in held:
+            conn.close()
+        listener.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process creation flags")
+def test_the_runtime_gets_a_windowless_console(tmp_path, monkeypatch):
+    # Without a console (DETACHED_PROCESS) every console program the runtime
+    # starts, xsdb or quartus_stp, would open a visible one.
+    seen = []
+
+    def popen(args, **kw):
+        seen.append(kw.get("creationflags", 0))
+        raise OSError("not started")
+
+    monkeypatch.setattr(broker_session.subprocess, "Popen", popen)
+    with pytest.raises(BrokerStartError, match="could not start"):
+        BrokerSession.connect(tmp_path / "rt")
+    assert seen and all(f & subprocess.CREATE_NO_WINDOW for f in seen)
+    assert not any(f & subprocess.DETACHED_PROCESS for f in seen)
+    assert seen[0] & subprocess.CREATE_BREAKAWAY_FROM_JOB
 
 
 def test_a_second_runtime_loses_the_election(broker_env):

@@ -12,6 +12,8 @@ a file ``trigger-<slot>`` in ``FCAPZ_BROKER_FAKE_DIR``
 once.  ``fail-connect`` in that directory makes ``connect()`` raise, and
 ``fail-io`` makes the next register access raise ``OSError`` once
 (``fail_io = "always"`` in-process: every access, a dead cable).
+``FCAPZ_BROKER_FAKE_CLOSE_S`` makes ``close()`` take that long, as a real
+cable's does.
 
 Chain 3 holds a plain EIO (no manager) whose outputs read back and whose
 inputs read ``0xA5``.
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 from fcapz import _version_tuple
@@ -110,6 +113,7 @@ class FakeElaTransport(Transport):
         self.connects += 1
 
     def close(self) -> None:
+        time.sleep(float(os.environ.get("FCAPZ_BROKER_FAKE_CLOSE_S") or 0))
         self.closed += 1
 
     def select_chain(self, chain: int) -> None:

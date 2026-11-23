@@ -343,6 +343,9 @@ class Runtime:
         self._clients: dict[str, _Client] = {}
         self._ids = itertools.count(1)
         self._stopping = threading.Event()
+        # Set (with ``_lock``) once the runtime has decided to stop: no new
+        # client is taken from then on.
+        self._refusing = False
         self.family: str | None = None
         self.address: str | None = None
 
@@ -415,7 +418,11 @@ class Runtime:
     # ---- lifetime ------------------------------------------------------
 
     def stop(self, delay: float = 0.0) -> None:
-        """Ask :meth:`serve` to return (after *delay*, so a reply can go out)."""
+        """Ask :meth:`serve` to return (after *delay*, so a reply can go out).
+        New clients are refused from now on."""
+        with self._lock:
+            self._refusing = True
+
         def go() -> None:
             if delay:
                 time.sleep(delay)
@@ -430,16 +437,22 @@ class Runtime:
     def _idle_watch(self) -> None:
         idle_since = time.monotonic()
         while not self._stopping.wait(0.2):
+            # Decided with the lock the accept loop registers clients under:
+            # a client is either seen here or refused, never dropped.
             with self._lock:
-                busy = bool(self._clients)
-            busy = busy or any(e.active_jobs() for e in self.engines())
-            now = time.monotonic()
-            if busy:
-                idle_since = now
-            elif now - idle_since >= self.idle_exit:
-                log.info("idle for %.0f s: exiting", self.idle_exit)
-                self.stop()
-                return
+                busy = bool(self._clients) or any(
+                    e.active_jobs() for e in self._engines.values()
+                )
+                now = time.monotonic()
+                if busy:
+                    idle_since = now
+                    continue
+                if now - idle_since < self.idle_exit:
+                    continue
+                self._refusing = True
+            log.info("idle for %.0f s: exiting", self.idle_exit)
+            self.stop()
+            return
 
     def _write_info(self) -> None:
         data = {
@@ -455,15 +468,27 @@ class Runtime:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
-        os.replace(tmp, self.dir / INFO_NAME)
+        for attempt in range(40):
+            try:
+                os.replace(tmp, self.dir / INFO_NAME)
+                return
+            except PermissionError:
+                # Windows: a client is reading a dead runtime's file.
+                if attempt == 39:
+                    raise
+                time.sleep(0.05)
 
     def _remove_info(self) -> None:
         info = read_info(self.dir)
         if info and info.get("runtime_id") == self.runtime_id:
-            try:
-                (self.dir / INFO_NAME).unlink()
-            except OSError:
-                pass
+            for _ in range(40):
+                try:
+                    (self.dir / INFO_NAME).unlink()
+                    return
+                except PermissionError:
+                    time.sleep(0.05)    # Windows: a client is reading it
+                except OSError:
+                    return
 
     def serve(self) -> int:
         """Win the election, listen, serve until stopped or idle; the exit code."""
@@ -497,13 +522,23 @@ class Runtime:
                     break
                 client = _Client(self, conn, f"c{next(self._ids)}")
                 with self._lock:
-                    self._clients[client.id] = client
+                    refused = self._refusing
+                    if not refused:
+                        self._clients[client.id] = client
+                if refused:
+                    # Stopping: this client starts the next runtime.
+                    conn.close()
+                    continue
                 client.start()
         finally:
+            # The endpoint and runtime.json go first, so a new client learns
+            # at once that this runtime is leaving; the election lock goes
+            # last, when the cables are closed and the next runtime may open
+            # them.  A client that comes in between waits for that (see
+            # BrokerSession._start).
             self._stopping.set()
-            self._remove_info()
-            for eng in self.engines():
-                eng.close()
+            with self._lock:
+                self._refusing = True
             if listener is not None:
                 try:
                     listener.close()
@@ -514,6 +549,14 @@ class Runtime:
                     os.unlink(self.address)
                 except OSError:
                     pass
+                if Path(self.address).parent != self.dir:
+                    try:
+                        os.rmdir(Path(self.address).parent)
+                    except OSError:
+                        pass
+            self._remove_info()
+            for eng in self.engines():
+                eng.close()
             election.close()
             log.info("runtime %s stopped", self.runtime_id)
         return 0

@@ -1528,7 +1528,13 @@ def _run_broker_admin(args: argparse.Namespace) -> int:
                 else:
                     _print_broker_status(st)
             else:
-                session.stop(force=args.force)
+                if not session.stop(force=args.force):
+                    print(
+                        f"error: broker {session.runtime_id} (pid "
+                        f"{session.runtime_pid}) is still shutting down",
+                        file=sys.stderr,
+                    )
+                    return 1
                 print(f"stopped broker {session.runtime_id} (pid {session.runtime_pid})")
         except BrokerError as exc:
             print(f"error: {exc}", file=sys.stderr)
