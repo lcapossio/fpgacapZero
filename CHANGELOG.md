@@ -242,6 +242,32 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   popped on that scan's UPDATE, whatever the new command (Verilog and
   VHDL). The host's `burst_read` drains the FIFO, so it was not affected.
 
+- **EJTAG-AXI: WSTRB outside the transfer.** The bridge passed the host's
+  strobes to the bus as given, so a write to an unaligned address, or a
+  narrow INCR, FIXED or WRAP burst, could strobe bytes outside the beat's
+  transfer, which AXI forbids (a slave may write them or reject the
+  beat). Each beat's strobes are now ANDed with the lanes allowed for its
+  address, size and burst type: a `WRITE` to `0x101` with strobes `0xF`
+  writes bytes `0x101`-`0x103` only. Verilog and VHDL; the cocotb
+  AxiTrace now checks the lanes of every W beat.
+
+- **Verilog EJTAG-AXI: a CONFIG scan could swallow an AXI response.** The
+  scan after a CONFIG showed the CONFIG data but also popped a response
+  that had arrived meanwhile, so reading `CFG_AXI_STATUS` while a read was
+  in flight could lose that read's answer. A CONFIG scan now leaves the
+  response for the next scan, as the VHDL bridge already did, and like
+  VHDL a scan that shows a result no longer reports `busy` for responses
+  still owed.
+
+- **EJTAG-AXI: a burst read hid errors on all but its last beat.** The
+  burst's response was the last beat's RRESP, so a SLVERR or DECERR on an
+  earlier beat came back OKAY and `burst_read()` returned that beat's data
+  without an error. The response is now the first non-OKAY RRESP of the
+  burst, as for streaming reads (Verilog and VHDL). `burst_read()` now
+  also waits for a response that comes after the last word (a burst
+  still running at the scan after RSTART), so the error raises there
+  and not on the next command.
+
 - **EJTAG-AXI could break the AXI bus it debugs.** A timeout or RESET
   dropped AWVALID, WVALID or ARVALID before READY; a late B was taken as
   the next write's response; an aborted burst write never sent WLAST and

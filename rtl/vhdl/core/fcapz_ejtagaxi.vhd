@@ -176,6 +176,54 @@ architecture rtl of fcapz_ejtagaxi is
         end case;
     end function;
 
+    -- Byte lanes beat idx of a write may strobe (AXI A3.4.1): from the beat
+    -- address to the end of its size-aligned transfer.  Beat 0 and FIXED
+    -- beats use the start address, later INCR beats step from its aligned
+    -- base, WRAP beats (aligned start, see burst_ok) wrap in their window.
+    -- The host's WSTRB is ANDed with it, so a narrow or unaligned write
+    -- never strobes a byte outside the transfer.  Only the address bits
+    -- below the bus width matter, so the sums are LANE_W bits wide.
+    constant LANE_W : positive := fcapz_clog2(DATA_BYTES);
+    constant LANE_M : unsigned(LANE_W - 1 downto 0) := to_unsigned(DATA_BYTES - 1, LANE_W);
+
+    function lane_mask(addr  : std_logic_vector;
+                       len   : std_logic_vector(7 downto 0);
+                       size  : std_logic_vector(2 downto 0);
+                       btype : std_logic_vector(1 downto 0);
+                       idx   : unsigned(8 downto 0)) return std_logic_vector is
+        variable sz   : natural range 0 to 7;
+        variable szm  : unsigned(LANE_W - 1 downto 0);
+        variable wm   : unsigned(LANE_W - 1 downto 0);
+        variable offs : unsigned(LANE_W - 1 downto 0);
+        variable a0   : unsigned(LANE_W - 1 downto 0);
+        variable a    : unsigned(LANE_W - 1 downto 0);
+        variable lo   : unsigned(LANE_W - 1 downto 0);
+        variable m    : std_logic_vector(DATA_BYTES - 1 downto 0);
+    begin
+        sz := to_integer(unsigned(size));
+        szm := resize(shift_left(to_unsigned(1, 12), sz) - 1, LANE_W);
+        wm := resize(shift_left(resize(unsigned(len), 12) + 1, sz) - 1, LANE_W);
+        offs := resize(shift_left(resize(idx, 12), sz), LANE_W);
+        a0 := unsigned(addr(addr'right + LANE_W - 1 downto addr'right));
+        if idx = 0 or btype = "00" then
+            a := a0;
+        elsif btype = "10" then
+            a := (a0 and not wm) or ((a0 + offs) and wm);
+        else
+            a := (a0 and not szm) + offs;
+        end if;
+        lo := a and LANE_M;
+        for i in 0 to DATA_BYTES - 1 loop
+            if i >= to_integer(lo) and
+               (to_unsigned(i, LANE_W) and not szm) = (lo and not szm) then
+                m(i) := '1';
+            else
+                m(i) := '0';
+            end if;
+        end loop;
+        return m;
+    end function;
+
     type axi_state_t is (
         ST_IDLE,
         ST_W_WAIT,
@@ -260,6 +308,7 @@ architecture rtl of fcapz_ejtagaxi is
     signal launch_burst_type : std_logic_vector(1 downto 0) := "01";
     signal resp_rdata : std_logic_vector(DATA_W - 1 downto 0) := (others => '0');
     signal resp_code : std_logic_vector(1 downto 0) := "00";
+    signal rd_err : std_logic_vector(1 downto 0) := "00";  -- first non-OKAY rresp of a burst
 
     signal m_axi_awaddr_i : std_logic_vector(ADDR_W - 1 downto 0) := (others => '0');
     signal m_axi_awlen_i : std_logic_vector(7 downto 0) := (others => '0');
@@ -877,7 +926,10 @@ begin
                 elsif m_axi_wvalid_i = '0' and we_w_idx <= resize(we_len, 9) and
                       we_rd_ok = '1' then
                     m_axi_wdata_i <= wbuf_q(DATA_W - 1 downto 0);
-                    m_axi_wstrb_i <= wbuf_q(WB_W - 1 downto DATA_W);
+                    m_axi_wstrb_i <= wbuf_q(WB_W - 1 downto DATA_W) and
+                                     lane_mask(m_axi_awaddr_i, m_axi_awlen_i,
+                                               m_axi_awsize_i, m_axi_awburst_i,
+                                               we_w_idx);
                     m_axi_wvalid_i <= '1';
                     if we_w_idx = resize(we_len, 9) then
                         m_axi_wlast_i <= '1';
@@ -929,6 +981,7 @@ begin
             launch_burst_type <= "01";
             resp_rdata <= (others => '0');
             resp_code <= "00";
+            rd_err <= "00";
             m_axi_araddr_i <= (others => '0');
             m_axi_arlen_i <= (others => '0');
             m_axi_arsize_i <= "010";
@@ -1174,6 +1227,7 @@ begin
                                     m_axi_arsize_i <= cmd_size;
                                     m_axi_arburst_i <= cmd_burst;
                                     m_axi_arvalid_i <= '1';
+                                    rd_err <= "00";
                                     axi_state <= ST_BURST_AR;
                                 end if;
                             else
@@ -1245,9 +1299,18 @@ begin
                         -- m_axi_rready and fifo_wr_en_i are concurrent here.
                         if m_axi_rvalid = '1' and fifo_full = '0' then
                             timeout_cnt <= (others => '0');
+                            -- The response reports the first non-OKAY beat,
+                            -- not just the last one.
+                            if m_axi_rresp /= "00" and rd_err = "00" then
+                                rd_err <= m_axi_rresp;
+                            end if;
                             if m_axi_rlast = '1' then
                                 resp_rdata <= m_axi_rdata;
-                                resp_code <= m_axi_rresp;
+                                if rd_err /= "00" then
+                                    resp_code <= rd_err;
+                                else
+                                    resp_code <= m_axi_rresp;
+                                end if;
                                 axi_state <= ST_DONE;
                             end if;
                         elsif m_axi_rvalid = '0' then

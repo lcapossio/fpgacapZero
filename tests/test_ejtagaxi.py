@@ -314,6 +314,33 @@ class BatchOnlyBridgeTransport(FakeBridgeTransport):
         return out
 
 
+class _LateBurstResponse(FakeBridgeTransport):
+    """A slow slave: the burst's response is not ready on the scan after
+    RSTART, so it comes after the last word, carrying *late_resp*."""
+
+    def __init__(self, late_resp: int):
+        super().__init__()
+        self.late_resp = late_resp
+        self.owed = False
+
+    def _exec(self, cmd: int, addr: int, payload: int, wstrb: int) -> None:
+        if cmd == CMD_BURST_RSTART:
+            super()._exec(cmd, addr, payload, wstrb)
+            self.prev_valid = False  # no response yet
+            self.owed = True
+            return
+        if (cmd == CMD_BURST_RDATA and self.owed and not self.fifo
+                and self._last_cmd == CMD_BURST_RDATA):
+            self.owed = False
+            self.prev_valid = True
+            self.prev_rdata = 0
+            self.prev_resp = self.late_resp
+            if self.late_resp != RESP_OKAY:
+                self.error_sticky = True
+            return
+        super()._exec(cmd, addr, payload, wstrb)
+
+
 class EjtagAxiTests(unittest.TestCase):
 
     def _make_ctrl(
@@ -423,6 +450,22 @@ class EjtagAxiTests(unittest.TestCase):
             t.regs[i] = 0xBB00 + i
         result = ctrl.burst_read(0x0000, 4)
         self.assertEqual(result, [0xBB00 + i for i in range(4)])
+
+    def test_burst_read_raises_an_error_that_comes_after_the_words(self):
+        # BUG-309/BUG-325: the first non-OKAY RRESP arrives after the last
+        # word when the burst outlasts the RSTART scan; burst_read must wait
+        # for it rather than return and leave it to the next command.
+        ctrl, t = self._make_ctrl(_LateBurstResponse(RESP_SLVERR))
+        with self.assertRaises(AXIError):
+            ctrl.burst_read(0x0000, 4)
+
+    def test_burst_read_with_a_late_okay_response_returns_the_words(self):
+        ctrl, t = self._make_ctrl(_LateBurstResponse(RESP_OKAY))
+        for i in range(4):
+            t.regs[i] = 0xCC00 + i
+        self.assertEqual(ctrl.burst_read(0x0000, 4), [0xCC00 + i for i in range(4)])
+        self.assertFalse(t.owed)
+        self.assertEqual(ctrl.axi_read(0x0004), 0xCC01)
 
     def test_burst_chunks_respect_fifo_depth_and_4k(self):
         ctrl, _ = self._make_ctrl()  # FIFO_DEPTH=16

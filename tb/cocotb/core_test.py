@@ -168,6 +168,9 @@ EJTAG_AXI_FUNCTIONAL_COVERAGE = FunctionalCoverage(
         "burst_word_once",
         "reset_coalesced",
         "axi_valid_stable",
+        "wstrb_lanes_masked",
+        "config_keeps_resp",
+        "burst_first_rresp",
     ),
 )
 
@@ -2542,9 +2545,32 @@ def _signal_is_one(signal) -> bool:
     return _signal_int(signal) == 1
 
 
+def axi_legal_lanes(addr: int, size: int, burst: int, length: int, beat: int,
+                    lanes: int) -> int:
+    """Byte lanes AXI4 lets beat *beat* of a write burst strobe (AXI spec
+    A3.4.1): from the beat's address up to the end of its transfer, within
+    the bus word.  The first beat (and every FIXED beat) starts at the
+    unaligned start address; later beats start size-aligned, and WRAP beats
+    wrap at the burst's wrap boundary."""
+    nbytes = 1 << size
+    aligned = addr & ~(nbytes - 1)
+    if beat == 0 or burst == 0:
+        beat_addr = addr
+    elif burst == 2:
+        wrap = nbytes * (length + 1)
+        lower = addr & ~(wrap - 1)
+        beat_addr = lower + (aligned + beat * nbytes - lower) % wrap
+    else:
+        beat_addr = aligned + beat * nbytes
+    low = beat_addr % lanes
+    high = (beat_addr & ~(nbytes - 1)) % lanes + nbytes - 1
+    return sum(1 << i for i in range(low, high + 1))
+
+
 class AxiTrace:
     """Records AW/W/AR handshakes and checks the master side of AXI4: once a
-    VALID is up it stays up, with its payload unchanged, until READY."""
+    VALID is up it stays up, with its payload unchanged, until READY, and
+    every W beat strobes only lanes inside its transfer (axi_legal_lanes)."""
 
     def __init__(self, dut) -> None:
         self.dut = dut
@@ -2554,6 +2580,33 @@ class AxiTrace:
         self.ar: list[dict[str, int]] = []
         self.violations: list[str] = []
         self._pending: dict[str, dict[str, int] | None] = {"aw": None, "w": None, "ar": None}
+        self._lanes = len(dut.m_axi_wstrb)
+        # W beats not yet matched with their AW (W may go first), and the
+        # position of the next beat: write number, beat within it.
+        self._w_unmatched: list[tuple[dict[str, int], int, int]] = []
+        self._w_seen = 0
+        self._w_write = 0
+        self._w_beat = 0
+
+    def _check_lanes(self) -> None:
+        for beat in self.w[self._w_seen:]:
+            self._w_unmatched.append((beat, self._w_write, self._w_beat))
+            if beat["last"]:
+                self._w_write += 1
+                self._w_beat = 0
+            else:
+                self._w_beat += 1
+        self._w_seen = len(self.w)
+        while self._w_unmatched and self._w_unmatched[0][1] < len(self.aw):
+            beat, write, n = self._w_unmatched.pop(0)
+            aw = self.aw[write]
+            legal = axi_legal_lanes(aw["addr"], aw["size"], aw["burst"], aw["len"], n,
+                                    self._lanes)
+            if beat["strb"] & ~legal:
+                self.violations.append(
+                    f"cycle {beat['cycle']}: wstrb 0x{beat['strb']:X} on beat {n} of the "
+                    f"write to 0x{aw['addr']:X} (size {aw['size']}, burst {aw['burst']}, "
+                    f"len {aw['len']}) outside lanes 0x{legal:X}")
 
     def _payload(self, channel: str) -> dict[str, int]:
         d = self.dut
@@ -2590,10 +2643,16 @@ class AxiTrace:
             self.cycle += 1
             if _signal_is_one(d.axi_rst):
                 self._pending = {"aw": None, "w": None, "ar": None}
+                # A reset ends any write half done: pair later beats afresh.
+                self._w_unmatched = []
+                self._w_seen = len(self.w)
+                self._w_write = len(self.aw)
+                self._w_beat = 0
                 continue
             self._check("aw", d.m_axi_awvalid, d.m_axi_awready, self.aw)
             self._check("w", d.m_axi_wvalid, d.m_axi_wready, self.w)
             self._check("ar", d.m_axi_arvalid, d.m_axi_arready, self.ar)
+            self._check_lanes()
 
 
 async def init_ejtagaxi(dut, axi_clock=None) -> tuple[AxiRam, AxiTrace]:
@@ -3010,6 +3069,166 @@ async def fcapz_ejtagaxi_tck_order(dut):
     assert axi_resp(out) == 0 and axi_rdata(out) == values[2], hex(axi_rdata(out))
     assert not trace.violations, trace.violations
     EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("reset_coalesced")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_wstrb_lanes(dut):
+    """WSTRB stays inside each beat's transfer (BUG-300).
+
+    The host's strobes are masked to the lanes AXI allows for the beat's
+    address, size and burst type, so a narrow or unaligned write never
+    touches a byte outside it.  AxiTrace checks every W beat against the
+    spec; memory shows what the slave actually wrote.
+    """
+    axi_ram, trace = await init_ejtagaxi(dut)
+    mem = axi_ram.read_dword
+
+    def fill(addr: int) -> None:
+        axi_ram.write_dword(addr, 0x5A5A_5A5A)
+
+    # A single unaligned write: lanes 1-3 only.
+    fill(0x100)
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x101, 0xAABB_CCDD, 0xF), "unaligned write")
+    assert axi_resp(out) == 0
+    assert trace.w[-1]["strb"] == 0xE, hex(trace.w[-1]["strb"])
+    assert mem(0x100) == 0xAABB_CC5A, hex(mem(0x100))
+
+    async def burst(addr: int, length: int, size: int, btype: int, label: str) -> list[int]:
+        w0 = len(trace.w)
+        resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr,
+                                             burst_cfg(length, size, btype), 0)] + [
+            axi_cmd(CMD_BURST_WDATA, 0, 0x4433_2211, 0xF) for _ in range(length + 1)], label)
+        assert resps == [0] * (length + 1), f"{label}: responses {resps}"
+        return [beat["strb"] for beat in trace.w[w0:]]
+
+    # INCR of bytes: one lane per beat.
+    fill(0x200)
+    assert await burst(0x200, 3, 0, 1, "INCR bytes") == [0x1, 0x2, 0x4, 0x8]
+    assert mem(0x200) == 0x4433_2211, hex(mem(0x200))
+    # FIXED halfwords at an odd halfword: the same two lanes every beat.
+    fill(0x300)
+    assert await burst(0x302, 1, 1, 0, "FIXED halfwords") == [0xC, 0xC]
+    assert mem(0x300) == 0x4433_5A5A, hex(mem(0x300))
+    # WRAP of two bytes from the top of the window: lane 3, then lane 2.
+    fill(0x400)
+    assert await burst(0x403, 1, 0, 2, "WRAP bytes") == [0x8, 0x4]
+    assert mem(0x400) == 0x4433_5A5A, hex(mem(0x400))
+    # Unaligned INCR words: only the first beat is narrowed.
+    fill(0x500)
+    fill(0x504)
+    assert await burst(0x501, 1, 2, 1, "unaligned INCR") == [0xE, 0xF]
+    assert mem(0x500) == 0x4433_225A and mem(0x504) == 0x4433_2211, (
+        hex(mem(0x500)), hex(mem(0x504)))
+    # Strobes the host leaves off stay off.
+    fill(0x600)
+    out = await issue_and_wait_valid(
+        dut, axi_cmd(CMD_WRITE, 0x602, 0xAABB_CCDD, 0x4), "sparse unaligned write")
+    assert trace.w[-1]["strb"] == 0x4 and mem(0x600) == 0x5ABB_5A5A, hex(mem(0x600))
+
+    # Sweep: every size, burst type and start lane, with mixed host strobes;
+    # each beat must be exactly the host's strobes inside the legal lanes.
+    host = [0xF, 0xB, 0x6, 0xD]
+    base = 0x800
+    for size in range(3):
+        for btype in range(3):
+            for lane in range(4):
+                addr = base + lane
+                if btype == 2:
+                    addr &= ~((1 << size) - 1)  # WRAP starts size-aligned
+                length = 3
+                w0 = len(trace.w)
+                resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, addr,
+                                                     burst_cfg(length, size, btype), 0)] + [
+                    axi_cmd(CMD_BURST_WDATA, 0, 0x1000_0000 * (i + 1), host[i])
+                    for i in range(length + 1)], f"sweep size {size} burst {btype} @0x{addr:X}")
+                assert resps == [0] * (length + 1), resps
+                got = [beat["strb"] for beat in trace.w[w0:]]
+                want = [host[i] & axi_legal_lanes(addr, size, btype, length, i, 4)
+                        for i in range(length + 1)]
+                assert got == want, (
+                    f"size {size} burst {btype} @0x{addr:X}: strobes {got}, expected {want}")
+                base += 0x40
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("wstrb_lanes_masked")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_config_keeps_resp(dut):
+    """A CONFIG scan never takes a queued AXI response (BUG-302).
+
+    A READ waits on ARREADY; a CONFIG is scanned; the READ completes.  The
+    next scan shows the CONFIG data, and the READ's response stays queued for
+    the scan after it.  The same holds when the scan after the CONFIG is a
+    BURST_RDATA.  SEL is held up before that scan, as a real TAP does:
+    dr_scan_72 drops it between scans, which hides the bug.
+    """
+    axi_ram, trace = await init_ejtagaxi(dut)
+    rif = axi_ram.read_if
+    axi_ram.write_dword(0x100, 0x1234_5678)
+    axi_ram.write_dword(0x104, 0x9ABC_DEF0)
+    out = await issue_and_wait_valid(dut, axi_cmd(CMD_CONFIG, 0x0000, 0, 0), "VERSION")
+    version = axi_rdata(out)
+    assert version not in (0, 0x1234_5678, 0x9ABC_DEF0)
+
+    for follow, addr, want in ((CMD_NOP, 0x100, 0x1234_5678),
+                               (CMD_BURST_RDATA, 0x104, 0x9ABC_DEF0)):
+        label = f"READ, CONFIG, {'NOP' if follow == CMD_NOP else 'BURST_RDATA'}"
+        rif.ar_channel.pause = True
+        await dr_scan_72(dut, axi_cmd(CMD_READ, addr, 0, 0))
+        await axi_cdc_wait(dut, 6)
+        await dr_scan_72(dut, axi_cmd(CMD_CONFIG, 0x0000, 0, 0))
+        rif.ar_channel.pause = False
+        # SEL stays up between scans, as it does on a real TAP while the
+        # USER instruction is loaded: the TCK side sees the response arrive.
+        await RisingEdge(dut.tck)
+        dut.sel.value = 1
+        await axi_cdc_wait(dut, 30)
+        out = await dr_scan_72(dut, axi_cmd(follow, 0, 0, 0))
+        # busy clear: a result is shown, the READ is answered, not in flight.
+        assert axi_status(out) & 0x3 == 0x1 and axi_rdata(out) == version, (
+            f"{label}: status 0x{axi_status(out):x} data 0x{axi_rdata(out):08X}")
+        await axi_cdc_wait(dut)
+        out = await wait_resp(dut, label)
+        assert axi_resp(out) == 0 and axi_rdata(out) == want, (
+            f"{label}: the READ's response was lost; got 0x{axi_rdata(out):08X}")
+        out = await drain_until_idle(dut)
+        assert not (axi_status(out) & 0x5), f"{label}: status 0x{axi_status(out):x}"
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("config_keeps_resp")
+
+
+@cocotb.test()
+async def fcapz_ejtagaxi_burst_rresp(dut):
+    """A burst read reports its first non-OKAY RRESP, not the last beat's
+    (BUG-309): an error on a middle beat must not come back OKAY."""
+    axi_ram, trace = await init_ejtagaxi(dut)
+    rif = axi_ram.read_if
+    base = 0x100
+    for i in range(4):
+        axi_ram.write_dword(base + 4 * i, 0xE000_0000 + i)
+    plain_read = rif._read
+    bad = {base + 4}
+
+    async def read_with_error(address, length):
+        if address in bad:
+            raise ValueError("injected SLVERR")
+        return await plain_read(address, length)
+
+    rif._read = read_with_error
+    resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, base, burst_cfg(3), 0),
+                                 axi_cmd(CMD_BURST_RSTART, 0, 0, 0)], "burst, beat 1 SLVERR")
+    assert resps == [2], f"burst with a SLVERR beat answered {resps}"
+    await clear_after_error(dut)
+
+    # The error is per burst: the next clean burst answers OKAY.
+    bad.clear()
+    resps = await scan_seq(dut, [axi_cmd(CMD_BURST_SETUP, base, burst_cfg(3), 0),
+                                 axi_cmd(CMD_BURST_RSTART, 0, 0, 0)], "clean burst")
+    assert resps == [0], f"clean burst after an error answered {resps}"
+    await clear_after_error(dut)
+    assert not trace.violations, trace.violations
+    EJTAG_AXI_FUNCTIONAL_COVERAGE.hit("burst_first_rresp")
 
 
 @cocotb.test()

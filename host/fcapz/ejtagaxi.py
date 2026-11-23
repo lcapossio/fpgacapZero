@@ -642,22 +642,33 @@ class EjtagAxiController:
         scans.extend((CMD_BURST_RDATA, 0, 0, 0) for _ in range(count + 2 + self._MAX_BUSY_RETRIES))
         decoded = self._scan_batch(scans)
         out: list[int] = []
+        # The burst's response (its first non-OKAY RRESP, if any) comes on
+        # the scan after RSTART when the burst finished by then; otherwise
+        # the words come first and the response after the last one.  Wait
+        # for it, so an error raises here and not on the next command.
+        resp_seen = False
         for idx, (status, resp, rdata, _) in enumerate(decoded[1:], start=1):
             self._check_error(status, resp, "Burst read")
             if status & self._PREV_VALID:
                 if idx <= 2:
+                    resp_seen = resp_seen or idx == 2
                     continue
-                out.append(rdata)
                 if len(out) == count:
+                    return out  # the late response, already checked
+                out.append(rdata)
+                if len(out) == count and resp_seen:
                     return out
                 continue
-            if status == 0 or (status & self._FIFO_NOTEMPTY):
+            if len(out) == count or status == 0 or (status & self._FIFO_NOTEMPTY):
                 continue
             if out and not (status & self._BUSY):
                 raise AXIError(
                     f"Burst read stalled after {len(out)}/{count} beats: "
                     f"status=0x{status:X}"
                 )
+        if len(out) == count:
+            self._wait_valid("Burst read response")
+            return out
         raise AXIError(
             f"Burst read still unresolved after {len(out)}/{count} beats"
         )

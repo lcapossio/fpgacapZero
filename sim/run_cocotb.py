@@ -555,6 +555,23 @@ TARGETS: tuple[Target, ...] = (
         ),
     ),
     Target(
+        "fcapz_ejtagaxi_axi_rules",
+        "fcapz_ejtagaxi",
+        (
+            RTL / "fcapz_async_fifo.v",
+            RTL / "fcapz_ejtagaxi.v",
+        ),
+        ("fcapz_ejtagaxi_wstrb_lanes", "fcapz_ejtagaxi_config_keeps_resp",
+         "fcapz_ejtagaxi_burst_rresp"),
+        {"FIFO_DEPTH": 16, "TIMEOUT": 1024},
+        (
+            RTL / "vhdl" / "pkg" / "fcapz_pkg.vhd",
+            RTL / "vhdl" / "pkg" / "fcapz_util_pkg.vhd",
+            RTL / "vhdl" / "core" / "fcapz_async_fifo.vhd",
+            RTL / "vhdl" / "core" / "fcapz_ejtagaxi.vhd",
+        ),
+    ),
+    Target(
         "fcapz_ejtaguart",
         "fcapz_ejtaguart",
         (RTL / "fcapz_async_fifo.v", RTL / "fcapz_ejtaguart.v"),
@@ -641,6 +658,11 @@ COVERAGE_TARGETS = {
         "EJTAG_AXI_COCOTB_RUN",
     ),
     "fcapz_ejtagaxi_tck_order": (
+        "fcapz_ejtagaxi",
+        "EJTAG_AXI_COCOTB_COVERAGE_JSON",
+        "EJTAG_AXI_COCOTB_RUN",
+    ),
+    "fcapz_ejtagaxi_axi_rules": (
         "fcapz_ejtagaxi",
         "EJTAG_AXI_COCOTB_COVERAGE_JSON",
         "EJTAG_AXI_COCOTB_RUN",

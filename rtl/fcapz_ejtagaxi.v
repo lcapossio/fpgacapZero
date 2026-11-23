@@ -314,7 +314,7 @@ module fcapz_ejtagaxi #(
     reg [31:0]          strm_left;     // words not yet requested
     reg [7:0]           strm_len;      // beats of the next burst
     reg                 strm_len_ok;   // strm_len computed for strm_addr/left
-    reg [1:0]           strm_err;      // first non-OKAY rresp of the stream
+    reg [1:0]           strm_err;      // first non-OKAY rresp of the burst/stream
 
     // -- Write path (axi_clk domain) ------------------------------------------
     // A write reaches the bus only once all its beats are in wbuf: a burst is
@@ -606,9 +606,11 @@ module fcapz_ejtagaxi #(
     // Capture-time data source mux
     // Nothing is captured while a CMD_RESET is in flight: the AXI sides of
     // the FIFOs are not reset yet, so the TCK side may see stale entries.
+    // A CONFIG scan shows config_rdata and leaves a queued response alone.
     wire capture_burst_data = (last_cmd == CMD_BURST_RDATA) && fifo_notempty &&
                               !reset_busy_tck;
     wire capture_resp_data  = !capture_burst_data && !reset_busy_tck &&
+                              (last_cmd != CMD_CONFIG) &&
                               respq_head_seen &&
                               respq_rd_ready &&
                               !respq_empty;
@@ -632,6 +634,12 @@ module fcapz_ejtagaxi #(
                                (pending_count != {(CMD_FIFO_AW+1){1'b0}}) ||
                                cmdq_full || !cmdq_wr_ready || !cmdq_rd_ready;
     wire [3:0]  status_bits  = {fifo_notempty, error_sticky, busy_status, prev_valid};
+    // busy as captured: owed responses do not count on a scan that shows a
+    // result (CONFIG, burst word or response), as in the VHDL bridge.
+    wire        capture_busy = reset_busy_tck ||
+                               cmdq_full || !cmdq_wr_ready || !cmdq_rd_ready ||
+                               ((pending_count != {(CMD_FIFO_AW+1){1'b0}}) &&
+                                !capture_prev_valid);
 
     assign debug_tck = DEBUG_EN ? {
         sr,
@@ -804,7 +812,7 @@ module fcapz_ejtagaxi #(
                 // Build status with live values that reflect this capture's updates
                 sr <= {{fifo_notempty,
                         error_sticky | (capture_resp_data & (respq_code != 2'b00)),
-                        busy_status & ~capture_resp_data,
+                        capture_busy,
                         capture_prev_valid},
                        2'b00, capture_resp, info_field, capture_rdata};
 
@@ -1480,6 +1488,41 @@ module fcapz_ejtagaxi #(
         end
     endfunction
 
+    // Byte lanes beat idx of a write may strobe (AXI A3.4.1): from the beat
+    // address to the end of its size-aligned transfer.  Beat 0 and FIXED
+    // beats use the start address, later INCR beats step from its aligned
+    // base, WRAP beats (aligned start, see burst_ok) wrap in their window.
+    // The host's WSTRB is ANDed with it, so a narrow or unaligned write
+    // never strobes a byte outside the transfer.  Only the address bits
+    // below the bus width matter, so the sums are LANE_W bits wide.
+    localparam              LANE_W = (DATA_W > 8) ? $clog2(DATA_W / 8) : 1;
+    localparam [LANE_W-1:0] LANE_M = DATA_W / 8 - 1;
+
+    function [DATA_W/8-1:0] lane_mask;
+        input [ADDR_W-1:0] addr;
+        input [7:0]        len;
+        input [2:0]        size;
+        input [1:0]        btype;
+        input [8:0]        idx;
+        reg   [LANE_W-1:0] szm, wm, offs, a0, a, lo;
+        integer            i;
+        begin
+            szm  = (12'd1 << size) - 12'd1;
+            wm   = (({4'd0, len} + 12'd1) << size) - 12'd1;
+            offs = {3'd0, idx} << size;
+            a0   = addr[LANE_W-1:0];
+            if (idx == 9'd0 || btype == 2'b00)
+                a = a0;
+            else if (btype == 2'b10)
+                a = (a0 & ~wm) | ((a0 + offs) & wm);
+            else
+                a = (a0 & ~szm) + offs;
+            lo = a & LANE_M;
+            for (i = 0; i < DATA_W / 8; i = i + 1)
+                lane_mask[i] = (i >= lo) && ((i & ~szm) == (lo & ~szm));
+        end
+    endfunction
+
     // Read channel owes something: beats of an accepted read, or an AR held
     // up after a timeout/RESET.  Write channel owes something: we_busy.
     wire rd_busy   = r_drain || ar_orphan;
@@ -1600,7 +1643,9 @@ module fcapz_ejtagaxi #(
                     we_progress  <= 1'b1;
                 end else if (!m_axi_wvalid && (we_w_idx <= {1'b0, we_len}) && we_rd_ok) begin
                     m_axi_wdata  <= wbuf_q[DATA_W-1:0];
-                    m_axi_wstrb  <= wbuf_q[WB_W-1:DATA_W];
+                    m_axi_wstrb  <= wbuf_q[WB_W-1:DATA_W] &
+                                    lane_mask(m_axi_awaddr, we_len, m_axi_awsize,
+                                              m_axi_awburst, we_w_idx);
                     m_axi_wvalid <= 1'b1;
                     m_axi_wlast  <= (we_w_idx == {1'b0, we_len});
                     we_w_idx     <= we_w_idx + 9'd1;
@@ -1923,6 +1968,7 @@ module fcapz_ejtagaxi #(
                                 m_axi_arsize  <= launch_burst_size;
                                 m_axi_arburst <= launch_burst_type;
                                 m_axi_arvalid <= 1'b1;
+                                strm_err      <= 2'b00;
                                 axi_state     <= ST_BURST_AR;
                             end
                         end
@@ -2026,14 +2072,16 @@ module fcapz_ejtagaxi #(
                     // a beat is accepted exactly when fifo_wr_en writes it.
                     if (m_axi_rvalid && !fifo_full) begin
                         timeout_cnt    <= {TO_W{1'b0}};
-                        if (strm_active && m_axi_rresp != 2'b00 && strm_err == 2'b00)
+                        // The response reports the first non-OKAY beat,
+                        // not just the last one.
+                        if (m_axi_rresp != 2'b00 && strm_err == 2'b00)
                             strm_err <= m_axi_rresp;
                         if (m_axi_rlast && strm_active) begin
                             strm_addr <= strm_addr + {{(ADDR_W-10){1'b0}}, strm_len, 2'b00};
                             strm_left <= strm_left - {24'd0, strm_len};
                             axi_state <= ST_STREAM_ISSUE;
                         end else if (m_axi_rlast) begin
-                            resp_code    <= m_axi_rresp;
+                            resp_code    <= (strm_err != 2'b00) ? strm_err : m_axi_rresp;
                             resp_rdata   <= m_axi_rdata;
                             axi_state    <= ST_DONE;
                         end
