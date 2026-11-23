@@ -21,6 +21,7 @@ import itertools
 import os
 import queue
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -187,6 +188,11 @@ class BrokerSession:
             if found is not None:
                 if found[1].get("spawn_id") != spawn_id:
                     _discard_spawn(proc)
+                else:
+                    # Reap our runtime when it exits, or on POSIX it stays a
+                    # zombie child of this process for as long as we run.
+                    threading.Thread(target=proc.wait, name="fcapz-broker-reaper",
+                                     daemon=True).start()
                 return found
             rc = proc.poll()
             # Losing the election is fine: another starter's runtime won,
@@ -296,6 +302,16 @@ class BrokerSession:
 
     def close(self) -> None:
         self._closed = True
+        if os.name != "nt":
+            # Our receive thread is blocked in recv on this socket, and on
+            # POSIX close() does not end that call, so the runtime would not
+            # see us leave until this process exits.  shutdown() ends it.
+            with contextlib.suppress(OSError, ValueError):
+                sock = socket.socket(fileno=os.dup(self._conn.fileno()))
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                finally:
+                    sock.close()
         try:
             self._conn.close()
         except OSError:
