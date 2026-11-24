@@ -1,0 +1,609 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Leonardo Capossio - bard0 design - <hello@bard0.com>
+
+"""Client side of the broker: find or start the runtime, run jobs on it.
+
+:meth:`BrokerSession.connect` reads ``runtime.json`` in the per-user runtime
+directory and connects.  When no runtime answers it starts one (detached,
+with this fcapz on its ``PYTHONPATH``) and waits for it; a runtime that is
+shutting down at that moment is waited out, and the next one started.  A
+client never kills a runtime it started: it holds a
+:class:`~fcapz.broker.runtime.StarterClaim` while it waits, and a runtime
+whose claim is gone before any client said hello leaves by itself.  If that runtime
+cannot start, :class:`~fcapz.broker.wire.BrokerStartError` says why: there
+is never a silent fallback to a direct transport.
+
+Requests block in the caller, with a receiver thread underneath, so Ctrl+C
+reaches the caller at once: the session then cancels the job in the runtime
+and waits briefly for it to stop before re-raising.
+"""
+
+from __future__ import annotations
+
+import errno
+import itertools
+import os
+import queue
+import secrets
+import socket
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from multiprocessing import connection as mpc
+from pathlib import Path
+from typing import Any, Callable
+
+from ..analyzer import Analyzer, CaptureConfig, CaptureResult
+from . import wire
+from .coreref import CoreRef, TargetSpec
+from .runtime import (
+    EXIT_ALREADY_RUNNING,
+    LOG_NAME,
+    StarterClaim,
+    check_dir,
+    default_dir,
+    ensure_dir,
+    lock_held,
+    read_info,
+)
+
+START_TIMEOUT_S = 20.0
+#: Longest a runtime may take over the authentication handshake.
+AUTH_TIMEOUT_S = 5.0
+#: After a spawn lost the election with no runtime answering: how long until
+#: the next spawn.
+RESPAWN_DELAY_S = 0.25
+#: How long :meth:`BrokerSession.stop` waits for the runtime to exit.
+STOP_WAIT_S = 20.0
+_LOST = object()
+
+EventSink = Callable[[dict[str, Any]], None]
+
+
+class BrokerNotRunning(wire.BrokerError):
+    """No runtime answers in the directory (and none was to be started)."""
+
+
+@dataclass
+class BrokerCapture:
+    """A capture a broker job took."""
+
+    result: CaptureResult
+    core: CoreRef
+    timestamp_w: int = 0
+    capture_gen: int | None = None
+    job: int | None = None
+
+    def exporter(self) -> Analyzer:
+        """An unconnected :class:`~fcapz.analyzer.Analyzer` to write the
+        result with (``write_json`` / ``write_csv`` / ``write_vcd``)."""
+        a = Analyzer(None)  # type: ignore[arg-type] - only exports
+        a._hw_timestamp_w = self.timestamp_w  # noqa: SLF001
+        return a
+
+
+_abort = wire.abort_connection
+
+_CONNECT_AGAIN = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINPROGRESS,
+                  errno.EALREADY, errno.EINTR)
+
+
+def _connect_info(
+    directory: Path, timeout: float | None = None
+) -> tuple[Any, dict[str, Any]] | None:
+    """An authenticated connection to the runtime ``runtime.json`` names,
+    or None when none answers within *timeout* (``AUTH_TIMEOUT_S``): a
+    runtime that stops accepting (a full socket backlog, a busy pipe) or
+    stalls in the handshake must not hold the caller, nor leave a socket or
+    a thread behind each time it is tried."""
+    info = read_info(directory)
+    if not info:
+        return None
+    try:
+        key = bytes.fromhex(info["authkey"])
+        address, family = info["address"], info["family"]
+    except (KeyError, ValueError, TypeError):
+        return None
+    if timeout is None:
+        timeout = AUTH_TIMEOUT_S
+    if family == "AF_UNIX":
+        conn = _unix_connect(address, key, timeout)
+    else:
+        conn = _pipe_connect(address, family, key, timeout)
+    return None if conn is None else (conn, info)
+
+
+def _unix_connect(address: Any, key: bytes, timeout: float) -> Any:
+    """Connect to a Unix socket and authenticate, all within *timeout*.
+
+    The socket is this function's own and non-blocking while it connects (a
+    full backlog answers EAGAIN, tried again until the deadline), so it is
+    closed whatever happens.  The handshake blocks under a timer that shuts
+    the socket down at the deadline; the timer ends with the call."""
+    deadline = time.monotonic() + timeout
+    try:
+        sock = socket.socket(socket.AF_UNIX)
+    except OSError:
+        return None
+    try:
+        sock.setblocking(False)
+        while True:
+            err = sock.connect_ex(address)
+            if err in (0, errno.EISCONN):
+                break
+            if err not in _CONNECT_AGAIN or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.02)
+        sock.setblocking(True)
+        conn = mpc.Connection(sock.detach())
+    except Exception:  # noqa: BLE001 - nobody there
+        return None
+    finally:
+        sock.close()        # nothing to close once detached
+    lock = threading.Lock()
+    state = {"late": False, "done": False}
+
+    def expire() -> None:
+        with lock:
+            if not state["done"]:
+                state["late"] = True
+                _abort(conn)        # ends the handshake's read
+
+    timer = threading.Timer(max(0.0, deadline - time.monotonic()), expire)
+    timer.name = "fcapz-broker-connect"
+    timer.daemon = True
+    timer.start()
+    try:
+        mpc.answer_challenge(conn, key)
+        mpc.deliver_challenge(conn, key)
+        ok = True
+    except Exception:  # noqa: BLE001 - not our runtime, gone, or too late
+        ok = False
+    finally:
+        timer.cancel()
+    with lock:
+        state["done"] = True
+        if ok and not state["late"]:
+            return conn
+        _abort(conn)
+    return None
+
+
+def _pipe_connect(address: Any, family: str, key: bytes, timeout: float) -> Any:
+    """Connect to a named pipe and authenticate, in a helper thread the
+    caller leaves after *timeout*.
+
+    The thread does not stay: a pipe that is not there fails at once, a busy
+    one makes ``multiprocessing`` give up after its own 20 seconds, and a
+    connection is closed here at the timeout, which ends the handshake's
+    read; one that comes later is closed by the thread."""
+    lock = threading.Lock()
+    state: dict[str, Any] = {"conn": None, "ok": False, "abandoned": False}
+
+    def work() -> None:
+        try:
+            conn = mpc.Client(address, family)
+        except Exception:  # noqa: BLE001 - nobody there
+            return
+        with lock:
+            if state["abandoned"]:
+                _abort(conn)
+                return
+            state["conn"] = conn
+        try:
+            mpc.answer_challenge(conn, key)
+            mpc.deliver_challenge(conn, key)
+        except Exception:  # noqa: BLE001 - not our runtime, or gone
+            return
+        with lock:
+            if state["abandoned"]:
+                _abort(conn)
+            else:
+                state["ok"] = True
+
+    t = threading.Thread(target=work, name="fcapz-broker-connect", daemon=True)
+    t.start()
+    t.join(timeout)
+    with lock:
+        conn = state["conn"]
+        if state["ok"]:
+            return conn
+        state["abandoned"] = True
+    if conn is not None:
+        _abort(conn)
+    return None
+
+
+def _log_tail(directory: Path, lines: int = 15) -> str:
+    out = []
+    for name in (LOG_NAME, "runtime-stderr.log"):
+        try:
+            text = (directory / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        tail = text.strip().splitlines()[-lines:]
+        if tail:
+            out.append(f"--- {name} ---\n" + "\n".join(tail))
+    return "\n".join(out) or "(no runtime log)"
+
+
+def spawn_runtime(directory: Path, spawn_id: str | None = None) -> subprocess.Popen:
+    """Start a detached runtime for *directory*; *spawn_id* names the
+    :class:`~fcapz.broker.runtime.StarterClaim` its starter holds, and tags
+    it in ``runtime.json``."""
+    # Absolute: the runtime's working directory is *directory* itself.
+    directory = Path(os.path.abspath(directory))
+    ensure_dir(directory)
+    import fcapz
+
+    env = dict(os.environ)
+    pkg_parent = str(Path(fcapz.__file__).resolve().parent.parent)
+    # Absolute, like *directory*: relative entries are the caller's.
+    inherited = [
+        os.path.abspath(p) for p in env.get("PYTHONPATH", "").split(os.pathsep) if p
+    ]
+    env["PYTHONPATH"] = os.pathsep.join([pkg_parent, *inherited])
+    args = [sys.executable, "-m", "fcapz.broker", "--dir", str(directory)]
+    if spawn_id:
+        args += ["--spawn-id", spawn_id]
+    stderr = open(directory / "runtime-stderr.log", "ab")  # noqa: SIM115
+    kw: dict[str, Any] = dict(
+        stdin=subprocess.DEVNULL, stdout=stderr, stderr=stderr,
+        cwd=str(directory), env=env, close_fds=True,
+    )
+    try:
+        if os.name == "nt":
+            # A console of its own, with no window: DETACHED_PROCESS would
+            # leave the runtime without one, and each console program it
+            # starts (xsdb, quartus_stp) would then open a visible one.
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            try:
+                # Outlive a job object that kills its members with the shell.
+                return subprocess.Popen(
+                    args, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw
+                )
+            except OSError:
+                return subprocess.Popen(args, creationflags=flags, **kw)
+        return subprocess.Popen(args, start_new_session=True, **kw)
+    finally:
+        stderr.close()
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """Wait for a runtime we started, when it exits: on POSIX it would
+    otherwise stay a zombie child of this process for as long as we run."""
+    threading.Thread(target=proc.wait, name="fcapz-broker-reaper", daemon=True).start()
+
+
+class BrokerSession:
+    """One connection to the runtime."""
+
+    def __init__(self, conn: Any, info: dict[str, Any], *, name: str) -> None:
+        self._conn = conn
+        self.info = info
+        self.name = name
+        self._ids = itertools.count(1)
+        self._send_lock = threading.Lock()
+        self._inbox: dict[Any, queue.Queue] = {}
+        self._inbox_lock = threading.Lock()
+        self._lost: BaseException | None = None
+        self._gone = threading.Event()
+        self._closed = False
+        threading.Thread(target=self._read_loop, name="fcapz-broker-recv",
+                         daemon=True).start()
+        hello = self.request("hello", pid=os.getpid(), name=name)
+        self.runtime_id: str = hello["runtime_id"]
+        self.runtime_pid: int = hello["pid"]
+
+    # ---- connecting ----------------------------------------------------
+
+    @classmethod
+    def connect(
+        cls,
+        directory: Path | str | None = None,
+        *,
+        autostart: bool = True,
+        start_timeout: float = START_TIMEOUT_S,
+        name: str = "fcapz",
+    ) -> BrokerSession:
+        d = Path(os.path.abspath(directory)) if directory is not None else default_dir()
+        check_dir(d)
+        found = _connect_info(d)
+        if found is None:
+            if not autostart:
+                raise BrokerNotRunning(f"no fcapz broker is running in {d}")
+            found = cls._start(d, start_timeout)
+        conn, info = found
+        return cls(conn, info, name=name)
+
+    @staticmethod
+    def _start(directory: Path, start_timeout: float) -> tuple[Any, dict[str, Any]]:
+        spawn_id = secrets.token_hex(8)
+        proc: subprocess.Popen | None = None
+        try:
+            # Held until this start ends, however it ends: our spawn needs
+            # it to publish itself, and leaves once it is released unless a
+            # client (we, on success) is there.  It is never killed: by the
+            # time we would, it may be the runtime another client uses, or
+            # one that is closing its cables.
+            claim = StarterClaim(ensure_dir(directory), spawn_id)
+        except OSError as exc:
+            raise wire.BrokerStartError(f"could not start the fcapz broker: {exc}") from exc
+        try:
+            try:
+                proc = spawn_runtime(directory, spawn_id)
+            except OSError as exc:
+                raise wire.BrokerStartError(
+                    f"could not start the fcapz broker: {exc}"
+                ) from exc
+            deadline = time.monotonic() + start_timeout
+            respawn_at: float | None = None
+            while True:
+                found = _connect_info(
+                    directory, min(AUTH_TIMEOUT_S, max(0.1, deadline - time.monotonic()))
+                )
+                if found is not None:
+                    return found
+                rc = proc.poll()
+                now = time.monotonic()
+                if rc is not None and rc != EXIT_ALREADY_RUNNING:
+                    raise wire.BrokerStartError(
+                        f"the fcapz broker exited with code {rc} while starting:\n"
+                        f"{_log_tail(directory)}"
+                    )
+                if rc is None:
+                    respawn_at = None
+                elif respawn_at is None:
+                    # Our spawn lost the election.  Another starter's runtime
+                    # answers shortly; a runtime that is shutting down never
+                    # will, and frees the directory when its cables are
+                    # closed: try again then.
+                    respawn_at = now + RESPAWN_DELAY_S
+                elif now >= respawn_at:
+                    try:
+                        proc = spawn_runtime(directory, spawn_id)
+                    except OSError as exc:
+                        raise wire.BrokerStartError(
+                            f"could not start the fcapz broker: {exc}"
+                        ) from exc
+                    respawn_at = None
+                if now >= deadline:
+                    raise wire.BrokerStartError(
+                        f"the fcapz broker did not answer within {start_timeout:g} s "
+                        f"({directory}):\n{_log_tail(directory)}"
+                    )
+                time.sleep(0.05)
+        finally:
+            claim.release()
+            if proc is not None:
+                _reap(proc)
+
+    # ---- plumbing ------------------------------------------------------
+
+    def _read_loop(self) -> None:
+        try:
+            while True:
+                msg = wire.decode(self._conn.recv_bytes())
+                with self._inbox_lock:
+                    q = self._inbox.get(msg.get("id"))
+                if q is not None:
+                    q.put(msg)
+        except (EOFError, OSError, ValueError) as exc:
+            self._lost = exc
+        finally:
+            self._gone.set()
+            with self._inbox_lock:
+                for q in self._inbox.values():
+                    q.put(_LOST)
+
+    def _send(self, msg: dict[str, Any]) -> None:
+        with self._send_lock:
+            self._conn.send_bytes(wire.encode({"v": wire.PROTOCOL, **msg}))
+
+    def request(
+        self,
+        op: str,
+        /,
+        *,
+        on_event: EventSink | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        """Send *op* and wait for its reply; events go to *on_event*."""
+        if self._closed:
+            raise wire.BrokerError("the broker session is closed")
+        rid = next(self._ids)
+        q: queue.Queue = queue.Queue()
+        with self._inbox_lock:
+            if self._lost is not None:
+                raise self._lost_error()
+            self._inbox[rid] = q
+        try:
+            try:
+                self._send({"id": rid, "op": op, **fields})
+            except (OSError, EOFError) as exc:
+                raise self._lost_error() from exc
+            try:
+                return self._await(q, on_event)
+            except KeyboardInterrupt:
+                self._cancel(rid, q)
+                raise
+        finally:
+            with self._inbox_lock:
+                self._inbox.pop(rid, None)
+
+    def _await(self, q: queue.Queue, on_event: EventSink | None) -> dict[str, Any]:
+        while True:
+            try:
+                msg = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if msg is _LOST:
+                raise self._lost_error()
+            if "event" in msg:
+                if on_event is not None:
+                    on_event(msg)
+                continue
+            if msg.get("ok"):
+                return msg
+            raise wire.error_from_dict(msg.get("error") or {})
+
+    def _cancel(self, rid: Any, q: queue.Queue) -> None:
+        """Cancel request *rid* and wait (briefly) until its job has stopped,
+        so the core is free when the caller goes on."""
+        try:
+            self._send({"id": f"cancel-{rid}", "op": "cancel", "request": rid})
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    msg = q.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if msg is _LOST or "event" not in msg:
+                    return
+        except (OSError, EOFError):
+            pass
+
+    def _lost_error(self) -> wire.BrokerConnectionLost:
+        return wire.BrokerConnectionLost(
+            f"lost the fcapz broker (runtime {self.info.get('runtime_id')}, pid "
+            f"{self.info.get('pid')}): any job in progress is lost, and nothing "
+            "was retried or re-armed"
+        )
+
+    def close(self) -> None:
+        self._closed = True
+        # Our receive thread is blocked reading the connection.
+        _abort(self._conn)
+
+    def __enter__(self) -> BrokerSession:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    # ---- operations ----------------------------------------------------
+
+    @staticmethod
+    def shutting_down(directory: Path | str | None = None) -> bool:
+        """Whether a runtime holds the directory without answering: it is
+        closing its cables after a stop or an idle exit (or, for an instant,
+        starting)."""
+        d = Path(os.path.abspath(directory)) if directory is not None else default_dir()
+        return lock_held(d)
+
+    @staticmethod
+    def _target(target: TargetSpec | dict[str, Any]) -> dict[str, Any]:
+        spec = target if isinstance(target, TargetSpec) else TargetSpec.from_dict(target)
+        return spec.resolved().to_dict()
+
+    def probe(
+        self,
+        target: TargetSpec | dict[str, Any],
+        *,
+        core: str = "ela",
+        chain: int | None = None,
+        instance: int | None = None,
+        base_addr: int = 0,
+    ) -> dict[str, Any]:
+        """Identity and geometry of a core; ``core`` holds its :class:`CoreRef`."""
+        r = self.request(
+            "probe", target=self._target(target), core=core, chain=chain,
+            instance=instance, base_addr=base_addr,
+        )["result"]
+        return {**r["info"], "core": CoreRef.from_dict(r["core"])}
+
+    def capture(
+        self,
+        target: TargetSpec | dict[str, Any],
+        config: CaptureConfig,
+        *,
+        chain: int = 1,
+        instance: int | None = None,
+        timeout: float = 10.0,
+        queue_timeout: float = 30.0,
+        expect_gen: int | None = None,
+        on_event: EventSink | None = None,
+    ) -> BrokerCapture:
+        """Configure, arm, wait and read one capture as a single job."""
+        msg = self.request(
+            "capture", target=self._target(target), chain=chain, instance=instance,
+            config=wire.config_to_dict(config), timeout=timeout,
+            queue_timeout=queue_timeout, expect_gen=expect_gen, on_event=on_event,
+        )
+        return _capture_from(msg["result"], msg.get("job"))
+
+    def eio(
+        self,
+        target: TargetSpec | dict[str, Any],
+        op: str,
+        *,
+        chain: int | None = None,
+        instance: int | None = None,
+        base_addr: int = 0,
+        queue_timeout: float = 30.0,
+        on_event: EventSink | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        """One EIO operation: ``probe``, ``read``, ``read_outputs``,
+        ``write`` (value) or ``set_bit`` (bit, level)."""
+        r = self.request(
+            "eio", target=self._target(target), action=op, chain=chain, instance=instance,
+            base_addr=base_addr, queue_timeout=queue_timeout, on_event=on_event, **fields,
+        )["result"]
+        return {**r, "core": CoreRef.from_dict(r["core"])}
+
+    def axi(
+        self,
+        target: TargetSpec | dict[str, Any],
+        op: str,
+        *,
+        chain: int | None = None,
+        queue_timeout: float = 30.0,
+        on_event: EventSink | None = None,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        """One EJTAG-AXI operation: ``read`` (addr), ``write`` (addr, data,
+        wstrb), ``dump`` (addr, count, burst) or ``write_block`` (addr,
+        words, burst)."""
+        r = self.request(
+            "axi", target=self._target(target), action=op, chain=chain,
+            queue_timeout=queue_timeout, on_event=on_event, **fields,
+        )["result"]
+        return {**r, "core": CoreRef.from_dict(r["core"])}
+
+    def last_capture(
+        self,
+        target: TargetSpec | dict[str, Any],
+        *,
+        chain: int = 1,
+        instance: int | None = None,
+    ) -> BrokerCapture | None:
+        """The last capture any client took on the core, or None."""
+        snap = self.request(
+            "last_capture", target=self._target(target), chain=chain, instance=instance
+        )["snapshot"]
+        return None if snap is None else _capture_from(snap, snap.get("job"))
+
+    def status(self) -> dict[str, Any]:
+        msg = self.request("status")
+        return {k: v for k, v in msg.items() if k not in ("id", "ok")}
+
+    def stop(self, *, force: bool = False, wait: float = STOP_WAIT_S) -> bool:
+        """Stop the runtime.  True once its process has exited: its cables
+        are closed and the next client starts a new runtime.  False if it is
+        still shutting down after *wait* seconds.  Without *force* the
+        runtime refuses while jobs run or other clients are connected."""
+        self.request("stop", force=force)
+        return self._gone.wait(wait)
+
+
+def _capture_from(payload: dict[str, Any], job: int | None) -> BrokerCapture:
+    return BrokerCapture(
+        result=wire.result_from_dict(payload["result"]),
+        core=CoreRef.from_dict(payload["core"]),
+        timestamp_w=int(payload.get("timestamp_w") or 0),
+        capture_gen=payload.get("capture_gen"),
+        job=job,
+    )
