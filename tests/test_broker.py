@@ -381,6 +381,69 @@ def test_a_job_waiting_for_the_connection_has_a_deadline(engine):
     assert t.eio[0x0100] == 0, "neither job ever ran"
 
 
+def test_a_job_waiting_for_a_connection_to_recover_has_a_deadline(engine):
+    # The job that held the stale connection ends after the waiting job's
+    # deadline: the wait is over, and the job must still not run.
+    t = engine.fake
+    engine.submit("eio", {"chain": 3, "op": "read"}, owner="a").wait(5)
+    with engine._cv:
+        engine._stale = True        # a link failure, with a job still on it
+        engine._holders += 1
+    late = engine.submit("eio", {"chain": 3, "op": "write", "value": 0x55}, owner="b",
+                         queue_timeout=0.05)
+    time.sleep(0.075)               # past the deadline, within its first wait
+    with engine._cv:
+        engine._holders -= 1
+        engine._cv.notify_all()
+    with pytest.raises(CoreBusy, match="connection to recover"):
+        late.wait(5)
+    assert t.eio[0x0100] == 0 and t.connects == 1, "the expired job never ran"
+    ok = engine.submit("eio", {"chain": 3, "op": "read"}, owner="a").wait(5)
+    assert ok["core"].image_gen == 2
+
+
+def test_a_job_waiting_for_the_cable_has_a_deadline(engine):
+    # Another job's transfer (an EJTAG-AXI block) holds the transport: a job
+    # for another core waits for it to attach, and again to start.
+    t = engine.fake
+    engine.submit("eio", {"chain": 3, "op": "read"}, owner="a").wait(5)
+    held, free = threading.Event(), threading.Event()
+
+    def transfer():
+        with t.transaction_lock():
+            held.set()
+            free.wait(5)
+
+    busy = threading.Thread(target=transfer)
+    busy.start()
+    try:
+        assert held.wait(5)
+        t0 = time.monotonic()
+        attach = _capture(engine, "b", queue_timeout=0.1)          # a core not seen yet
+        with pytest.raises(CoreBusy, match="transfer on the cable"):
+            attach.wait(5)
+        start = engine.submit("eio", {"chain": 3, "op": "write", "value": 0x55}, owner="c",
+                              queue_timeout=0.1)                   # one that is
+        with pytest.raises(CoreBusy, match="transfer on the cable"):
+            start.wait(5)
+        assert time.monotonic() - t0 < 1.0, "failed at their deadline"
+    finally:
+        free.set()
+        busy.join(5)
+    time.sleep(0.2)
+    assert t.eio[0x0100] == 0 and t.arms[0] == 0, "neither job ever ran"
+    # Its own work before does not count: a free cable is taken at any time.
+    find = engine._new_controller
+
+    def slow_find(kind, chain, instance, base_addr):
+        time.sleep(0.3)
+        return find(kind, chain, instance, base_addr)
+
+    engine._new_controller = slow_find
+    t.auto = True
+    assert _capture(engine, "b", queue_timeout=0.1).wait(5)["result"].samples
+
+
 def test_a_chain_that_is_not_there_leaves_an_axi_only_connection(engine, monkeypatch):
     # Only EJTAG-AXI jobs have run: no ELA or EIO has answered that a link
     # check could read.  The missing chain must not be read instead.

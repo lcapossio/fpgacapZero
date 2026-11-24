@@ -25,8 +25,9 @@ and takes no core ownership.
 A job still waiting for other jobs at its deadline (its queue timeout,
 counted from submit) fails with :class:`~fcapz.broker.wire.CoreBusy` and
 never runs, whatever it waits for: the jobs submitted before it, the
-connection another job is looking a core up on, or its core.  The time it
-takes to find its own core is not waiting.  Cancelling a job (or its client going
+connection another job is looking a core up on, the cable while another
+job's transfer holds it, or its core.  The time it takes to find its own
+core is not waiting.  Cancelling a job (or its client going
 away) stops only that job, and the job keeps the core until its own access
 has stopped; a capture cancelled while it waits for its trigger is driven
 idle first.  A failure that the link itself caused marks the connection
@@ -38,6 +39,7 @@ or re-armed on its own.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import logging
 import threading
@@ -193,6 +195,7 @@ class Engine:
             if not self._stale:
                 return
             deadline = time.monotonic() + RECOVERY_WAIT_S
+            waited = False
             while self._holders:
                 self._check_waiting(job, "for the connection to recover")
                 remaining = deadline - time.monotonic()
@@ -202,6 +205,9 @@ class Engine:
                         f"and {self._holders} job(s) are still running on it"
                     )
                 self._cv.wait(min(remaining, 0.1))
+                waited = True
+            if waited:      # they may have ended after the job's deadline
+                self._check_waiting(job, "for the connection to recover")
             old, self._transport = self._transport, None
             self._controllers.clear()
             self._proven = None
@@ -244,6 +250,28 @@ class Engine:
             self._conn_lock.release()
             raise
 
+    @contextlib.contextmanager
+    def _cable(self, job: Job):
+        """Hold the transport's transaction lock for *job*.  Another job's
+        transfer may hold it (an EJTAG-AXI block, a capture readout): that
+        is waited for no longer than the job's deadline, and a job that gets
+        the cable only after it fails.  A free cable is taken whatever the
+        time: the job's own work before does not count."""
+        lock = self._transport.transaction_lock()
+        what = "for another job's transfer on the cable"
+        if not lock.acquire(blocking=False):
+            while not lock.acquire(timeout=0.05):
+                self._check_waiting(job, what)
+            try:
+                self._check_waiting(job, what)
+            except BaseException:
+                lock.release()
+                raise
+        try:
+            yield
+        finally:
+            lock.release()
+
     def _hold(self, job: Job) -> None:
         with self._cv:
             self._holders += 1
@@ -269,7 +297,10 @@ class Engine:
             self._connect_locked(job)
             ctrl = self._controllers.get(req) if cached else None
             if ctrl is None:
-                ctrl = self._new_controller(kind, chain, instance, base_addr)
+                # Attaching reads the core: on a cable in use that waits
+                # for another job, as the queue does.
+                with self._cable(job):
+                    ctrl = self._new_controller(kind, chain, instance, base_addr)
                 if cached:
                     self._controllers[req] = ctrl
             self._hold(job)
@@ -446,18 +477,25 @@ class Engine:
         if job.cancel_event.is_set():
             raise JobCancelled(f"job {job.id} cancelled")
         self._check_gen(job)
-        job.state = "running"
-        job._emit({"event": "running", "core": self.core_ref(key).to_dict()})
-        if job.kind == "capture":
-            return self._capture(job, ctrl, key)
-        if job.kind == "eio":
-            return self._eio(job, ctrl, key)
-        return self._axi(job, ctrl, key)
+        # The job starts when it has the cable: that wait is its last one
+        # for other jobs, and ends at its deadline like the others.
+        with self._cable(job):
+            job.state = "running"
+            job._emit({"event": "running", "core": self.core_ref(key).to_dict()})
+            if job.kind == "eio":
+                return self._eio(job, ctrl, key)
+            if job.kind == "axi":
+                return self._axi(job, ctrl, key)
+            ctrl.configure(job.params["config"])
+            ctrl.arm()
+        # The cable is free between the polls of an armed capture.
+        return self._capture(job, ctrl, key)
 
     def _await_admission(self, job: Job) -> None:
         """Wait until every job submitted before *job* has joined a core
         queue (or ended), so queues fill in submit order."""
         with self._cv:
+            waited = False
             while self._admission and self._admission[0] is not job:
                 if job.cancel_event.is_set():
                     raise JobCancelled(f"job {job.id} cancelled while queued")
@@ -471,6 +509,9 @@ class Engine:
                         "looking up its core"
                     )
                 self._cv.wait(min(remaining, 0.1))
+                waited = True
+            if waited:      # its turn may have come after its deadline
+                self._check_waiting(job, "for earlier jobs to look up their cores")
 
     def _leave_admission(self, job: Job) -> None:
         with self._cv:
@@ -489,6 +530,7 @@ class Engine:
         with self._cv:
             q = self._queues[key]
             reported = None
+            waited = False
             try:
                 while q[0] is not job:
                     head = q[0]
@@ -506,6 +548,9 @@ class Engine:
                             f"({head.kind}, client {head.owner})"
                         )
                     self._cv.wait(min(remaining, 0.1))
+                    waited = True
+                if waited:      # its turn may have come after its deadline
+                    self._check_waiting(job, "for its core")
             except BaseException:
                 q.remove(job)
                 if not q:
@@ -542,10 +587,9 @@ class Engine:
         return {"core": self.core_ref(key), "info": info}
 
     def _capture(self, job: Job, analyzer: Analyzer, key: tuple) -> dict[str, Any]:
+        """Wait for the capture :meth:`_start_and_run` armed, read it."""
         cfg: CaptureConfig = job.params["config"]
         timeout = float(job.params.get("timeout", 10.0))
-        analyzer.configure(cfg)
-        analyzer.arm()
         deadline = time.monotonic() + timeout
         while True:
             if job.cancel_event.is_set():
