@@ -113,8 +113,8 @@ Auto-generated.  **Never edit by hand.**  Contents:
 
 `define FCAPZ_VERSION_MAJOR  8'h00
 `define FCAPZ_VERSION_MINOR  8'h05
-`define FCAPZ_VERSION_PATCH  8'h01
-`define FCAPZ_VERSION_STRING "0.5.1"
+`define FCAPZ_VERSION_PATCH  8'h02
+`define FCAPZ_VERSION_STRING "0.5.2"
 
 // Per-core 16-bit ASCII identifiers, packed into VERSION[15:0] of
 // each core's identity register.  Constant per-core; never zero.

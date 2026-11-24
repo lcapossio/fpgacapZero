@@ -7,6 +7,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-11-24
+
 ### Added
 
 - **Broker (opt-in): several programs on one board.** With `--broker`
