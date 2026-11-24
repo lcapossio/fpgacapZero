@@ -19,6 +19,7 @@ on a core that may now hold another bitstream.
 from __future__ import annotations
 
 import os
+import posixpath
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -46,19 +47,27 @@ _LOOPBACK = ("", "localhost", "127.0.0.1", "::1", "[::1]")
 _PATH_FIELDS = ("quartus_stp", "serial_port")
 
 
-def is_relative_path(value: str, pathmod: Any = os.path) -> bool:
-    """Whether *value* names a file relative to the working directory, and
-    not a bare name: it holds a separator, starts with a dot, or (Windows)
-    has a drive without a root, as ``C:quartus_stp.exe`` does."""
+def is_relative_path(value: str, pathmod: Any = os.path, *, bare: bool = False) -> bool:
+    """Whether what *value* names depends on the caller's working directory
+    (or, on Windows, its current drive), and is not a bare name: it holds a
+    separator, starts with a dot, or (Windows) has a drive without a root, as
+    ``C:quartus_stp.exe`` does, or a root without a drive, as
+    ``\\tools\\quartus_stp.exe`` does.  With *bare*, a bare name counts too:
+    it is opened as a file, not looked up."""
     value = str(value)
-    if pathmod.isabs(value):
-        return False
+    drive, rest = pathmod.splitdrive(value)
     seps = [s for s in (pathmod.sep, pathmod.altsep) if s]
-    return (
-        any(s in value for s in seps)
-        or value.startswith(".")
-        or bool(pathmod.splitdrive(value)[0])
-    )
+    rooted = rest[:1] in seps
+    if pathmod is not posixpath and pathmod.splitdrive("C:x")[0]:
+        # Windows: absolute only with both a drive (or a UNC or device
+        # prefix, which splitdrive returns as one) and a root.
+        if (drive and rooted) or drive[:1] in seps:
+            return False
+        if drive or rooted:
+            return True
+    elif rooted:
+        return False
+    return bare or any(s in value for s in seps) or value.startswith(".")
 
 
 def _host(host: str) -> str:
@@ -100,12 +109,15 @@ class TargetSpec:
     def resolved(self) -> TargetSpec:
         """This spec with its paths (``quartus_stp``, ``serial_port``) made
         absolute, for the runtime, whose working directory is not the
-        caller's.  A bare name (``quartus_stp`` on the search path, ``COM3``)
-        is left alone."""
+        caller's.  A bare program name (``quartus_stp``) is left to the
+        search path, and a Windows port name (``COM3``) is not a path; a
+        POSIX serial port is opened as a file, so a bare name is the
+        caller's file too."""
         changes = {}
         for name in _PATH_FIELDS:
             value = getattr(self, name)
-            if value and is_relative_path(value):
+            bare = name == "serial_port" and os.name != "nt"
+            if value and is_relative_path(value, bare=bare):
                 changes[name] = os.path.abspath(value)
         return replace(self, **changes) if changes else self
 

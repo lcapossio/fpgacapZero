@@ -1171,18 +1171,30 @@ def test_paths_are_the_callers_not_the_runtimes(tmp_path, monkeypatch):
     uart = TargetSpec(backend="serial", serial_port=os.path.join(".", "board-uart"))
     assert uart.resolved().serial_port == str(tmp_path / "board-uart")
     assert BrokerSession._target(uart)["serial_port"] == str(tmp_path / "board-uart")
-    assert TargetSpec(backend="serial", serial_port="COM3").resolved().serial_port == "COM3"
+    # A POSIX serial port is opened as a file: a bare name is one here too.
+    bare = TargetSpec(backend="serial", serial_port="COM3").resolved().serial_port
+    assert bare == ("COM3" if os.name == "nt" else str(tmp_path / "COM3"))
     assert TargetSpec(quartus_stp=".stp").resolved().quartus_stp == str(tmp_path / ".stp")
     if os.name == "nt":
         drive = os.path.splitdrive(str(tmp_path))[0]
         got = TargetSpec(quartus_stp=f"{drive}quartus_stp.exe").resolved().quartus_stp
         assert os.path.normcase(got) == os.path.normcase(str(tmp_path / "quartus_stp.exe"))
+        # Rooted without a drive: on the caller's current drive.
+        got = TargetSpec(quartus_stp="\\tools\\quartus_stp.exe").resolved().quartus_stp
+        assert os.path.normcase(got) == os.path.normcase(f"{drive}\\tools\\quartus_stp.exe")
+        port = TargetSpec(backend="serial", serial_port="\\\\.\\COM10").resolved().serial_port
+        assert port == "\\\\.\\COM10"
     relative = broker_coreref.is_relative_path
     assert relative("C:quartus_stp.exe", ntpath) and relative("tools\\q.exe", ntpath)
     assert not relative("COM3", ntpath) and not relative("\\\\.\\COM10", ntpath)
     assert not relative("C:\\intel\\quartus_stp.exe", ntpath)
     assert relative("./board-uart", posixpath) and relative("dev/ttyUSB0", posixpath)
     assert not relative("/dev/ttyUSB0", posixpath) and not relative("ttyUSB0", posixpath)
+    assert relative("\\tools\\quartus_stp.exe", ntpath) and relative("/tools/q.exe", ntpath)
+    assert not relative("\\\\server\\share\\q.exe", ntpath)
+    assert relative("board-uart", posixpath, bare=True)
+    assert not relative("/dev/ttyUSB0", posixpath, bare=True)
+    assert not relative("quartus_stp", ntpath) and relative("COM3", ntpath, bare=True)
 
     seen = []
 
