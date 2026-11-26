@@ -12,17 +12,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Gowin GW1NR-9C programming over FTDI.**  `FtdiMpsseTransport.program()`
   (CLI `--program`, the GUI's *Program on connect*, RPC `program`) loads a
   Gowin `.fs` into the SRAM of a GW1NR-9C, with the sequence Gowin's
-  programmer uses: erase, one DR scan per frame, the frame checksum, then
-  DONE, READY and the USERCODE checked.  The flash is never written.  A new
-  `.fs` reader checks the file's frame checksum and IDCODE and refuses
-  compressed or encrypted files.  Validated on the BRS-100 (about 2.5 s a
-  load; both example images pass their hardware suites afterwards).
+  programmer uses: erase, one DR scan per frame, the USERCODE, then DONE,
+  READY and the USERCODE read back.  The flash is never written.  A new
+  `.fs` reader checks the whole file before the erase (structure, per-frame
+  CRCs, checksum, frame count, IDCODE); CRC-off files load, compressed,
+  encrypted and BSRAM-initialized ones are refused.  Validated on the
+  BRS-100 (about 2.5 s a load; both example images pass their hardware
+  suites afterwards).
 
 ### Fixed
 
-- **FTDI long writes on FT2232-compatible clones.**  Long clocked writes go
+- **FTDI long writes on FT2232-compatible clones.**  Write-only scans go
   out as commands of at most 1 KB: the BRS-100's adapter silently loses data
   from one command of about 2 KB or more.
+- **FTDI waits at a slow TCK with a short USB timeout.**  Idle clocking and
+  bitstream writes are paced in pieces that fit the channel's USB timeout,
+  not a fixed quarter second, so they no longer time out there.
 
 ## [0.5.2] — 2026-11-24
 

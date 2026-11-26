@@ -200,18 +200,19 @@ class _GowinDevice(_Device):
     """A GW1NR-9C TAP with the SRAM configuration logic fcapz drives:
     CONFIG_ENABLE enters edit mode, ERASE_SRAM clears the SRAM over
     *erase_clocks* idle TCKs, each WRITE_FRAMES DR scan is a frame and the
-    WRITE_CHECKSUM scan the checksum, and CONFIG_DISABLE raises DONE and
-    READY if the frames and checksum were *accepts*."""
+    WRITE_CHECKSUM scan the USERCODE, and CONFIG_DISABLE raises DONE and
+    READY if the frames and USERCODE were *accepts*.  The USERCODE it then
+    reports is the one written, or *reports_usercode* when set."""
 
     STATUS, USERCODE = 0x41, 0x13
     CONFIG_ENABLE, CONFIG_DISABLE = 0x15, 0x3A
     ERASE, INIT_ADDR = 0x05, 0x12
     WRITE_FRAMES, WRITE_CHECKSUM = 0x3B, 0x0A
 
-    def __init__(self, accepts=((), 0), usercode=0, erase_clocks=100, idcode=GW1NR9_IDCODE):
+    def __init__(self, accepts=((), 0), erase_clocks=100, idcode=GW1NR9_IDCODE):
         super().__init__(idcode, ir_len=8, user1=0x42, idcode_ir=0x11)
         self.accepts = accepts
-        self.good_usercode = usercode
+        self.reports_usercode = None
         self.erase_clocks = erase_clocks
         self.erase_left = 0
         self.edit = self.erased = False
@@ -264,7 +265,8 @@ class _GowinDevice(_Device):
                 self.edit = False
                 if self.frames and (tuple(self.frames), self.checksum) == self.accepts:
                     self.done = self.ready = True
-                    self.usercode = self.good_usercode
+                    self.usercode = (self.checksum if self.reports_usercode is None
+                                     else self.reports_usercode)
         return tdo
 
 
@@ -1210,7 +1212,7 @@ class GowinProgramTests(_FtdiTestCase):
         self.path = self._file(gowin_fs_text(self.payloads))
         image = gowin_fs.read_gowin_fs(self.path)
         self.checksum = image.checksum
-        self.lib.dev = _GowinDevice((tuple(self.payloads), image.checksum), image.usercode)
+        self.lib.dev = _GowinDevice((tuple(self.payloads), image.usercode))
 
     def _file(self, text: str, name: str = "design.fs") -> str:
         path = self.dir / name
@@ -1254,8 +1256,8 @@ class GowinProgramTests(_FtdiTestCase):
         with mock.patch.object(ft, "_MAX_WRITE_CMD_BYTES", 2):
             t.program(self.path)
         self.assertEqual(self.lib.dev.frames, self.payloads)
-        self.assertEqual(self.lib.data_cmd_bytes.count(2), 2 * len(self.payloads))
-        self.assertNotIn(4, self.lib.data_cmd_bytes)
+        self.assertGreaterEqual(self.lib.data_cmd_bytes.count(2), 2 * len(self.payloads))
+        self.assertLessEqual(max(self.lib.data_cmd_bytes), 2)  # every write-only scan
         self.assertTrue(self.lib.dev.done)
 
     def test_programs_at_connect(self):
@@ -1291,8 +1293,44 @@ class GowinProgramTests(_FtdiTestCase):
             t.program(self.path, timeout_s=0.01)
         self.assertNotIn(self.lib.dev.WRITE_FRAMES, self.lib.dev.commands)
 
+    def test_custom_usercode_is_written_and_checked_whole(self):
+        path = self._file(gowin_fs_text(self.payloads, usercode=0x1234ABCD), "custom.fs")
+        self.lib.dev.accepts = (tuple(self.payloads), 0x1234ABCD)
+        self._transport().program(path)
+        self.assertEqual(self.lib.dev.checksum, 0x1234ABCD)
+        self.assertTrue(self.lib.dev.done)
+
+    def test_slow_clock_with_a_short_usb_timeout_waits_in_short_pieces(self):
+        t = self._transport(tck_hz=10e3, timeout_ms=100)  # 500 TCK in 50 ms
+        first = len(self.lib.write_clocks)
+        t.program(self.path)
+        self.assertTrue(self.lib.dev.done)
+        self.assertLessEqual(max(self.lib.write_clocks[first:]), 500 + 20)
+
+    def test_live_idcode_mismatch_sends_no_configuration_command(self):
+        t = self._transport()
+        self.lib.dev.idcode = 0x0100481B  # another part answers now
+        with self.assertRaisesRegex(RuntimeError, "the device read IDCODE 0x0100481b"):
+            t.program(self.path)
+        self.assertEqual([c for c in self.lib.dev.commands if c != 0xFF], [0x11])
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)  # the channel stays usable
+
+    def test_failed_cleanup_closes_the_channel(self):
+        self.lib.dev.errors = 0x01
+        t = self._transport()
+        cancelled = RuntimeError("FTDI transport cancelled; reconnect")
+        with mock.patch.object(t, "_gowin_leave_config", side_effect=cancelled):
+            with self.assertRaisesRegex(
+                RuntimeError, r"CRC error.*leaving configuration mode then failed too"
+            ):
+                t.program(self.path)
+        # The FPGA may still be in configuration mode: no transport may join
+        # the channel as it is.
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
     def test_usercode_other_than_the_file_s_is_an_error(self):
-        self.lib.dev.good_usercode = 0xFFFFFFFF
+        self.lib.dev.reports_usercode = 0xFFFFFFFF
         t = self._transport()
         with self.assertRaisesRegex(
             RuntimeError, r"USERCODE 0xffffffff after loading .*which sets 0x0000[0-9a-f]{4}"

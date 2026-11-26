@@ -491,10 +491,11 @@ class _Batch:
         body = width - 1
         nbytes, rem = divmod(body, 8)
         if nbytes:
-            # 64 KiB per data command.
+            # 64 KiB per read-write data command; write-only ones are
+            # shorter (see _MAX_WRITE_CMD_BYTES).
             done = 0
             while done < nbytes:
-                n = min(nbytes - done, 0x10000)
+                n = min(nbytes - done, 0x10000 if capture else _MAX_WRITE_CMD_BYTES)
                 chunk = (value >> (done * 8)) & ((1 << (n * 8)) - 1)
                 op = self._bytes_inout if capture else _DATA_BYTES_OUT
                 self._add(
@@ -1626,11 +1627,15 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         Gowin GW1NR-9C: a ``.fs``, into SRAM only (the flash is never
         touched, so a power cycle boots the flash image again), by the
         sequence Gowin's programmer uses: erase SRAM, load each frame's
-        payload in a DR scan of its own, write the checksum, then wait for
-        DONE and READY with no error flags.  See :meth:`_program_gowin`.
+        payload in a DR scan of its own, write the USERCODE, then wait for
+        DONE and READY with no error flags and check the USERCODE.  See
+        :meth:`_program_gowin`.
 
-        A bitstream built for another part, or a malformed one, is refused
-        before the FPGA is cleared.  Every core on the FPGA is lost, so this is refused while
+        A bitstream built for another part (its IDCODE) is refused before
+        the FPGA is cleared; so is a ``.fs`` whose structure, frame CRCs or
+        checksum do not check out.  A 7-series file is checked only for its
+        IDCODE: other damage shows as DONE staying low, after the FPGA was
+        cleared.  Every core on the FPGA is lost, so this is refused while
         other transports share the channel.  If a USB transfer fails
         partway, the adapter may be left mid-command, so the channel is
         closed: connect again.  :meth:`cancel` from another thread stops it
@@ -1778,6 +1783,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         """
         path = image.path
         with self._io_lock:
+            entered = False  # CONFIG_ENABLE may have gone out
             try:
                 self._reset_tap()
                 idcode = self._gowin_read(_GW_READ_IDCODE)
@@ -1787,6 +1793,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                         f"0x{image.idcode:08x}"
                     )
                 # Erase the SRAM.
+                entered = True
                 self._gowin_command(_GW_CONFIG_ENABLE)
                 self._gowin_wait(
                     lambda s: s & _GW_ST_EDIT, timeout_s,
@@ -1810,7 +1817,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 self._gowin_load_frames(image.frame_payloads)
                 self._gowin_command(_GW_WRITE_CHECKSUM)
                 batch = self._batch()
-                batch.scan(False, image.checksum, 32, False)
+                batch.scan(False, image.usercode, 32, False)
                 self._flush(batch)
                 self._gowin_command(_GW_CHECKSUM_DONE)
                 self._gowin_command(_GW_CONFIG_DISABLE)
@@ -1823,16 +1830,26 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                     f"{path} did not configure the FPGA: DONE and READY did not both "
                     "rise",
                 )
-                if image.usercode is not None:
-                    usercode = self._gowin_read(_GW_READ_USERCODE)
-                    if usercode != image.usercode:
-                        raise _ConfigFailed(
-                            f"the FPGA reports USERCODE 0x{usercode:08x} after loading "
-                            f"{path}, which sets 0x{image.usercode:08x} (status "
-                            f"{_gowin_status_text(status)})"
-                        )
-            except _ConfigFailed:
-                self._gowin_leave_config()
+                usercode = self._gowin_read(_GW_READ_USERCODE)
+                if usercode != image.usercode:
+                    raise _ConfigFailed(
+                        f"the FPGA reports USERCODE 0x{usercode:08x} after loading "
+                        f"{path}, which sets 0x{image.usercode:08x} (status "
+                        f"{_gowin_status_text(status)})"
+                    )
+            except _ConfigFailed as exc:
+                if not entered:
+                    self._reset_tap()
+                    raise
+                try:
+                    self._gowin_leave_config()
+                except BaseException as cleanup:
+                    # Not _ConfigFailed: program() then closes the channel,
+                    # which may be mid-command, with the FPGA maybe still in
+                    # configuration mode; no other transport inherits it.
+                    raise RuntimeError(
+                        f"{exc}; leaving configuration mode then failed too ({cleanup})"
+                    ) from exc
                 raise
             finally:
                 # The old bitstream's cores are gone: what was learned is void.
@@ -1905,14 +1922,11 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     def _gowin_leave_config(self) -> None:
         """After a failed Gowin step: leave configuration mode and reset the
-        TAP, so the device is not left in edit mode.  Best effort: the
-        failure being reported matters more."""
-        try:
-            self._gowin_command(_GW_CONFIG_DISABLE)
-            self._gowin_command(_GW_NOOP)
-            self._reset_tap()
-        except Exception:
-            pass
+        TAP, so the device is not left in edit mode.  Raises whatever the
+        I/O raises (a cancel, a USB failure)."""
+        self._gowin_command(_GW_CONFIG_DISABLE)
+        self._gowin_command(_GW_NOOP)
+        self._reset_tap()
 
     def _run_test(self, cycles: int, seconds: float) -> None:
         """Clock Run-Test/Idle for at least *cycles* TCKs and at least
@@ -1939,9 +1953,10 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self._flush(batch)
 
     def _idle(self, cycles: int) -> None:
-        """Clock *cycles* TCK in Run-Test/Idle, in pieces of about a quarter
-        second of TCK, each waited for (see :meth:`_write_paced`)."""
-        piece = max(7, int(self.actual_tck_hz * 0.25))
+        """Clock *cycles* TCK in Run-Test/Idle, in pieces of
+        :meth:`_piece_clocks` (about a quarter second of TCK, less with a
+        short USB timeout), each waited for (see :meth:`_write_paced`)."""
+        piece = max(7, self._piece_clocks() or int(self.actual_tck_hz * 0.25))
         for done in range(0, cycles, piece):
             batch = self._batch()
             batch.idle(min(piece, cycles - done))
@@ -1986,7 +2001,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         if not data:
             raise ValueError("no data to shift")
         after = max(0, len(self.chain) - 1 - self.chain_tap)
-        piece = max(1, min(0x10000, int(self.actual_tck_hz * 0.25) // 8))
+        piece = max(1, min(0x10000, (self._piece_clocks() or int(self.actual_tck_hz * 0.25)) // 8))
         batch = self._batch()
         batch.tms(_IDLE_TO_SHIFT_DR)
         self._write(bytes(batch.cmd))

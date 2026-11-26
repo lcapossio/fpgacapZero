@@ -2168,11 +2168,15 @@ shift the bitstream through CFG_IN, JSTART, then wait for DONE.
 Gowin GW1NR-9C: a `.fs`, into SRAM only (the flash is never
 touched, so a power cycle boots the flash image again), by the
 sequence Gowin's programmer uses: erase SRAM, load each frame's
-payload in a DR scan of its own, write the checksum, then wait for
-DONE and READY with no error flags.  See `_program_gowin`.
+payload in a DR scan of its own, write the USERCODE, then wait for
+DONE and READY with no error flags and check the USERCODE.  See
+`_program_gowin`.
 
-A bitstream built for another part, or a malformed one, is refused
-before the FPGA is cleared.  Every core on the FPGA is lost, so this is refused while
+A bitstream built for another part (its IDCODE) is refused before
+the FPGA is cleared; so is a `.fs` whose structure, frame CRCs or
+checksum do not check out.  A 7-series file is checked only for its
+IDCODE: other damage shows as DONE staying low, after the FPGA was
+cleared.  Every core on the FPGA is lost, so this is refused while
 other transports share the channel.  If a USB transfer fails
 partway, the adapter may be left mid-command, so the channel is
 closed: connect again.  `cancel` from another thread stops it

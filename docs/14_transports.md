@@ -783,14 +783,17 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   SRAM only: the flash is never written, so a power cycle boots the flash
   image again.  The sequence is the one Gowin's programmer uses on that
   part: erase the SRAM, load each configuration frame in a DR scan of its
-  own, write the frame checksum, then wait for DONE and READY with no error
-  flag, and check the USERCODE against the file's.  The file is checked
-  first (its frame checksum, and the IDCODE it was built for); compressed
-  and encrypted `.fs` files are refused, as are other Gowin parts and a
-  GW1NR-9C that is not alone on the JTAG chain.  The BRS-100 loads in about
-  2.5 s.  Its FT2232-compatible adapter loses data from a clocked-write
-  command of about 2 KB or more, so long writes go out as commands of
-  1 KB each, on every adapter.
+  own, write the file's USERCODE, then wait for DONE and READY with no
+  error flag, and read the USERCODE back.  The whole file is checked
+  before the erase: its structure, each frame's CRC (when built with CRC
+  on; CRC-off files load too), the frame checksum, the frame count, and
+  the IDCODE it was built for.  Compressed and encrypted `.fs` files are
+  refused, as are images with initialized block RAM (extra frames, not
+  supported yet), other Gowin parts, and a GW1NR-9C that is not alone on
+  the JTAG chain.  The BRS-100 loads in about 2.5 s.  Its FT2232-compatible
+  adapter loses data from a clocked-write command of about 2 KB or more,
+  so every write-only scan goes out as commands of at most 1 KB, on every
+  adapter.
 
   PolarFire is not supported (use its vendor tools).  The web interface
   has no bitstream field.
