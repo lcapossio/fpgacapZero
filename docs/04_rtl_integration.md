@@ -233,7 +233,8 @@ wrappers are available through `ela_rtl_sources()` for custom integration.
 For AMD 7-series and UltraScale(+) designs built in Vivado, the cores can be
 added to the synthesized netlist instead of the RTL, as for Vivado's own
 ILA.  Mark the nets to capture with `mark_debug`, synthesize as usual, then
-run `fcapz::insert` between synthesis and `opt_design`:
+run `fcapz::insert` between synthesis and `opt_design`, in the non-project
+flow:
 
 ```verilog
 (* mark_debug = "true" *) reg [7:0]  count;
@@ -247,6 +248,14 @@ fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl rtl \
 # the instrumented design is left open: opt_design, place_design, ...
 ```
 
+The script opens checkpoints and synthesizes the debug block in an
+in-memory project of its own, closing whatever design or project is open.
+Run it in a Vivado Tcl session of its own, or between the steps of a
+non-project script as the demos do.  It refuses to run with a project on
+disk open, as in the GUI or in a run's hook script (`STEPS.OPT_DESIGN.TCL.PRE`):
+in a project flow, write the synthesized checkpoint and run the insertion
+and implementation from a non-project script.
+
 It adds one [`fcapz_debug_multi`](#adding-more-cores-in-the-same-design)
 block on one USER chain: an ELA per sample clock, and an optional EIO,
 behind the core manager.  The sample clock of a net is the clock of the
@@ -258,17 +267,17 @@ and the EIO is the slot after the last ELA (`fcapz eio-read --instance N`).
 | --- | --- |
 | `-prob <file>` | Probe map. One ELA writes `<file>`; several write `<root>_ela<n>.prob`. Also writes `<root>.insert.json`, the manifest: each ELA's instance, clock, depth and probes, and the EIO's bits. |
 | `-depth <n>`, `-depths {ela n ...}` | Samples per ELA (1024), for all or per ELA. |
-| `-group {{name {globs} ?clock?} ...}` | A list of groups: nets whose names match a group's globs form an ELA of their own, named `name`; its clock is inferred or given. One group is still a list of one: `-group {{fast {count*} clk}}`. |
+| `-group {{name {globs} ?clock?} ...}` | A list of groups: nets whose names match a group's globs form an ELA of their own, named `name`; its clock is inferred or given. One group is still a list of one: `-group {{fast {count*} clk}}`. The globs are Tcl `string match` patterns, where `[...]` is a character set: `count[*]` does not match `count[3]`; write `count\[*\]` or `count*`. |
 | `-clock <net>` | Sample every ungrouped net on this clock, in one ELA. |
 | `-default_clock <net>` | The clock of nets not driven by a flip-flop (a LUT, a RAM, a DSP). |
 | `-clock_hz <hz>` or `{ela hz ...}` | The sample rate written to the `.prob`; by default taken from the timing clock on the net. |
 | `-eio_in {nets}` | Nets the EIO reads, in any clock (synchronized inside). |
-| `-eio_out {nets}` | Nets the EIO drives. Each net's own driver is cut off, so give it a placeholder: a register that holds a constant, kept with `dont_touch`. EIO outputs change in the JTAG clock; synchronize them where the design uses them. |
+| `-eio_out {nets}` | Nets the EIO drives. Each net's own driver is cut off, so give it a placeholder: a register that holds a constant, kept with `dont_touch`. A net tied straight to a constant is refused, since Vivado shares constants between nets. EIO outputs change in the JTAG clock; synchronize them where the design uses them. |
 | `-trigger_in {ela net ...}` | A design net into an ELA's external trigger. The ELA samples it as a level in its own clock: a pulse must last more than two of its cycles. |
 | `-trigger_out {ela net ...}` | An ELA's trigger pulse (one sample clock) onto a design net, timed in that clock. |
-| `-armed_out {ela net ...}` | An ELA's armed level onto a design net, timed in the ELA's clock. |
+| `-armed_out {ela net ...}` | An ELA's armed level onto a design net, timed in the ELA's clock. A net takes one output: naming it in two of `-eio_out`, `-trigger_out` and `-armed_out` is refused. |
 | `-cross_trigger {dst src ...}` | ELA `src`'s trigger starts ELA `dst`, between any two clocks: a toggle crosses, and the destination turns it back into one pulse per trigger. |
-| `-chain` | The USER chain, 1 by default. It must be free. |
+| `-chain` | The USER chain, 1 to 4, 1 by default. It must be free. |
 | `-tck_mhz` | The TCK constraint, 10 MHz by default. Set it to the speed your cable runs at. |
 | `-cell`, `-part` | The instance name (`u_fcapz`), the part. |
 
@@ -285,10 +294,20 @@ between it and a sample clock gets `set_max_delay -datapath_only` of one
 period of the faster clock, which keeps the ELAs' multi-bit settings and
 readback bundles timed.  The EIO's nets, the `-trigger_in` nets and the
 cross-trigger toggles enter a synchronizer, or are levels that change under
-host control, and get `set_false_path`.  `-trigger_out` and `-armed_out`
+host control, and get `set_false_path`.  So does a probe launched by a
+clock other than its ELA's, as happens with `-clock`, `-default_clock` or
+a group's clock: the ELA samples it asynchronously, and the script warns,
+naming the nets.  `-trigger_out` and `-armed_out`
 leave in the ELA's sample clock and stay timed: a net in another clock must
 be synchronized by the design.  Sample clocks must be constrained, or the
 script warns that their crossings are not timed.
+
+A `set_clock_groups -asynchronous` in the design's constraints takes
+precedence over these bounds.  Name both sides with `-group`, never one:
+`-group [get_clocks sys_clk]` alone makes `sys_clk` asynchronous to every
+other clock, the TCK clock the script adds included, and leaves the
+debug block's settings and readback crossings with no bound.  The script
+stops when it finds such a group covering a TCK crossing.
 
 Limits:
 
@@ -297,6 +316,7 @@ Limits:
   uses it, or if the checkpoint holds Vivado debug cores whose hub will
   take it at `opt_design`.  An ILA instantiated as IP in the RTL is not
   detected.
+- At most 256 probe bits per ELA; split a wider clock's nets with `-group`.
 - One EIO, and no burst-chain options. ELAs with the largest sample width
   and depth read out through the core manager's single-chain burst; a
   smaller one (such as the 512-sample ELA in the demos) reads through the
