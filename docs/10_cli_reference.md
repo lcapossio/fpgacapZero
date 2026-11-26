@@ -46,7 +46,7 @@ subcommand follows:
 | `--no-burst` | off | hw_server/usb_blaster/openocd/ftdi: the bitstream has no burst readout path (e.g. SINGLE_CHAIN_BURST=0 with BURST_EN=0); read every capture through the register window. A failed burst is otherwise an error. |
 | `--chain N` | `1` | ELA control BSCAN USER chain for probe, ela-list, arm, configure and capture |
 | `--ela-instance N` | — | Core-manager ELA slot on the selected chain (default: the first ELA slot behind a core manager) |
-| `--program BITFILE` | — | hw_server: run fpga -file on this .bit before the command (slow); ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin over JTAG. Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
+| `--program BITFILE` | — | hw_server: run fpga -file on this .bit before the command (slow); ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin, or a Gowin GW1NR-9C's SRAM with this .fs, over JTAG. Omit to attach to the FPGA without reprogramming (already-loaded bitstream). |
 | `--broker / --no-broker` | off | Run probe, capture, eio-* and axi-* through the per-user broker, which shares the cable and queues work per core so several programs can use one core safely (started on first use). Default: the FCAPZ_BROKER environment variable, else off |
 | `--broker-wait SEC` | `30.0` | With --broker: how long to wait for another program's job on the same core before giving up (default 30) |
 

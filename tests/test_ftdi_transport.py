@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from fcapz import ftdi_transport as ft
+from fcapz import gowin_fs
 from fcapz.ftdi_transport import (
     FtdiDevice,
     FtdiMpsseTransport,
@@ -25,6 +26,7 @@ from fcapz.ftdi_transport import (
     family_from_idcode,
     read_xilinx_bitstream,
 )
+from test_gowin_fs import GW1NR9_IDCODE, SMALL_LAYOUT, gowin_fs_text, random_payloads
 
 # -- TAP model ----------------------------------------------------------------
 
@@ -194,6 +196,78 @@ class _Xilinx7Device(_Device):
         return tdo
 
 
+class _GowinDevice(_Device):
+    """A GW1NR-9C TAP with the SRAM configuration logic fcapz drives:
+    CONFIG_ENABLE enters edit mode, ERASE_SRAM clears the SRAM over
+    *erase_clocks* idle TCKs, each WRITE_FRAMES DR scan is a frame and the
+    WRITE_CHECKSUM scan the checksum, and CONFIG_DISABLE raises DONE and
+    READY if the frames and checksum were *accepts*."""
+
+    STATUS, USERCODE = 0x41, 0x13
+    CONFIG_ENABLE, CONFIG_DISABLE = 0x15, 0x3A
+    ERASE, INIT_ADDR = 0x05, 0x12
+    WRITE_FRAMES, WRITE_CHECKSUM = 0x3B, 0x0A
+
+    def __init__(self, accepts=((), 0), usercode=0, erase_clocks=100, idcode=GW1NR9_IDCODE):
+        super().__init__(idcode, ir_len=8, user1=0x42, idcode_ir=0x11)
+        self.accepts = accepts
+        self.good_usercode = usercode
+        self.erase_clocks = erase_clocks
+        self.erase_left = 0
+        self.edit = self.erased = False
+        self.done = self.ready = True
+        self.errors = 0
+        self.usercode = 0x12345678  # the old image's
+        self.commands: list[int] = []  # every instruction, in order
+        self.frames: list[str] = []
+        self.frame: list[str] = []
+        self.checksum = None
+
+    def status(self) -> int:
+        return (self.errors | self.erased << 5 | self.edit << 7 | self.done << 13
+                | self.ready << 15)
+
+    def _dr_len(self):
+        if self.ir in (self.STATUS, self.USERCODE, self.WRITE_CHECKSUM):
+            return 32
+        return super()._dr_len()
+
+    def clock(self, tms: int, tdi: int) -> int:
+        if self.erase_left and self.state == "IDLE":
+            self.erase_left -= 1
+            self.erased = self.erase_left == 0
+        if self.state == "SHIFT_DR" and self.ir == self.WRITE_FRAMES:
+            self.frame.append(str(tdi & 1))
+        before = self.state
+        tdo = super().clock(tms, tdi)
+        if before == "CAPTURE_DR":
+            self.frame = []
+            if self.ir == self.STATUS:
+                self.sr = self.status()
+            elif self.ir == self.USERCODE:
+                self.sr = self.usercode
+        if self.state == "UPDATE_DR":
+            if self.ir == self.WRITE_FRAMES:
+                self.frames.append("".join(self.frame))
+            elif self.ir == self.WRITE_CHECKSUM:
+                self.checksum = self.sr
+        elif self.state == "UPDATE_IR":
+            self.commands.append(self.ir)
+            if self.ir == self.CONFIG_ENABLE:
+                self.edit = True
+            elif self.ir == self.ERASE and self.edit:
+                self.erased = self.done = self.ready = False
+                self.erase_left = self.erase_clocks
+            elif self.ir == self.INIT_ADDR:
+                self.frames, self.checksum = [], None
+            elif self.ir == self.CONFIG_DISABLE and self.edit:
+                self.edit = False
+                if self.frames and (tuple(self.frames), self.checksum) == self.accepts:
+                    self.done = self.ready = True
+                    self.usercode = self.good_usercode
+        return tdo
+
+
 def _bitstream(idcode: int = XILINX_IDCODE & 0x0FFFFFFF, body: bytes = b"\x5a\xc3" * 20) -> bytes:
     """Configuration data shaped like Vivado's: dummy words, the bus-width
     pattern, the sync word, then an IDCODE check."""
@@ -246,6 +320,7 @@ class _FakeD2xx:
         self.divisor = None
         self.pins = None  # last ADBUS value set with 0x80
         self.falling_reads = 0  # read commands that sample TDO on the falling edge
+        self.data_cmd_bytes: list[int] = []  # length of each 0x19 command
 
     # enumeration
     def FT_CreateDeviceInfoList(self, count):
@@ -327,6 +402,8 @@ class _FakeD2xx:
                 i += 1
             elif op in (0x19, 0x39):
                 n = (cmd[i + 1] | (cmd[i + 2] << 8)) + 1
+                if op == 0x19:
+                    self.data_cmd_bytes.append(n)
                 data = cmd[i + 3:i + 3 + n]
                 for byte in data:
                     r = 0
@@ -855,6 +932,21 @@ class ProgramTests(_FtdiTestCase):
         self.assertLessEqual(max(self.lib.read_waits[-50:]), 2600)
         self.assertTrue(self.lib.dev.done)
 
+    def test_long_data_goes_in_short_write_commands(self):
+        # The BRS-100's clone drops data from one 0x19 command of 2030 bytes
+        # or more; a genuine chip takes any length.
+        data = self.data + bytes(range(64))
+        self.lib.dev.accepts = data
+        t = self._transport()
+        first = len(self.lib.data_cmd_bytes)
+        with mock.patch.object(ft, "_MAX_WRITE_CMD_BYTES", 16):
+            t.program(self._file(data, "design.bin"))
+        self.assertTrue(self.lib.dev.done)
+        self.assertEqual(self.lib.dev.loaded(), data)
+        sizes = self.lib.data_cmd_bytes[first:]
+        self.assertEqual(max(sizes), 16)
+        self.assertGreaterEqual(sizes.count(16), len(data) // 16 - 1)
+
     def test_wrong_part_is_refused_before_clearing(self):
         t = self._transport()
         path = self._file(_bit_file(_bitstream(idcode=0x03727093), part="7k70tfbg676"))
@@ -880,7 +972,7 @@ class ProgramTests(_FtdiTestCase):
     def test_other_families_are_refused(self):
         self.lib.dev = _Device()  # PolarFire
         t = self._transport()
-        with self.assertRaisesRegex(RuntimeError, "7-series only.*polarfire"):
+        with self.assertRaisesRegex(RuntimeError, "7-series and Gowin GW1NR-9C.*polarfire"):
             t.program(self._file(self.data, "design.bin"))
 
     def test_bitfile_programs_only_when_opening_the_channel(self):
@@ -1096,6 +1188,154 @@ class ProgramTests(_FtdiTestCase):
             t.read_reg(0)
         # The session ended too: a call bound to it fails after a reconnect.
         self.assertTrue(t._cancelled)
+
+
+class GowinProgramTests(_FtdiTestCase):
+    """program(): SRAM configuration of a Gowin GW1NR-9C from a .fs."""
+
+    def setUp(self):
+        super().setUp()
+        for patcher in (
+            mock.patch.dict(gowin_fs.FRAME_LAYOUTS, {GW1NR9_IDCODE: SMALL_LAYOUT}),
+            mock.patch.object(FtdiMpsseTransport, "GOWIN_ERASE_S", 0),
+            mock.patch.object(FtdiMpsseTransport, "GOWIN_ERASE_SETTLE_S", 0),
+            mock.patch.object(FtdiMpsseTransport, "GOWIN_LOAD_SETTLE_S", 0),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.payloads = random_payloads(3, 36)
+        self.path = self._file(gowin_fs_text(self.payloads))
+        image = gowin_fs.read_gowin_fs(self.path)
+        self.checksum = image.checksum
+        self.lib.dev = _GowinDevice((tuple(self.payloads), image.checksum), image.usercode)
+
+    def _file(self, text: str, name: str = "design.fs") -> str:
+        path = self.dir / name
+        path.write_text(text, encoding="ascii")
+        return str(path)
+
+    def _transport(self, **kw) -> FtdiMpsseTransport:
+        t = super()._transport(**kw)
+        for dev in getattr(self.lib.dev, "devices", [self.lib.dev]):
+            if isinstance(dev, _GowinDevice):
+                dev.commands.clear()  # forget the chain scan's BYPASS at connect
+        self.lib.data_cmd_bytes.clear()
+        return t
+
+    def test_loads_the_frames_into_sram(self):
+        t = self._transport()
+        self.assertEqual(t.family, "gowin")
+        t.program(self.path)
+        dev = self.lib.dev
+        self.assertEqual(dev.frames, self.payloads)  # first bit first, one scan each
+        self.assertEqual(dev.checksum, self.checksum)
+        self.assertTrue(dev.done and dev.ready)
+        self.assertFalse(dev.edit)
+        self.assertEqual(dev.usercode, self.checksum)
+        self.assertEqual((dev.state, dev.ir), ("IDLE", dev.idcode_ir))  # left reset
+        # Gowin's programmer's order, status polls aside; nothing that
+        # touches the flash or reloads it (REPROGRAM, 0x3C).
+        steps = [c for c in dev.commands if c != dev.STATUS]
+        self.assertEqual(steps, [
+            0x11, 0x15, 0x05, 0x02, 0x09, 0x3A, 0x02,
+            0x15, 0x0B, 0x12, 0x3B, 0x0A, 0x08, 0x3A, 0x02, 0x13,
+        ])
+        self.assertEqual(t.read_reg(0x0000), 0x46430004)
+
+    def test_long_frames_go_in_short_write_commands(self):
+        t = self._transport()
+        t.program(self.path)
+        self.assertIn(4, self.lib.data_cmd_bytes)  # a frame's 36 bits: 4 bytes, then 4 bits
+        t.close()
+        t = self._transport()
+        with mock.patch.object(ft, "_MAX_WRITE_CMD_BYTES", 2):
+            t.program(self.path)
+        self.assertEqual(self.lib.dev.frames, self.payloads)
+        self.assertEqual(self.lib.data_cmd_bytes.count(2), 2 * len(self.payloads))
+        self.assertNotIn(4, self.lib.data_cmd_bytes)
+        self.assertTrue(self.lib.dev.done)
+
+    def test_programs_at_connect(self):
+        self._transport(bitfile=self.path)
+        self.assertTrue(self.lib.dev.done)
+        self.assertEqual(self.lib.dev.frames, self.payloads)
+
+    def test_done_staying_low_is_an_error(self):
+        self.lib.dev.accepts = (tuple(self.payloads), self.checksum ^ 1)
+        t = self._transport()
+        with self.assertRaisesRegex(
+            RuntimeError, r"did not configure the FPGA: DONE and READY did not both rise"
+            r".*status 0x00000020 \(erased\)"
+        ):
+            t.program(self.path, timeout_s=0.01)
+        self.assertFalse(self.lib.dev.edit)  # configuration mode left
+        self.assertEqual(self.lib.dev.state, "IDLE")
+
+    def test_error_flag_fails_at_once(self):
+        self.lib.dev.errors = 0x01
+        t = self._transport()
+        with self.assertRaisesRegex(
+            RuntimeError, r"did not enter configuration mode.*CRC error"
+        ):
+            t.program(self.path, timeout_s=60)
+        self.assertNotIn(self.lib.dev.ERASE, self.lib.dev.commands)
+        self.assertFalse(self.lib.dev.edit)
+
+    def test_erase_that_never_completes_is_an_error(self):
+        self.lib.dev.erase_clocks = 10**9
+        t = self._transport()
+        with self.assertRaisesRegex(RuntimeError, "the SRAM erase did not complete"):
+            t.program(self.path, timeout_s=0.01)
+        self.assertNotIn(self.lib.dev.WRITE_FRAMES, self.lib.dev.commands)
+
+    def test_usercode_other_than_the_file_s_is_an_error(self):
+        self.lib.dev.good_usercode = 0xFFFFFFFF
+        t = self._transport()
+        with self.assertRaisesRegex(
+            RuntimeError, r"USERCODE 0xffffffff after loading .*which sets 0x0000[0-9a-f]{4}"
+        ):
+            t.program(self.path)
+
+    def test_file_for_another_part_is_refused_before_erasing(self):
+        t = self._transport()
+        path = self._file(gowin_fs_text(self.payloads, idcode=0x0100481B), "other.fs")
+        with self.assertRaisesRegex(RuntimeError, r"built for IDCODE 0x0100481b \(GW1NR-9C\)"):
+            t.program(path)
+        self.assertEqual(self.lib.dev.commands, [])
+
+    def test_corrupt_file_is_refused_before_erasing(self):
+        t = self._transport()
+        path = self._file(gowin_fs_text(self.payloads, checksum=self.checksum ^ 1), "bad.fs")
+        with self.assertRaisesRegex(RuntimeError, "the file is corrupt"):
+            t.program(path)
+        self.assertEqual(self.lib.dev.commands, [])
+
+    def test_other_gowin_parts_are_refused(self):
+        self.lib.dev = _GowinDevice(idcode=0x0000081B)  # GW2A-18
+        t = self._transport()
+        with self.assertRaisesRegex(
+            RuntimeError, r"supports GW1NR-9C \(0x1100481b\); this device is"
+        ):
+            t.program(self.path)
+        self.assertEqual(self.lib.dev.commands, [])
+
+    def test_refused_on_a_chain_of_several_devices(self):
+        gowin = self.lib.dev
+        self.lib.dev = _Chain(_dap(0x4BA00477), gowin)
+        t = self._transport(tap=1)
+        with self.assertRaisesRegex(RuntimeError, "alone on the JTAG chain; this chain has 2"):
+            t.program(self.path)
+        self.assertEqual(gowin.commands, [])
+
+    def test_refused_while_other_transports_share_the_channel(self):
+        a = self._transport()
+        self._transport()
+        with self.assertRaisesRegex(RuntimeError, "1 other transport"):
+            a.program(self.path)
+        self.assertEqual(self.lib.dev.commands, [])
 
 
 class SessionTests(_FtdiTestCase):

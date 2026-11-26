@@ -418,9 +418,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "hw_server: run fpga -file on this .bit before the command (slow); "
-            "ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin "
-            "over JTAG. Omit to attach to the FPGA without reprogramming "
-            "(already-loaded bitstream)."
+            "ftdi: configure an AMD/Xilinx 7-series FPGA with this .bit or .bin, "
+            "or a Gowin GW1NR-9C's SRAM with this .fs, over JTAG. Omit to attach "
+            "to the FPGA without reprogramming (already-loaded bitstream)."
         ),
     )
     p.add_argument(

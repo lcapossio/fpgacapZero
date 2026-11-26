@@ -30,6 +30,7 @@ import threading
 import time
 from typing import List, NamedTuple, Sequence
 
+from .gowin_fs import GowinBitstream, GowinFsError, read_gowin_fs
 from .transport import (
     BurstIntegrityError,
     ScanOp,
@@ -400,6 +401,11 @@ _DATA_BITS_INOUT = 0x3B
 _TMS_OUT = 0x4B
 _TMS_INOUT = 0x6B
 _SEND_IMMEDIATE = 0x87
+#: Data bytes per write-only data command (0x19) in a long stream.  The
+#: BRS-100's FT2232-compatible clone loses one of 2030 bytes or more (2000
+#: work); genuine FTDI chips take 65536.  Many short commands clock exactly
+#: what one long one does.
+_MAX_WRITE_CMD_BYTES = 1024
 _READ_PINS = 0x81  # ADBUS low byte
 # Not an opcode: its rejection (0xFA 0xAB) marks the end of setup replies.
 _SYNC_MARK = 0xAB
@@ -634,6 +640,51 @@ _XC_WRITE_IDCODE = b"\x30\x01\x80\x01"  # type-1 packet: write 1 word to IDCODE
 _BIT_REVERSE = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
 
 
+# -- Gowin JTAG configuration -------------------------------------------------
+
+# GW1N(R) SRAM configuration instructions (UG290 section 7, TN653) and the
+# status register bits of the -9C (TN711 table 2).
+_GW_READ_IDCODE = 0x11
+_GW_READ_USERCODE = 0x13
+_GW_READ_STATUS = 0x41
+_GW_CONFIG_ENABLE = 0x15
+_GW_CONFIG_DISABLE = 0x3A
+_GW_ERASE_SRAM = 0x05
+_GW_SRAM_ERASE_DONE = 0x09
+_GW_INIT_ADDR = 0x12
+#: Sent by Gowin's programmer after CONFIG_ENABLE, before INIT_ADDR (its
+#: SVF for the GW1NR-9C); UG290 does not list it.
+_GW_LOAD_START = 0x0B
+#: Gowin's programmer loads SRAM through this instruction, one DR scan per
+#: frame of payload bits (its SVF for the GW1NR-9C).
+_GW_WRITE_FRAMES = 0x3B
+_GW_WRITE_CHECKSUM = 0x0A
+_GW_CHECKSUM_DONE = 0x08
+_GW_NOOP = 0x02
+_GW_ST_CRC_ERROR = 1 << 0
+_GW_ST_BAD_COMMAND = 1 << 1
+_GW_ST_ID_MISMATCH = 1 << 2
+_GW_ST_TIMEOUT = 1 << 3
+_GW_ST_ERRORS = _GW_ST_CRC_ERROR | _GW_ST_BAD_COMMAND | _GW_ST_ID_MISMATCH | _GW_ST_TIMEOUT
+_GW_ST_ERASED = 1 << 5
+_GW_ST_EDIT = 1 << 7
+_GW_ST_DONE = 1 << 13
+_GW_ST_READY = 1 << 15
+_GW_ST_NAMES = (
+    (_GW_ST_CRC_ERROR, "CRC error"), (_GW_ST_BAD_COMMAND, "bad command"),
+    (_GW_ST_ID_MISMATCH, "ID mismatch"), (_GW_ST_TIMEOUT, "timeout"),
+    (_GW_ST_ERASED, "erased"), (_GW_ST_EDIT, "edit mode"),
+    (_GW_ST_DONE, "DONE"), (_GW_ST_READY, "READY"),
+)
+#: Gowin parts whose SRAM configuration over FTDI is hardware-validated.
+GOWIN_SRAM_PARTS: dict[int, str] = {0x1100481B: "GW1NR-9C"}
+
+
+def _gowin_status_text(status: int) -> str:
+    named = [name for bit, name in _GW_ST_NAMES if status & bit]
+    return f"0x{status:08x} ({', '.join(named) or 'no flags'})"
+
+
 class _ConfigFailed(RuntimeError):
     """Configuration did not complete, but every scan went out whole, so
     the adapter and TAP are in a known state."""
@@ -811,7 +862,8 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     A7 reads a shifted IDCODE at 30 MHz on the rising edge).
 
     ``bitfile`` programs an AMD/Xilinx 7-series FPGA with that ``.bit`` or
-    ``.bin`` at connect (see :meth:`program`), only when this transport opens
+    ``.bin``, or a Gowin GW1NR-9C's SRAM with a ``.fs``, at connect (see
+    :meth:`program`), only when this transport opens
     the channel: one joining a channel another transport holds never
     reprograms the FPGA under it.
 
@@ -830,6 +882,24 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     STARTUP_IDLE_CYCLES = 4000
     #: TCKs in Run-Test/Idle between configuration status polls.
     STATUS_POLL_IDLE_CYCLES = 1000
+    #: Gowin: TCKs in Run-Test/Idle after each instruction (TN653 asks for
+    #: at least 3).
+    GOWIN_COMMAND_IDLE_CYCLES = 6
+    #: Gowin: Run-Test/Idle after ERASE_SRAM before its status is polled:
+    #: at least these TCKs and seconds (UG290: 4 ms for the -9; Gowin's own
+    #: SVF clocks 10000 TCKs at 2.5 MHz).
+    GOWIN_ERASE_IDLE_CYCLES = 10_000
+    GOWIN_ERASE_S = 0.004
+    #: Gowin: Run-Test/Idle after the erase is closed, before the load
+    #: (Gowin's SVF clocks 2.5 M TCKs at 2.5 MHz: one second).
+    GOWIN_ERASE_SETTLE_S = 1.0
+    #: Gowin: Run-Test/Idle after the load before the status is read
+    #: (UG290: 60 ms).
+    GOWIN_LOAD_SETTLE_S = 0.06
+    #: Gowin: TCKs in Run-Test/Idle after each frame (Gowin's SVF: 3).
+    GOWIN_FRAME_IDLE_CYCLES = 3
+    #: TCKs per waited-for piece of a timed Run-Test/Idle wait.
+    _RUN_TEST_PIECE = 2100
     #: Flush a batch to the adapter at this many command or reply bytes.
     _FLUSH_CMD_BYTES = 0xF000
     _FLUSH_READ_BYTES = 0x8000
@@ -1547,13 +1617,20 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
 
     @_in_one_session
     def program(self, bitfile: str, *, timeout_s: float = 2.0) -> None:
-        """Configure an AMD/Xilinx 7-series FPGA with *bitfile* over JTAG.
+        """Configure the FPGA with *bitfile* over JTAG.
 
-        Takes a Vivado ``.bit`` or a raw ``.bin``.  Follows UG470's JTAG
-        sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE), shift
-        the bitstream through CFG_IN, JSTART, then wait for DONE.  A
-        bitstream built for another part is refused before the FPGA is
-        cleared.  Every core on the FPGA is lost, so this is refused while
+        AMD/Xilinx 7-series: a Vivado ``.bit`` or a raw ``.bin``, by UG470's
+        JTAG sequence: JPROGRAM, wait for housecleaning (INIT_COMPLETE),
+        shift the bitstream through CFG_IN, JSTART, then wait for DONE.
+
+        Gowin GW1NR-9C: a ``.fs``, into SRAM only (the flash is never
+        touched, so a power cycle boots the flash image again), by the
+        sequence Gowin's programmer uses: erase SRAM, load each frame's
+        payload in a DR scan of its own, write the checksum, then wait for
+        DONE and READY with no error flags.  See :meth:`_program_gowin`.
+
+        A bitstream built for another part, or a malformed one, is refused
+        before the FPGA is cleared.  Every core on the FPGA is lost, so this is refused while
         other transports share the channel.  If a USB transfer fails
         partway, the adapter may be left mid-command, so the channel is
         closed: connect again.  :meth:`cancel` from another thread stops it
@@ -1591,12 +1668,15 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 self._detach(retire=not self._cancelled)
                 raise
 
-    def _load_bitstream(self, bitfile: str) -> bytes:
+    def _load_bitstream(self, bitfile: str) -> "bytes | GowinBitstream":
         """*bitfile*'s configuration data, checked against the device."""
+        if self.family == "gowin":
+            return self._load_gowin(bitfile)
         if self.family != "xilinx7":
             raise RuntimeError(
-                "programming over FTDI supports AMD/Xilinx 7-series only; this "
-                f"device is {self.opened_device}"
+                "programming over FTDI supports AMD/Xilinx 7-series and Gowin "
+                f"{', '.join(GOWIN_SRAM_PARTS.values())}; this device is "
+                f"{self.opened_device}"
             )
         data, part = read_xilinx_bitstream(bitfile)
         want = bitstream_idcode(data)
@@ -1608,7 +1688,40 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
             )
         return data
 
-    def _program(self, data: bytes, bitfile: str, timeout_s: float = 2.0) -> None:
+    def _load_gowin(self, bitfile: str) -> GowinBitstream:
+        """*bitfile* as a ``.fs``, checked against the device."""
+        if self.idcode not in GOWIN_SRAM_PARTS:
+            parts = ", ".join(f"{n} (0x{c:08x})" for c, n in GOWIN_SRAM_PARTS.items())
+            raise RuntimeError(
+                f"programming a Gowin FPGA over FTDI supports {parts}; this device "
+                f"is {self.opened_device}"
+            )
+        if len(self.chain) > 1:
+            # The frame scans are built by hand, with no BYPASS padding.
+            raise RuntimeError(
+                "programming a Gowin FPGA over FTDI needs it alone on the JTAG "
+                f"chain; this chain has {len(self.chain)} devices"
+            )
+        try:
+            image = read_gowin_fs(bitfile)
+        except GowinFsError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if image.idcode != self.idcode:
+            built = f" ({image.device})" if image.device else ""
+            raise RuntimeError(
+                f"{bitfile} is built for IDCODE 0x{image.idcode:08x}{built}; the "
+                f"device reads 0x{self.idcode:08x}"
+            )
+        return image
+
+    def _program(self, data, bitfile: str, timeout_s: float = 2.0) -> None:
+        """Configure the FPGA with *data* from :meth:`_load_bitstream`."""
+        if isinstance(data, GowinBitstream):
+            self._program_gowin(data, timeout_s)
+        else:
+            self._program_xilinx(data, bitfile, timeout_s)
+
+    def _program_xilinx(self, data: bytes, bitfile: str, timeout_s: float = 2.0) -> None:
         """The UG470 sequence for :meth:`program`.  The FPGA not clearing or
         DONE staying low raises :class:`_ConfigFailed` with the TAP reset;
         any other exception may leave MPSSE mid-command."""
@@ -1645,6 +1758,180 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
                 # The old bitstream's cores are gone: what was learned is void.
                 self._forget_hub_state()
             self._reset_tap()
+
+    def _program_gowin(self, image: GowinBitstream, timeout_s: float = 2.0) -> None:
+        """The SRAM sequence of Gowin's programmer, for :meth:`program`.
+
+        The erase follows UG290 section 7.  The load is not UG290's single
+        XFER_WRITE (0x17) scan of the whole file: on the GW1NR-9C that
+        leaves DONE high but the design not running.  It is the sequence
+        Gowin's own programmer uses on that part (its SVF export): 0x0B,
+        INIT_ADDR, then WRITE_FRAMES (0x3B) with one DR scan per frame, then
+        the frame checksum through 0x0A and 0x08.
+
+        The device not answering a step, an error flag, DONE or READY
+        staying low, or a USERCODE other than the file's raises
+        :class:`_ConfigFailed`, after configuration mode is left and the
+        TAP reset; any other exception may leave MPSSE mid-command.
+        Nothing here writes the flash, and REPROGRAM (which loads the flash
+        image into SRAM) is never sent.
+        """
+        path = image.path
+        with self._io_lock:
+            try:
+                self._reset_tap()
+                idcode = self._gowin_read(_GW_READ_IDCODE)
+                if idcode != image.idcode:
+                    raise _ConfigFailed(
+                        f"the device read IDCODE 0x{idcode:08x}, {path} is for "
+                        f"0x{image.idcode:08x}"
+                    )
+                # Erase the SRAM.
+                self._gowin_command(_GW_CONFIG_ENABLE)
+                self._gowin_wait(
+                    lambda s: s & _GW_ST_EDIT, timeout_s,
+                    "the FPGA did not enter configuration mode (CONFIG_ENABLE)",
+                )
+                self._gowin_command(_GW_ERASE_SRAM)
+                self._gowin_command(_GW_NOOP)
+                self._run_test(self.GOWIN_ERASE_IDLE_CYCLES, self.GOWIN_ERASE_S)
+                self._gowin_wait(
+                    lambda s: s & _GW_ST_ERASED, timeout_s,
+                    "the SRAM erase did not complete",
+                )
+                self._gowin_command(_GW_SRAM_ERASE_DONE)
+                self._gowin_command(_GW_CONFIG_DISABLE)
+                self._gowin_command(_GW_NOOP)
+                self._run_test(0, self.GOWIN_ERASE_SETTLE_S)
+                # Load the frames, then the checksum.
+                self._gowin_command(_GW_CONFIG_ENABLE)
+                self._gowin_command(_GW_LOAD_START)
+                self._gowin_command(_GW_INIT_ADDR)
+                self._gowin_load_frames(image.frame_payloads)
+                self._gowin_command(_GW_WRITE_CHECKSUM)
+                batch = self._batch()
+                batch.scan(False, image.checksum, 32, False)
+                self._flush(batch)
+                self._gowin_command(_GW_CHECKSUM_DONE)
+                self._gowin_command(_GW_CONFIG_DISABLE)
+                self._gowin_command(_GW_NOOP)
+                self._run_test(0, self.GOWIN_LOAD_SETTLE_S)
+                status = self._gowin_wait(
+                    lambda s: s & (_GW_ST_DONE | _GW_ST_READY) == _GW_ST_DONE | _GW_ST_READY
+                    and not s & _GW_ST_EDIT,
+                    timeout_s,
+                    f"{path} did not configure the FPGA: DONE and READY did not both "
+                    "rise",
+                )
+                if image.usercode is not None:
+                    usercode = self._gowin_read(_GW_READ_USERCODE)
+                    if usercode != image.usercode:
+                        raise _ConfigFailed(
+                            f"the FPGA reports USERCODE 0x{usercode:08x} after loading "
+                            f"{path}, which sets 0x{image.usercode:08x} (status "
+                            f"{_gowin_status_text(status)})"
+                        )
+            except _ConfigFailed:
+                self._gowin_leave_config()
+                raise
+            finally:
+                # The old bitstream's cores are gone: what was learned is void.
+                self._forget_hub_state()
+            self._reset_tap()
+
+    def _gowin_load_frames(self, payloads: tuple[str, ...]) -> None:
+        """Shift ``WRITE_FRAMES``, then each frame's payload as a DR scan of
+        its own, first bit first, with ``GOWIN_FRAME_IDLE_CYCLES`` in
+        Run-Test/Idle after each.  As Gowin's programmer does, the
+        instruction scan rests in Pause-IR and the first frame follows from
+        there, with no clock in Run-Test/Idle between them."""
+        batch = self._batch()
+        batch.tms(_IDLE_TO_SHIFT_IR)
+        body = self.ir_length - 1
+        batch._add(bytes((_DATA_BITS_OUT, body - 1, _GW_WRITE_FRAMES & ((1 << body) - 1))),
+                   body, 0)
+        last = (_GW_WRITE_FRAMES >> body) & 1
+        batch.tms((1, 0), tdi=last)  # the last bit to Exit1-IR, then Pause-IR
+        batch.tms((1, 1, 1, 0, 0))  # Exit2-IR, Update-IR, Select-DR, Capture-DR, Shift-DR
+        for i, bits in enumerate(payloads):
+            value = int(bits[::-1], 2)  # bit 0 is shifted first
+            if i:
+                batch.tms(_IDLE_TO_SHIFT_DR)
+            width = len(bits)
+            nbytes, rem = divmod(width - 1, 8)
+            if nbytes:
+                data = (value & ((1 << (8 * nbytes)) - 1)).to_bytes(nbytes, "little")
+                for at in range(0, nbytes, _MAX_WRITE_CMD_BYTES):
+                    chunk = data[at:at + _MAX_WRITE_CMD_BYTES]
+                    n = len(chunk) - 1
+                    batch._add(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk,
+                               8 * len(chunk), 0)
+            if rem:
+                batch._add(bytes((_DATA_BITS_OUT, rem - 1, (value >> (8 * nbytes)) & 0xFF)),
+                           rem, 0)
+            batch.tms(_LAST_BIT_TO_IDLE, tdi=(value >> (width - 1)) & 1)
+            batch.idle(self.GOWIN_FRAME_IDLE_CYCLES)
+        self._flush(batch)
+
+    def _gowin_command(self, instruction: int) -> None:
+        """Shift a Gowin *instruction*, then idle the clocks it needs."""
+        batch = self._batch()
+        batch.scan(True, instruction, self.ir_length, False)
+        batch.idle(self.GOWIN_COMMAND_IDLE_CYCLES)
+        self._flush(batch)
+
+    def _gowin_read(self, instruction: int) -> int:
+        """Shift a Gowin read *instruction*, then capture its 32-bit DR."""
+        batch = self._batch()
+        batch.scan(True, instruction, self.ir_length, False)
+        batch.idle(self.GOWIN_COMMAND_IDLE_CYCLES)
+        batch.scan(False, 0, 32, True)
+        (value,) = self._flush(batch)
+        return value
+
+    def _gowin_wait(self, ready, timeout_s: float, failure: str) -> int:
+        """Poll the Gowin status register until *ready*; an error flag
+        fails at once."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = self._gowin_read(_GW_READ_STATUS)
+            if status & _GW_ST_ERRORS:
+                raise _ConfigFailed(f"{failure}: status {_gowin_status_text(status)}")
+            if ready(status):
+                return status
+            if time.monotonic() > deadline:
+                raise _ConfigFailed(f"{failure}: status {_gowin_status_text(status)}")
+            self._run_test(self.STATUS_POLL_IDLE_CYCLES, 0.002)
+
+    def _gowin_leave_config(self) -> None:
+        """After a failed Gowin step: leave configuration mode and reset the
+        TAP, so the device is not left in edit mode.  Best effort: the
+        failure being reported matters more."""
+        try:
+            self._gowin_command(_GW_CONFIG_DISABLE)
+            self._gowin_command(_GW_NOOP)
+            self._reset_tap()
+        except Exception:
+            pass
+
+    def _run_test(self, cycles: int, seconds: float) -> None:
+        """Clock Run-Test/Idle for at least *cycles* TCKs and at least
+        *seconds* of wall time.  The clock count alone is not a time: an
+        FT2232-compatible clone can ignore the divisor and run its own
+        TCK.  Each piece is waited for (see :meth:`_idle`), so the time is
+        real, and a cancel lands between pieces."""
+        deadline = time.monotonic() + seconds
+        tck = self.actual_tck_hz or 1e6
+        # Short pieces, so a wait set by its time ends near its deadline:
+        # the BRS-100's clone clocks Run-Test/Idle at about 120 kHz, not
+        # the TCK it was asked for.
+        piece = max(7, min(int(tck * 0.25), max(int(cycles), self._RUN_TEST_PIECE)))
+        done = 0
+        while True:
+            self._idle(piece)
+            done += piece
+            if done >= cycles and time.monotonic() >= deadline:
+                return
 
     def _reset_tap(self) -> None:
         batch = self._batch()
@@ -1705,9 +1992,12 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         self._write(bytes(batch.cmd))
         body, last = (data, 0) if after else (data[:-1], data[-1])
         for pos in range(0, len(body), piece):
-            chunk = body[pos:pos + piece]
-            n = len(chunk) - 1
-            self._write_paced(bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk)
+            cmd = bytearray()
+            for at in range(pos, min(pos + piece, len(body)), _MAX_WRITE_CMD_BYTES):
+                chunk = body[at:min(at + _MAX_WRITE_CMD_BYTES, pos + piece)]
+                n = len(chunk) - 1
+                cmd += bytes((_DATA_BYTES_OUT, n & 0xFF, n >> 8)) + chunk
+            self._write_paced(bytes(cmd))
         # The last bit (the last byte's top bit, or the last padding bit)
         # leaves Shift-DR with TMS.
         tms_value = sum(b << i for i, b in enumerate(_LAST_BIT_TO_IDLE)) | ((last >> 7) << 7)

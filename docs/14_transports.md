@@ -777,8 +777,23 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   to Run-Test/Idle first.  The
   Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
   Single-die UltraScale takes the same sequence but is not
-  hardware-validated; PolarFire and Gowin are not supported (use their
-  vendor tools).  The web interface has no bitstream field.
+  hardware-validated.
+
+  A Gowin GW1NR-9C (IDCODE `0x1100481B`) takes a `.fs` instead, loaded into
+  SRAM only: the flash is never written, so a power cycle boots the flash
+  image again.  The sequence is the one Gowin's programmer uses on that
+  part: erase the SRAM, load each configuration frame in a DR scan of its
+  own, write the frame checksum, then wait for DONE and READY with no error
+  flag, and check the USERCODE against the file's.  The file is checked
+  first (its frame checksum, and the IDCODE it was built for); compressed
+  and encrypted `.fs` files are refused, as are other Gowin parts and a
+  GW1NR-9C that is not alone on the JTAG chain.  The BRS-100 loads in about
+  2.5 s.  Its FT2232-compatible adapter loses data from a clocked-write
+  command of about 2 KB or more, so long writes go out as commands of
+  1 KB each, on every adapter.
+
+  PolarFire is not supported (use its vendor tools).  The web interface
+  has no bitstream field.
 - **Validated** on the PolarFire SoC Discovery Kit's embedded FlashPro5: all
   11 hardware tests of
   [`examples/mpfs_disco_kit`](../examples/mpfs_disco_kit/README.md) pass, in

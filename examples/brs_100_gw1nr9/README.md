@@ -90,10 +90,18 @@ python examples/brs_100_gw1nr9/build.py --gowin /path/to/gw_sh
 
 ## Program And Connect
 
-Program `out/fcapz_brs_100_gw1nr9.fs` with Gowin Programmer or your usual
-Gowin programming flow.
+fcapz's FTDI backend loads the `.fs` into the FPGA's SRAM directly through
+the board's USB adapter (channel A, "USB Debugger A"), in about 2.5 s.  The
+flash is not touched, so a power cycle boots the flash image again:
 
-Then start OpenOCD from the repository root:
+```sh
+fcapz --backend ftdi --hardware "USB Debugger A"   --program examples/brs_100_gw1nr9/out/fcapz_brs_100_gw1nr9.fs probe
+```
+
+This needs the adapter on FTDI's D2XX driver (or libusb).  Gowin Programmer
+works as well; to write the flash, use it.
+
+To use the OpenOCD backend instead, start OpenOCD from the repository root:
 
 ```sh
 openocd -f examples/brs_100_gw1nr9/brs_100_gw1nr9.cfg
@@ -175,7 +183,8 @@ eio.write_outputs(0x3F)    # all six LEDs on
 ## Hardware tests
 
 `test_hw_integration.py` is an opt-in regression that drives the board over
-OpenOCD. Build + load the bitstream, start OpenOCD, then:
+OpenOCD. Build + load the bitstream (as above, or with Gowin Programmer),
+start OpenOCD, then:
 
 ```sh
 openocd -f examples/brs_100_gw1nr9/brs_100_gw1nr9.cfg &
@@ -219,8 +228,8 @@ are those of the reference design.
 
 ```sh
 python examples/brs_100_gw1nr9/build.py --variant manager
-# program out_manager/fcapz_brs_100_gw1nr9_manager.fs, start OpenOCD, then:
-python -m pytest examples/brs_100_gw1nr9/test_hw_manager.py -v
+fcapz --backend ftdi --hardware "USB Debugger A"   --program examples/brs_100_gw1nr9/out_manager/fcapz_brs_100_gw1nr9_manager.fs probe
+FPGACAP_BACKEND=ftdi FPGACAP_FTDI_DEVICE="USB Debugger A"   python -m pytest examples/brs_100_gw1nr9/test_hw_manager.py -v
 ```
 
 The variant builds with timing met (about 25 % of the logic) and passes
@@ -234,7 +243,7 @@ serves it with clocked commands.
 - This example uses Gowin register-path ELA readback, not Xilinx-style burst
   readback.
 - OpenOCD must already be running; the fpgacapZero OpenOCD transport does not
-  program the FPGA.
+  program the FPGA (the FTDI backend does, see above).
 
 ## More Detail
 
