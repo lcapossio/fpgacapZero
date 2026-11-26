@@ -234,7 +234,10 @@ expose the **same** command set:
 
 Every command and field is exactly the contract in
 [chapter 11](11_rpc_server.md): `connect`, `probe`, `capture`, `eio_*`,
-`axi_*`, `uart_*`. **Errors are in-band** (`{"ok": false, "error": ...}`), so a
+`axi_*`, `uart_*`, with one exception: a request carrying `program` is
+refused, from any client, since it would make the server open that path
+and reprogram the FPGA.  Program with the CLI (`--program`), the desktop
+GUI or the stdio RPC server, then connect from the browser. **Errors are in-band** (`{"ok": false, "error": ...}`), so a
 bad command still returns HTTP 200 — matching the line-protocol semantics. You
 can drive the server with `curl` exactly as you would pipe JSON to
 `python -m fcapz.rpc`:

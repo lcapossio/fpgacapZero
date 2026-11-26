@@ -25,6 +25,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **FTDI long writes on FT2232-compatible clones.**  Write-only scans go
   out as commands of at most 1 KB: the BRS-100's adapter silently loses data
   from one command of about 2 KB or more.
+- **The web server refuses `program`.**  A web request naming a bitstream
+  made the server open that path and reprogram the FPGA (any client,
+  remote ones with a token included); the web UI never sends it.  Both
+  `/api/rpc` and `/api/ws` now refuse it in-band.
 - **FTDI waits at a slow TCK with a short USB timeout.**  Idle clocking and
   bitstream writes are paced in pieces that fit the channel's USB timeout,
   not a fixed quarter second, so they no longer time out there.
