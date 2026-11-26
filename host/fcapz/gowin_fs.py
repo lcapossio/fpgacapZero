@@ -45,9 +45,11 @@ _KEY_END = 0x08
 _NO_CRC = 0x80  # key-byte flag: the CRC does not cover this record
 
 #: Frame layout per IDCODE: ``(frames, leading pad bits, payload bits,
-#: trailing pad bits)``.  A frame is those plus a 16-bit CRC when CRC is on.
-FRAME_LAYOUTS: dict[int, tuple[int, int, int, int]] = {
-    0x1100481B: (712, 4, 2836, 48),  # GW1NR-9C / GW1N-9C
+#: trailing pad bits, padding-line bits)``.  A frame is those plus a 16-bit
+#: CRC when CRC is on; the padding line after the frames ends with a CRC
+#: then.
+FRAME_LAYOUTS: dict[int, tuple[int, int, int, int, int]] = {
+    0x1100481B: (712, 4, 2836, 48, 160),  # GW1NR-9C / GW1N-9C
 }
 
 
@@ -218,6 +220,8 @@ def read_gowin_fs(path: str) -> GowinBitstream:
                 raise GowinFsError(f"{path}:{number}: 0x0A record is {len(bits)} bits, not 64")
             usercode = int(bits[32:], 2)
         elif key == _KEY_END and usercode is not None and not ended:
+            if len(bits) != 32:
+                raise GowinFsError(f"{path}:{number}: end record is {len(bits)} bits, not 32")
             ended = True
         elif key == _KEY_END and usercode is None:
             raise GowinFsError(f"{path}:{number}: no USERCODE/checksum record (0x0A) "
@@ -232,6 +236,12 @@ def read_gowin_fs(path: str) -> GowinBitstream:
     if not ended:
         raise GowinFsError(f"{path}: no end record (0x08) after 0x0A; the file is truncated")
 
+    commented = _hex_option(options, "UserCode")
+    if commented is not None and commented != usercode:
+        raise GowinFsError(
+            f"{path}: USERCODE record 0x{usercode:08x} does not match the file's "
+            f"UserCode 0x{commented:08x}; the file is corrupt"
+        )
     declared = _hex_option(options, "CheckSum")
     if declared is None:
         declared = usercode & 0xFFFF  # Gowin's default USERCODE is the checksum
@@ -239,7 +249,7 @@ def read_gowin_fs(path: str) -> GowinBitstream:
     checksum = declared
     layout = FRAME_LAYOUTS.get(idcode)
     if layout is not None:
-        rows, lead, payload_bits, tail = layout
+        rows, lead, payload_bits, tail, closing_bits = layout
         if frames != rows:
             raise GowinFsError(
                 f"{path}: {frames} frames; IDCODE 0x{idcode:08x} has {rows} (images "
@@ -252,6 +262,11 @@ def read_gowin_fs(path: str) -> GowinBitstream:
                 f"with CRC {'on' if crc_on else 'off'}"
             )
         body = lead + payload_bits
+        if crc_on and len(closing[1]) != closing_bits:
+            raise GowinFsError(
+                f"{path}:{closing[0]}: padding line of {len(closing[1])} bits, not "
+                f"{closing_bits}"
+            )
         if crc_on:
             previous = bytes(crc_header)
             for number, bits in frame_records + [closing]:

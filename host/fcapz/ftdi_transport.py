@@ -1923,10 +1923,16 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
     def _gowin_leave_config(self) -> None:
         """After a failed Gowin step: leave configuration mode and reset the
         TAP, so the device is not left in edit mode.  Raises whatever the
-        I/O raises (a cancel, a USB failure)."""
+        I/O raises (a cancel, a USB failure), or :class:`_ConfigFailed` if
+        the device is still in edit mode afterwards."""
         self._gowin_command(_GW_CONFIG_DISABLE)
         self._gowin_command(_GW_NOOP)
+        status = self._gowin_read(_GW_READ_STATUS)
         self._reset_tap()
+        if status & _GW_ST_EDIT:
+            raise _ConfigFailed(
+                f"the FPGA stayed in configuration mode: status {_gowin_status_text(status)}"
+            )
 
     def _run_test(self, cycles: int, seconds: float) -> None:
         """Clock Run-Test/Idle for at least *cycles* TCKs and at least
@@ -1939,7 +1945,7 @@ class FtdiMpsseTransport(_ScanBurstMixin, Transport):
         # Short pieces, so a wait set by its time ends near its deadline:
         # the BRS-100's clone clocks Run-Test/Idle at about 120 kHz, not
         # the TCK it was asked for.
-        piece = max(7, min(int(tck * 0.25), max(int(cycles), self._RUN_TEST_PIECE)))
+        piece = max(7, min(int(tck * 0.25), self._RUN_TEST_PIECE))
         done = 0
         while True:
             self._idle(piece)

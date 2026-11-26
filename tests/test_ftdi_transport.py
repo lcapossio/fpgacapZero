@@ -1315,6 +1315,24 @@ class GowinProgramTests(_FtdiTestCase):
         self.assertEqual([c for c in self.lib.dev.commands if c != 0xFF], [0x11])
         self.assertEqual(t.read_reg(0x0000), 0x46430004)  # the channel stays usable
 
+    def test_still_in_edit_mode_after_cleanup_closes_the_channel(self):
+        self.lib.dev.errors = 0x01
+        dev = self.lib.dev
+        t = self._transport()
+        real = dev.clock
+
+        def ignore_config_disable(tms, tdi):  # the device ignores CONFIG_DISABLE
+            out = real(tms, tdi)
+            if dev.state == "UPDATE_IR" and dev.ir == dev.CONFIG_DISABLE:
+                dev.edit = True
+            return out
+
+        dev.clock = ignore_config_disable
+        with self.assertRaisesRegex(RuntimeError, r"stayed in configuration mode"):
+            t.program(self.path)
+        self.assertEqual(self.lib.closes, 1)
+        self.assertEqual(ft._OPEN_CHANNELS, [])
+
     def test_failed_cleanup_closes_the_channel(self):
         self.lib.dev.errors = 0x01
         t = self._transport()

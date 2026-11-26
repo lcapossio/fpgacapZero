@@ -17,8 +17,8 @@ from fcapz.gowin_fs import GowinFsError, crc16_arc, frame_checksum, read_gowin_f
 GW1NR9_IDCODE = 0x1100481B
 #: A frame layout small enough to simulate bit by bit: 3 frames of 4 lead
 #: pad bits, 36 payload bits (not whole bytes) and 8 tail pad bits, plus a
-#: 16-bit CRC when CRC is on.
-SMALL_LAYOUT = (3, 4, 36, 8)
+#: 16-bit CRC when CRC is on; a 64-bit padding line after them.
+SMALL_LAYOUT = (3, 4, 36, 8, 64)
 
 
 def _bits(value: int, width: int) -> str:
@@ -42,7 +42,7 @@ def random_payloads(count: int, width: int, seed: int = 1) -> list[str]:
 def gowin_fs_text(
     payloads: list[str],
     idcode: int = GW1NR9_IDCODE,
-    layout: tuple[int, int, int, int] = SMALL_LAYOUT,
+    layout: tuple[int, int, int, int, int] = SMALL_LAYOUT,
     crc: bool = True,
     checksum: int | None = None,
     usercode: int | None = None,
@@ -53,7 +53,7 @@ def gowin_fs_text(
     """A .fs file shaped like Gowin's: comments, preamble, sync, header
     records, one line per frame (CRC'd as Gowin's are when *crc*), the
     padding line, then the USERCODE and end records."""
-    _rows, lead, _payload, tail = layout
+    _rows, lead, _payload, tail, closing_bits = layout
     flag = "0" if crc else "1"  # key bit 7: not covered by the CRC
 
     def record(key: int, rest: str) -> str:
@@ -73,7 +73,8 @@ def gowin_fs_text(
         crc_field = _crc_bits(previous + _bytes(body)) if crc else ""
         lines.append(body + crc_field + "1" * tail)
         previous = _bytes("1" * tail)
-    closing = "1" * 48 + (_crc_bits(previous + _bytes("1" * 48)) if crc else "1" * 16)
+    ones = "1" * (closing_bits - 16)
+    closing = ones + (_crc_bits(previous + _bytes(ones)) if crc else "1" * 16)
     if checksum is None:
         checksum = frame_checksum(payloads)
     if usercode is None:
@@ -191,6 +192,22 @@ class ReadGowinFsTests(unittest.TestCase):
         self._refused(text.replace(idcode_line, idcode_line[:56]), "IDCODE record is 56 bits")
         frames_line = "00111011" + "10000000" + _bits(3, 16)
         self._refused(text.replace(frames_line + "\n", ""), r"no frame count record \(0x3B\)")
+
+    def test_usercode_record_must_match_the_comment(self):
+        text = gowin_fs_text(self.payloads)
+        lines = text.splitlines()
+        k = next(i for i, ln in enumerate(lines) if ln.startswith("00001010"))
+        lines[k] = lines[k][:-1] + ("1" if lines[k][-1] == "0" else "0")
+        self._refused(
+            "\n".join(lines), r"USERCODE record 0x[0-9a-f]{8} does not match.*corrupt"
+        )
+
+    def test_record_widths_after_the_frames_are_checked(self):
+        text = gowin_fs_text(self.payloads)
+        end = "00001000" + "0" * 24
+        self._refused(text.replace(end, end[:8]), "end record is 8 bits, not 32")
+        short = gowin_fs_text(self.payloads, layout=(3, 4, 36, 8, 48))
+        self._refused(short, "padding line of 48 bits, not 64")
 
     def test_trailer_must_be_complete_and_in_order(self):
         text = gowin_fs_text(self.payloads)
