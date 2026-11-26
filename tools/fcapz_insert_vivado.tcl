@@ -19,6 +19,8 @@
 #   6. writes the instrumented checkpoint, a .prob per ELA, and a manifest.
 #
 # Place, route and write_bitstream continue from the written checkpoint.
+# It is a non-project flow: it closes whatever is open, and refuses to run
+# with a project on disk (or a run's hook script) open.
 #
 #   source tools/fcapz_insert_vivado.tcl
 #   fcapz::insert -in post_synth.dcp -out instrumented.dcp -rtl <repo>/rtl \
@@ -178,6 +180,46 @@ proc fcapz::_net_name {name what} {
     return [get_property NAME $n]
 }
 
+# The name of the top segment of net $name, the same for every name it has
+# in the hierarchy.
+proc fcapz::_top_net {name} {
+    set n [get_nets -quiet -segments -top_net_of_hierarchical_group $name]
+    return [expr {[llength $n] == 1 ? [get_property NAME $n] : $name}]
+}
+
+# The names of timing clocks $clks, sorted; none for an empty collection.
+proc fcapz::_clock_names {clks} {
+    if {[llength $clks] == 0} { return {} }
+    return [lsort -unique [get_property NAME $clks]]
+}
+
+# The timing clocks that launch the paths into net $name.  A startpoint with
+# no clock (an unconstrained input) adds none.
+proc fcapz::_launch_clocks {name} {
+    set sp [all_fanin -quiet -flat -startpoints_only [get_nets $name]]
+    if {[llength $sp] == 0} { return {} }
+    return [fcapz::_clock_names [get_clocks -quiet -of_objects $sp]]
+}
+
+# Why net $name cannot be driven by a core, or {} if it can.  The core
+# takes the place of the net's one driver, so that driver must be a cell
+# of the design's own and not a constant, which Vivado shares between nets.
+proc fcapz::_drive_problem {name} {
+    set net [get_nets $name]
+    if {[llength [get_ports -quiet -of_objects $net -filter {DIRECTION == IN}]]} {
+        return "$name is driven by an input port"
+    }
+    set drv [get_pins -quiet -leaf -of_objects $net -filter {DIRECTION == OUT}]
+    if {[llength $drv] != 1} {
+        return "$name has [llength $drv] drivers, expected 1"
+    }
+    set ref [get_property REF_NAME [get_cells -of_objects $drv]]
+    if {$ref in {GND VCC}} {
+        return "$name is tied to $ref, which other nets may share; keep a placeholder register on it with DONT_TOUCH"
+    }
+    return {}
+}
+
 # USER chains already spoken for: every BSCANE2 in the netlist, plus the chain
 # of the debug hub Vivado will insert at opt_design for its own debug cores.
 proc fcapz::_used_chains {} {
@@ -195,6 +237,20 @@ proc fcapz::_used_chains {} {
         lappend used $chain
     }
     return [lsort -unique -integer $used]
+}
+
+# Stop if a project would be lost to the script's close_project: one on disk
+# (it has runs) or a run's own (its hook scripts run in an in-memory project
+# that names its parent).  The in-memory project of a non-project script is
+# fine.
+proc fcapz::_check_session {} {
+    set p [current_project -quiet]
+    if {$p eq ""} { return }
+    if {[llength [get_runs -quiet]] || [get_property -quiet PARENT.PROJECT_PATH $p] ne ""} {
+        error "fcapz::insert: runs in the non-project flow, and would close project\
+               '[get_property NAME $p]'; run it in a Vivado session of its own on the\
+               synthesized checkpoint"
+    }
 }
 
 # 7-series or UltraScale(+), from the part's architecture.
@@ -266,14 +322,10 @@ proc fcapz::_connect {name pins} {
 # Drive net $name from $pin instead of its own driver, which is cut off. If
 # the new connection fails, the driver is put back.
 proc fcapz::_drive {name pin what} {
+    set problem [fcapz::_drive_problem $name]
+    if {$problem ne ""} { error "fcapz::insert: $what: $problem" }
     set net [get_nets $name]
-    if {[llength [get_ports -quiet -of_objects $net -filter {DIRECTION == IN}]]} {
-        error "fcapz::insert: $what: $name is driven by an input port"
-    }
     set drv [get_pins -quiet -leaf -of_objects $net -filter {DIRECTION == OUT}]
-    if {[llength $drv] != 1} {
-        error "fcapz::insert: $what: $name has [llength $drv] drivers, expected 1"
-    }
     set seg [get_nets -of_objects $drv]
     set seg_name [get_property NAME $seg]
     set lifted [fcapz::_unlock [list $net $seg [get_cells -of_objects $drv]]]
@@ -340,22 +392,55 @@ proc fcapz::insert {args} {
             error "fcapz::insert: -$opt takes {ela value ...} pairs"
         }
     }
+    if {![string is integer -strict $o(chain)] || $o(chain) < 1 || $o(chain) > 4} {
+        error "fcapz::insert: -chain is a USER chain, 1 to 4, not $o(chain)"
+    }
+    # TCK runs at tens of MHz at most; the bound also keeps NaN and Inf out.
+    if {![string is double -strict $o(tck_mhz)] || !($o(tck_mhz) > 0 && $o(tck_mhz) <= 1000)} {
+        error "fcapz::insert: -tck_mhz is a TCK rate in MHz, above 0 and up to 1000, not $o(tck_mhz)"
+    }
+    if {$o(cell) eq ""} { error "fcapz::insert: -cell is empty" }
+    # The script opens checkpoints and makes a project of its own for the
+    # wrapper, closing whatever is open: it runs in the non-project flow, in
+    # a Tcl session of its own or between non-project steps.  A project on
+    # disk, as the GUI or a run's hook script has open, would be lost.
+    fcapz::_check_session
 
     # -- 1. what to capture, and on which clock ---------------------------
     open_checkpoint $o(in)
     set part [expr {$o(part) ne "" ? $o(part) : [get_property PART [current_design]]}]
     set family [fcapz::_family $part]
 
-    # Nets the cores drive are not captured: their driver changes.
+    # Nets the cores drive are not captured: their driver changes.  Each is
+    # driven by one core output, and its driver must be one a core can take
+    # the place of; both are checked here, before the netlist is touched.
     set driven {}
-    foreach n $o(eio_out) { lappend driven [fcapz::_net_name $n -eio_out] }
+    array set driven_by {}
+    set outs {}
+    foreach n $o(eio_out) { lappend outs -eio_out $n }
     foreach opt {trigger_out armed_out} {
-        foreach {e n} $o($opt) { lappend driven [fcapz::_net_name $n -$opt] }
+        foreach {e n} $o($opt) { lappend outs -$opt $n }
+    }
+    foreach {opt n} $outs {
+        set name [fcapz::_net_name $n $opt]
+        set top [fcapz::_top_net $name]
+        if {[info exists driven_by($top)]} {
+            error "fcapz::insert: $opt: $n is already driven by $driven_by($top); a net takes one core output"
+        }
+        set driven_by($top) "$opt $n"
+        set problem [fcapz::_drive_problem $name]
+        if {$problem ne ""} { error "fcapz::insert: $opt: $problem" }
+        lappend driven $top
     }
     set nets {}
     foreach n [get_nets -hierarchical -filter {MARK_DEBUG == TRUE}] {
         set name [get_property NAME $n]
-        if {[lsearch -exact $driven $name] < 0} { lappend nets $name }
+        if {[lsearch -exact $driven [fcapz::_top_net $name]] >= 0} { continue }
+        if {[llength [get_pins -quiet -leaf -of_objects $n -filter {DIRECTION == OUT}]] == 0 &&
+            [llength [get_ports -quiet -of_objects $n -filter {DIRECTION == IN}]] == 0} {
+            error "fcapz::insert: MARK_DEBUG net $name has no driver, so there is nothing to capture on it"
+        }
+        lappend nets $name
     }
     if {[llength $nets] == 0} {
         error "fcapz::insert: no MARK_DEBUG nets to capture in $o(in)"
@@ -441,6 +526,9 @@ proc fcapz::insert {args} {
     foreach e $elas {
         lassign $e nm clk enets
         set p [fcapz::_pack $enets "MARK_DEBUG in ELA $nm"]
+        if {[lindex $p 4] > 256} {
+            error "fcapz::insert: ELA $nm has [lindex $p 4] bits, and an ELA takes at most 256; split its nets with -group"
+        }
         lappend packs $p
         set sample_w [expr {max($sample_w, [lindex $p 4])}]
         lappend depths $o(depth)
@@ -647,6 +735,63 @@ proc fcapz::insert {args} {
             if {[llength [get_nets -quiet -of_objects $p]]} { lappend pins $p }
         }
         if {[llength $pins]} { set_false_path -through $pins }
+    }
+    # A probe launched by a clock its ELA is not sampled on (as with -clock,
+    # -default_clock or a group's clock) is sampled asynchronously: its paths
+    # from those clocks into the ELA are cut, as no bound between unrelated
+    # clocks would mean anything and two related ones (an MMCM's outputs)
+    # would leave a fraction of a period.  Paths from the ELA's own clocks
+    # stay timed.  Timing clocks are compared, not nets, so two buffers of one
+    # clock count as one; and this runs on the wired netlist, so a probe fed
+    # from a net a core now drives sees the core's clock.
+    array set cut {}
+    set s 0
+    foreach e $elas p $packs {
+        lassign $e nm clk
+        set eclks [fcapz::_clock_names [get_clocks -quiet -of_objects [get_nets $clk]]]
+        set mine {}
+        if {[llength $eclks]} {
+            foreach entry [lindex $p 3] {
+                lassign $entry bit name
+                set foreign {}
+                foreach c [fcapz::_launch_clocks $name] {
+                    if {[lsearch -exact $eclks $c] < 0} { lappend foreign $c }
+                }
+                if {[llength $foreign]} {
+                    set idx [expr {$s * $sample_w + $bit}]
+                    lappend cut($foreign) [get_pins "$cell/ela_probe_in\[$idx\]"]
+                    lappend mine $name
+                }
+            }
+        }
+        if {[llength $mine]} {
+            set shown [lrange $mine 0 4]
+            if {[llength $mine] > 5} { lappend shown ... }
+            puts "WARNING: fcapz::insert: ELA $nm (clock [join $eclks {, }]) samples\
+                  [llength $mine] net(s) launched by other clocks, asynchronously:\
+                  [join $shown {, }]"
+        }
+        incr s
+    }
+    foreach foreign [array names cut] {
+        set_false_path -from [get_clocks $foreign] -through $cut($foreign)
+    }
+    # set_clock_groups outranks set_max_delay.  A group naming one side only
+    # (-group sys_clk) makes that clock asynchronous to every other, the TCK
+    # clock made above included, and would leave the settings and readback
+    # crossings without a bound.
+    foreach sclk_name $done_clks {
+        set sclk [get_clocks $sclk_name]
+        foreach {a b} [list $tck_clk $sclk $sclk $tck_clk] {
+            foreach p [get_timing_paths -quiet -from $a -to $b -max_paths 20] {
+                if {[string match -nocase "*clock groups*" [get_property -quiet EXCEPTION $p]]} {
+                    error "fcapz::insert: a set_clock_groups in the design covers the crossings\
+                           between $sclk_name and the TCK clock [get_property NAME $tck_clk]\
+                           and overrides their bounds; give both sides of the group with -group,\
+                           so the TCK clock stays out of it"
+                }
+            }
+        }
     }
 
     write_checkpoint -force $o(out)
