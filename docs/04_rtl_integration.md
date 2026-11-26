@@ -294,10 +294,11 @@ between it and a sample clock gets `set_max_delay -datapath_only` of one
 period of the faster clock, which keeps the ELAs' multi-bit settings and
 readback bundles timed.  The EIO's nets, the `-trigger_in` nets and the
 cross-trigger toggles enter a synchronizer, or are levels that change under
-host control, and get `set_false_path`.  So does a probe launched by a
-clock other than its ELA's, as happens with `-clock`, `-default_clock` or
-a group's clock: the ELA samples it asynchronously, and the script warns,
-naming the nets.  `-trigger_out` and `-armed_out`
+host control, and get `set_false_path`.  So do the paths into a probe
+from clocks other than its ELA's, as happens with `-clock`,
+`-default_clock` or a group's clock: the ELA samples such a probe
+asynchronously, and the script warns, naming the nets.  Paths from the
+ELA's own clocks stay timed.  `-trigger_out` and `-armed_out`
 leave in the ELA's sample clock and stay timed: a net in another clock must
 be synchronized by the design.  Sample clocks must be constrained, or the
 script warns that their crossings are not timed.

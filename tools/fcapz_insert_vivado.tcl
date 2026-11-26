@@ -187,11 +187,18 @@ proc fcapz::_top_net {name} {
     return [expr {[llength $n] == 1 ? [get_property NAME $n] : $name}]
 }
 
-# The timing clocks that launch the paths into net $name, sorted.
+# The names of timing clocks $clks, sorted; none for an empty collection.
+proc fcapz::_clock_names {clks} {
+    if {[llength $clks] == 0} { return {} }
+    return [lsort -unique [get_property NAME $clks]]
+}
+
+# The timing clocks that launch the paths into net $name.  A startpoint with
+# no clock (an unconstrained input) adds none.
 proc fcapz::_launch_clocks {name} {
     set sp [all_fanin -quiet -flat -startpoints_only [get_nets $name]]
     if {[llength $sp] == 0} { return {} }
-    return [lsort -unique [get_property NAME [get_clocks -quiet -of_objects $sp]]]
+    return [fcapz::_clock_names [get_clocks -quiet -of_objects $sp]]
 }
 
 # Why net $name cannot be driven by a core, or {} if it can.  The core
@@ -388,8 +395,9 @@ proc fcapz::insert {args} {
     if {![string is integer -strict $o(chain)] || $o(chain) < 1 || $o(chain) > 4} {
         error "fcapz::insert: -chain is a USER chain, 1 to 4, not $o(chain)"
     }
-    if {![string is double -strict $o(tck_mhz)] || $o(tck_mhz) <= 0} {
-        error "fcapz::insert: -tck_mhz is a TCK rate in MHz, not $o(tck_mhz)"
+    # TCK runs at tens of MHz at most; the bound also keeps NaN and Inf out.
+    if {![string is double -strict $o(tck_mhz)] || !($o(tck_mhz) > 0 && $o(tck_mhz) <= 1000)} {
+        error "fcapz::insert: -tck_mhz is a TCK rate in MHz, above 0 and up to 1000, not $o(tck_mhz)"
     }
     if {$o(cell) eq ""} { error "fcapz::insert: -cell is empty" }
     # The script opens checkpoints and makes a project of its own for the
@@ -497,32 +505,6 @@ proc fcapz::insert {args} {
         lappend elas [list $c $c $by_clock($c)]
     }
     set num_elas [llength $elas]
-
-    # Nets launched by another clock than their ELA's (given with -clock,
-    # -default_clock or a group's clock) are sampled asynchronously: their
-    # paths into the ELA are cut in step 5, as no bound between unrelated
-    # clocks would mean anything, and two related ones (an MMCM's outputs)
-    # would leave a fraction of a period.  Timing clocks are compared, not
-    # nets, so two buffers of one clock count as one.
-    set async {}
-    foreach e $elas {
-        lassign $e nm clk enets
-        set eclks [lsort -unique [get_property NAME [get_clocks -quiet -of_objects [get_nets $clk]]]]
-        set mine {}
-        if {[llength $eclks]} {
-            foreach n $enets {
-                set lclks [fcapz::_launch_clocks $n]
-                if {[llength $lclks] && $lclks ne $eclks} { lappend mine $n }
-            }
-        }
-        if {[llength $mine]} {
-            set shown [lrange $mine 0 4]
-            if {[llength $mine] > 5} { lappend shown ... }
-            puts "WARNING: fcapz::insert: ELA $nm (clock $eclks) samples [llength $mine]\
-                  net(s) launched by other clocks, asynchronously: [join $shown {, }]"
-        }
-        lappend async $mine
-    }
 
     # ELA by name or instance number.
     array set slot_of {}
@@ -672,14 +654,11 @@ proc fcapz::insert {args} {
 
     # -- 4. wiring ----------------------------------------------------------
     set s 0
-    set async_pins {}
-    foreach e $elas p $packs a $async {
+    foreach e $elas p $packs {
         foreach entry [lindex $p 3] {
             lassign $entry bit name
             set idx [expr {$s * $sample_w + $bit}]
-            set pin [get_pins "$cell/ela_probe_in\[$idx\]"]
-            fcapz::_connect $name $pin
-            if {[lsearch -exact $a $name] >= 0} { lappend async_pins $pin }
+            fcapz::_connect $name [get_pins "$cell/ela_probe_in\[$idx\]"]
         }
         fcapz::_connect [lindex $e 1] [get_pins "$cell/ela_sample_clk\[$s\]"]
         incr s
@@ -757,8 +736,46 @@ proc fcapz::insert {args} {
         }
         if {[llength $pins]} { set_false_path -through $pins }
     }
-    # Probes launched by another clock than their ELA's (step 1).
-    if {[llength $async_pins]} { set_false_path -through $async_pins }
+    # A probe launched by a clock its ELA is not sampled on (as with -clock,
+    # -default_clock or a group's clock) is sampled asynchronously: its paths
+    # from those clocks into the ELA are cut, as no bound between unrelated
+    # clocks would mean anything and two related ones (an MMCM's outputs)
+    # would leave a fraction of a period.  Paths from the ELA's own clocks
+    # stay timed.  Timing clocks are compared, not nets, so two buffers of one
+    # clock count as one; and this runs on the wired netlist, so a probe fed
+    # from a net a core now drives sees the core's clock.
+    array set cut {}
+    set s 0
+    foreach e $elas p $packs {
+        lassign $e nm clk
+        set eclks [fcapz::_clock_names [get_clocks -quiet -of_objects [get_nets $clk]]]
+        set mine {}
+        if {[llength $eclks]} {
+            foreach entry [lindex $p 3] {
+                lassign $entry bit name
+                set foreign {}
+                foreach c [fcapz::_launch_clocks $name] {
+                    if {[lsearch -exact $eclks $c] < 0} { lappend foreign $c }
+                }
+                if {[llength $foreign]} {
+                    set idx [expr {$s * $sample_w + $bit}]
+                    lappend cut($foreign) [get_pins "$cell/ela_probe_in\[$idx\]"]
+                    lappend mine $name
+                }
+            }
+        }
+        if {[llength $mine]} {
+            set shown [lrange $mine 0 4]
+            if {[llength $mine] > 5} { lappend shown ... }
+            puts "WARNING: fcapz::insert: ELA $nm (clock [join $eclks {, }]) samples\
+                  [llength $mine] net(s) launched by other clocks, asynchronously:\
+                  [join $shown {, }]"
+        }
+        incr s
+    }
+    foreach foreign [array names cut] {
+        set_false_path -from [get_clocks $foreign] -through $cut($foreign)
+    }
     # set_clock_groups outranks set_max_delay.  A group naming one side only
     # (-group sys_clk) makes that clock asynchronous to every other, the TCK
     # clock made above included, and would leave the settings and readback
