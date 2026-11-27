@@ -666,7 +666,7 @@ def _listed_ports(monkeypatch, *names):
                 return device
         raise ValueError(f"serial_port {name!r} is not a serial port on this machine")
 
-    monkeypatch.setattr("fcapz.web.gateway.resolve_serial_port", resolve)
+    monkeypatch.setattr("fcapz.rpc.resolve_serial_port", resolve)
 
 
 def _serial_app(monkeypatch, **app_kwargs):
@@ -692,9 +692,8 @@ def test_a_web_client_can_only_open_a_listed_serial_port(monkeypatch):
     UNC path never reaches it, and a listed port is passed on as listed."""
     built = []
     monkeypatch.setattr(
-        RpcServer,
-        "_build_transport",
-        lambda self, req, **_: built.append(req["serial_port"]) or FakeSerialTransport(),
+        "fcapz.rpc.SerialTapTransport",
+        lambda name, **_: built.append(name) or FakeSerialTransport(),
     )
     _listed_ports(monkeypatch, "COM_TEST")
     local = TestClient(create_app(), client=("127.0.0.1", 50000))
@@ -704,6 +703,59 @@ def test_a_web_client_can_only_open_a_listed_serial_port(monkeypatch):
     assert built == []
     assert _rpc(local, "connect", backend="serial", serial_port="com_test").json()["ok"]
     assert built == ["COM_TEST"]
+    # Session commands repeating the connect fields are not re-resolved: a
+    # close still ends the session after the adapter is gone.
+    _listed_ports(monkeypatch)
+    r = _rpc(local, "close", backend="serial", serial_port="COM_TEST").json()
+    assert r["ok"] is True
+
+
+def test_a_cancel_while_serial_ports_are_listed_stops_the_open(monkeypatch):
+    """The port is resolved inside the tracked connect, so a cancel landing
+    while the ports are being listed still keeps the port closed."""
+    import threading
+
+    from fcapz.web.gateway import RpcGateway
+
+    listing, go_on = threading.Event(), threading.Event()
+
+    def slow_resolve(name):
+        listing.set()
+        go_on.wait(5)
+        return "COM_TEST"
+
+    opened = []
+
+    class Recorder(FakeSerialTransport):
+        def connect(self):
+            opened.append(True)
+
+    monkeypatch.setattr("fcapz.rpc.resolve_serial_port", slow_resolve)
+    monkeypatch.setattr("fcapz.rpc.SerialTapTransport", lambda name, **_: Recorder())
+    gateway = RpcGateway()
+    box = {}
+    thread = threading.Thread(
+        target=lambda: box.update(r=gateway.call({"cmd": "connect", **_SERIAL}))
+    )
+    thread.start()
+    assert listing.wait(5)
+    assert gateway.call({"cmd": "cancel"})["ok"] is True
+    go_on.set()
+    thread.join(5)
+    assert box["r"]["ok"] is False
+    assert opened == []
+
+
+def test_rpc_post_refuses_a_cross_site_page(monkeypatch):
+    """CORS only hides the reply; a simple cross-site POST must not act."""
+    c = _client(monkeypatch)
+    evil = {"origin": "https://evil.example"}
+    r = c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}, headers=evil).json()
+    assert (r["ok"], r["type"]) == (False, "PermissionError")
+    for origin in ("http://testserver", None):  # this server, or a script
+        headers = {"origin": origin} if origin else {}
+        r = c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}, headers=headers)
+        assert r.json()["ok"] is True, origin
 
 
 def test_a_remote_client_cannot_drive_an_open_serial_session(monkeypatch):

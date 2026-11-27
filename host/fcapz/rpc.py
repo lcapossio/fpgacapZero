@@ -42,6 +42,7 @@ from .transport import (
     list_serial_ports,
     list_xilinx_hw_server_targets,
     register_pipe_identity,
+    resolve_serial_port,
     validate_baudrate,
 )
 
@@ -173,7 +174,13 @@ class RpcServer:
         self,
         openocd_launcher: OpenOcdLauncher | None = None,
         quartus_stp_path: str | None = None,
+        *,
+        confine_serial_ports: bool = False,
     ):
+        # True: a serial connect opens only a port the OS lists (see
+        # resolve_serial_port), never another path a client names.  The web
+        # gateway sets it, since it serves remote clients.
+        self.confine_serial_ports = confine_serial_ports
         self._analyzer: Analyzer | None = None
         # Target fields of the connect that opened the analyzer's transport.
         self._analyzer_target: Dict[str, Any] = {}
@@ -850,6 +857,10 @@ class RpcServer:
             name = str(req.get("serial_port", "") or "").strip()
             if not name:
                 raise ValueError("serial backend needs a serial_port")
+            if self.confine_serial_ports:
+                # Here, inside the tracked connect, so a cancel that lands
+                # while the ports are being listed still stops the open.
+                name = resolve_serial_port(name)
             return SerialTapTransport(name, baudrate=validate_baudrate(req.get("baudrate")))
         ir = self._ir_table(self._resolved_ir_name(req))
         burst = req.get("burst")
@@ -885,7 +896,7 @@ class RpcServer:
             shape.pop("ir_table", None)
             return XilinxHwServerTransport(
                 host=host,
-                port=int(req.get("port", 3121)),
+                port=req.get("port", 3121),  # checked whole there, not truncated
                 fpga_name=fpga_name,
                 bitfile=req.get("program"),
                 single_chain_burst=bool(req.get("single_chain_burst", True)),
@@ -1489,7 +1500,7 @@ class RpcServer:
             if backend == "hw_server":
                 targets = list_xilinx_hw_server_targets(
                     host=host,
-                    port=int(req.get("port", 3121)),
+                    port=req.get("port", 3121),
                     timeout_sec=_wait_sec(req, "timeout", 10.0),
                     register=self._register_opening,
                 )

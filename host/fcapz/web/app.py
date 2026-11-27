@@ -163,9 +163,10 @@ def _origin_ok(
     allowed_origins: Iterable[str],
     ws_scheme: str = "ws",
 ) -> bool:
-    """Cross-site WebSocket gate.
+    """Cross-site gate for ``/api/ws`` and ``/api/rpc``.
 
-    CORS does not cover WebSockets: any page a browser has open can connect to
+    CORS does not cover WebSockets, nor a simple POST (it only hides the
+    reply): any page a browser has open can connect to
     ``ws://127.0.0.1:7373/api/ws``, and its ``Host`` header is the real one,
     so the rebinding check passes.  On a token-less loopback server that page
     would get the whole API.  Browsers always send ``Origin`` on a WebSocket
@@ -327,6 +328,26 @@ def create_app(
                 req,
             )
         client_host = request.client.host if request.client else None
+        # CORS only hides the reply: a cross-site page can still send a
+        # simple POST (no preflight) whose body a FastAPI before 0.132 parses
+        # as JSON, and act on a token-less loopback server.  Same gate as
+        # the WebSocket's.
+        if not _origin_ok(
+            request.headers.get("origin"),
+            request.headers.get("host"),
+            client_host,
+            cors_origins,
+            request.url.scheme,
+        ):
+            return _with_ids(
+                {
+                    "ok": False,
+                    "schema_version": _SCHEMA_VERSION,
+                    "error": "Origin not allowed (a cross-site page).",
+                    "type": "PermissionError",
+                },
+                req,
+            )
         blocked = _openocd_guard(req, client_host) or _server_path_guard(req)
         if blocked is not None:
             return _with_ids(blocked, req)

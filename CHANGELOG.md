@@ -39,7 +39,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **hw_server `host` is checked before it reaches XSDB.**  It went into
   the XSDB Tcl script unquoted, so a crafted host (from the web server, an
   RPC client or the CLI) could run Tcl as the server's account.  It must
-  now be a host name or IP address, and the URL is passed as one Tcl word.
+  now be a host name or IPv4 address and the port a whole number, and the
+  URL is passed as one Tcl word.  A hw_server target scan that cannot
+  connect now fails instead of reporting no targets.
+- **`/api/rpc` checks `Origin`, like `/api/ws`.**  A cross-site page could
+  send a simple `POST` that FastAPI before 0.132 parsed as JSON, and act on
+  a token-less loopback server (CORS only hid the reply).
+- **USB-Blaster hardware and device names ending in a backslash are
+  refused.**  The backslash escaped the generated closing brace, so
+  `quartus_stp` waited for more input and held the session until timeout.
 - **FTDI waits at a slow TCK with a short USB timeout.**  Idle clocking and
   bitstream writes are paced in pieces that fit the channel's USB timeout,
   not a fixed quarter second, so they no longer time out there.

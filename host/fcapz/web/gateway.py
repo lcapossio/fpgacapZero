@@ -18,7 +18,6 @@ import time
 from typing import Any, Dict, Optional
 
 from ..rpc import _SCHEMA_VERSION, RpcServer, error_envelope
-from ..transport import resolve_serial_port
 
 _log = logging.getLogger("fcapz.web")
 
@@ -73,6 +72,9 @@ class RpcGateway:
 
     def __init__(self, server: Optional[RpcServer] = None) -> None:
         self._server = server or RpcServer()
+        # Web clients may be remote: a serial connect opens only a port the
+        # OS lists, never a file or (on Windows) a UNC path a client made up.
+        self._server.confine_serial_ports = True
         self._lock = threading.RLock()
 
     def call(
@@ -158,11 +160,6 @@ class RpcGateway:
         cmd = req.get("cmd")
         t0 = time.perf_counter()
         try:
-            if req.get("backend") == "serial" and cmd != "cancel":
-                # The serial transport opens serial_port as a device path:
-                # only a port this machine lists may reach it, never a file
-                # or (on Windows) a UNC path a web client made up.
-                req = {**req, "serial_port": resolve_serial_port(req.get("serial_port"))}
             resp = self._server.handle(req)
         except Exception as exc:  # noqa: BLE001 - mirror the line-protocol envelope
             # The traceback goes to the log only (the Log tab shows just the
