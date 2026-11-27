@@ -581,6 +581,35 @@ def test_openocd_guard_localhost_only():
     assert _openocd_guard({"cmd": "connect"}, "10.0.0.5") is None  # non-openocd unaffected
 
 
+def test_program_is_refused_for_every_web_client(monkeypatch):
+    """``program`` would make the server open that path and reprogram the
+    FPGA: refused on both endpoints, loopback clients included."""
+    import json as _json
+
+    from fcapz.web.app import _program_guard
+
+    assert _program_guard({"cmd": "connect", "program": "/etc/passwd"})["type"] == (
+        "PermissionError"
+    )
+    assert _program_guard({"cmd": "connect", "program": None}) is None
+    assert _program_guard({"cmd": "connect"}) is None
+
+    built = []
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, req, **_: built.append(req) or FakeTransport()
+    )
+    c = TestClient(create_app())
+    req = {"cmd": "connect", **_GOWIN, "program": "design.fs", "request_id": 7}
+    r = c.post("/api/rpc", json=req).json()
+    assert (r["ok"], r["type"], r["request_id"]) == (False, "PermissionError", 7)
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_text(_json.dumps(req))
+        r = ws.receive_json()
+        assert (r["ok"], r["type"]) == (False, "PermissionError")
+    assert built == []  # no transport was opened
+    assert c.post("/api/rpc", json={"cmd": "connect", **_GOWIN}).json()["ok"] is True
+
+
 def test_serial_allowed_needs_a_token_for_remote_clients():
     from fcapz.web.app import _serial_allowed
 

@@ -148,14 +148,17 @@ class ConnectionPanel(QGroupBox):
         self._program_on_connect.setChecked(ConnectionSettings().program_on_connect)
         self._program_on_connect.setToolTip(
             "When checked, Connect programs the bitstream below: hw_server runs "
-            "XSDB fpga -file, FTDI configures an AMD/Xilinx 7-series FPGA over JTAG. "
+            "XSDB fpga -file, FTDI configures an AMD/Xilinx 7-series FPGA (.bit/.bin) "
+            "or a Gowin GW1NR-9C's SRAM (.fs) over JTAG. "
             "Uncheck to attach over JTAG only (FPGA must already hold the right image, "
             "and captures will reflect whatever image is already loaded)."
         )
         self._program_on_connect.stateChanged.connect(lambda _s: self._refresh_timeout_row_state())
 
         self._program = QLineEdit()
-        self._program.setPlaceholderText("Path to .bit (required if program on connect is checked)")
+        self._program.setPlaceholderText(
+            "Path to .bit / .fs (required if program on connect is checked)"
+        )
         self._program.setToolTip(
             "Bitstream used when “Program on connect” is checked. "
             "You can keep a path here and uncheck the box to reconnect without reprogramming."
@@ -420,7 +423,7 @@ class ConnectionPanel(QGroupBox):
             self,
             "Select bitstream",
             "",
-            "Bitstreams (*.bit);;All files (*.*)",
+            "Bitstreams (*.bit *.bin *.fs);;All files (*.*)",
         )
         if path:
             self._program.setText(path)

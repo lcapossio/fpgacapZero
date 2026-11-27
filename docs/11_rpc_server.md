@@ -154,7 +154,7 @@ readiness wait.
   "host": "127.0.0.1",
   "port": 3121,
   "tap": "xc7a100t",          // hw_server target, openocd TAP, or Quartus device/auto
-  "program": "my_design.bit"  // optional: hw_server, or ftdi (AMD/Xilinx 7-series)
+  "program": "my_design.bit"  // optional: hw_server, or ftdi (7-series .bit/.bin, GW1NR-9C .fs)
 }
 ```
 
@@ -208,7 +208,9 @@ For a direct FTDI cable (FlashPro5, Digilent, the KV260 carrier), use
 description or serial, or as `usb:<description>` / `usb:<serial>` for a
 libusb channel, and `tck_mhz` sets the clock
 (default 6). `program` configures an AMD/Xilinx 7-series FPGA with a `.bit`
-or `.bin` over JTAG first. On every backend, EIO, AXI and UART side
+or `.bin`, or loads a Gowin GW1NR-9C's SRAM from a `.fs`, over JTAG first.
+The web server refuses `program` (see [chapter 18](18_web_interface.md#the-api-behind-it)).
+On every backend, EIO, AXI and UART side
 connects ignore `program`, so they never reprogram the FPGA under the session.
 The IR table comes from the device IDCODE, and `ir_table` in
 the response echoes the detected family:
