@@ -60,6 +60,7 @@ def _fcapz(*args: str) -> str:
     if _STP:
         cmd += ["--quartus-stp", _STP]
     env = dict(os.environ)
+    env.pop("FCAPZ_BROKER", None)  # run directly, not as broker jobs
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(_HOST_DIR), env.get("PYTHONPATH")) if p
     )
@@ -111,8 +112,8 @@ class De0NanoHw(unittest.TestCase):
             QuartusStpTransport(hardware_name=_CABLE, quartus_stp_path=_STP),
             chain=EIO_CHAIN,
         )
-        eio.connect()
         try:
+            eio.connect()
             # Two different patterns, so an output register stuck at one
             # value cannot pass.
             for pattern in (0xA5, 0x5A):

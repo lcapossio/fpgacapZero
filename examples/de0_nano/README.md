@@ -49,4 +49,5 @@ cable only, so no other board is reprogrammed.
 | Toolchain | Quartus II 13.1 (Build 162) |
 | Transport | `usb_blaster` (`quartus_stp`), onboard USB-Blaster |
 | Resources | 2,186 / 22,320 LEs, 1,636 registers, 10,240 memory bits |
-| `test_hw_integration.py` | 3 passed (probe, capture: trigger at counter 0x40 lands on sample 8 and the counter increments by 1 per sample, EIO write/read) |
+| Hardware tests (PR #85 version) | 3 passed (probe, capture: trigger at counter 0x40 lands on sample 8 and the counter increments by 1 per sample, EIO output write and input read) |
+| Current `test_hw_integration.py` | Not yet run on this board: it now programs through the target under test and reads the EIO outputs back |

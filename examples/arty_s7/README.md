@@ -54,4 +54,5 @@ below used `hw_server`.
 | Toolchain | Vivado 2025.2.1 |
 | Transport | `hw_server`, onboard Digilent USB-JTAG |
 | Resources | 1,195 LUTs, 1,558 registers, 0.5 BRAM tile (RAMB18) |
-| `test_hw_integration.py` | 3 passed (probe, capture: trigger at counter 0x40 lands on sample 8 and the counter increments by 1 per sample, EIO write/read) |
+| Hardware tests (PR #85 version) | 3 passed (probe, capture: trigger at counter 0x40 lands on sample 8 and the counter increments by 1 per sample, EIO output write and input read) |
+| Current `test_hw_integration.py` | Not yet run on this board: it now programs through the target under test and reads the EIO outputs back |

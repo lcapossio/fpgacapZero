@@ -24,10 +24,10 @@ route_design
 file mkdir out
 report_utilization -file out/utilization.rpt
 report_timing_summary -file out/timing_summary.rpt
-# No bitstream from a design that misses timing (the JTAG clock included).
-set wns [get_property SLACK [get_timing_paths -delay_type max]]
-set whs [get_property SLACK [get_timing_paths -delay_type min]]
-if {$wns < 0 || $whs < 0} {
-    error "routed design misses timing (WNS $wns ns, WHS $whs ns); see out/timing_summary.rpt"
+# No bitstream from a design that misses timing (the JTAG clock included):
+# setup, hold and pulse width, as the timing summary judges them.
+set summary [report_timing_summary -no_detailed_paths -return_string]
+if {![string match "*All user specified timing constraints are met.*" $summary]} {
+    error "routed design misses timing; see out/timing_summary.rpt"
 }
 write_bitstream -force arty_s7_fcapz.bit

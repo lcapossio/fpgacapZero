@@ -38,6 +38,10 @@ _BIT = _DIR / "arty_s7_fcapz.bit"
 _TARGET = os.environ.get("FPGACAP_HW_TARGET", "xc7s25")
 _HW_HOST = os.environ.get("FPGACAP_HW_HOST", "127.0.0.1")
 _HW_PORT = int(os.environ.get("FPGACAP_HW_PORT", "3121"))
+# The CLI reads port 6666 (its OpenOCD default) as unset and uses 3121; do
+# the same here, so the EIO test talks to the server the CLI programmed.
+if _HW_PORT == 6666:
+    _HW_PORT = 3121
 _SKIP = os.environ.get("FPGACAP_SKIP_HW", "").lower() in {"1", "true", "yes", "on"}
 
 if str(_HOST_DIR) not in sys.path:
@@ -48,15 +52,16 @@ COUNTER_MASK = 0xFF
 EIO_CHAIN = 3
 
 
-def _fcapz(*args: str) -> str:
+def _fcapz(*args: str, cwd: Path | None = None) -> str:
     cmd = [sys.executable, "-m", "fcapz.cli", "--backend", "hw_server",
            "--host", _HW_HOST, "--port", str(_HW_PORT), "--tap", _TARGET]
     env = dict(os.environ)
+    env.pop("FCAPZ_BROKER", None)  # --program does not run through the broker
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(_HOST_DIR), env.get("PYTHONPATH")) if p
     )
     out = subprocess.run(cmd + list(args), capture_output=True, text=True,
-                         timeout=300, env=env)
+                         timeout=300, env=env, cwd=cwd)
     if out.returncode != 0:
         raise AssertionError(f"fcapz {' '.join(args)} failed:\n{out.stdout}\n{out.stderr}")
     return out.stdout
@@ -72,7 +77,9 @@ class ArtyS7Hw(unittest.TestCase):
             # Through hw_server and the same target the tests use, so it is
             # the board under test that gets programmed, not the first
             # Digilent cable on the bench.
-            _fcapz("--program", str(_BIT), "probe")
+            # The bitfile by name from its own directory: the transport refuses
+            # Tcl-unsafe characters such as "@" that a checkout path may hold.
+            _fcapz("--program", _BIT.name, "probe", cwd=_DIR)
 
     def test_probe_reports_sample_width_and_depth(self):
         text = _fcapz("probe")
@@ -102,8 +109,8 @@ class ArtyS7Hw(unittest.TestCase):
             XilinxHwServerTransport(host=_HW_HOST, port=_HW_PORT, fpga_name=_TARGET),
             chain=EIO_CHAIN,
         )
-        eio.connect()
         try:
+            eio.connect()
             # Two different patterns, so an output register stuck at one
             # value cannot pass.
             for pattern in (0x05, 0x0A):

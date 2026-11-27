@@ -335,9 +335,16 @@ meaningful impact without writing a single line of host Python.
 | Lattice ECP5 | `fcapz_ela_ecp5.v` | `jtag_tap_ecp5.v` | — | yes | **needed** |
 | Intel / Altera | `fcapz_ela_intel.v` | `jtag_tap_intel.v` | yes | yes | **yes** (DE25-Nano, DE0-Nano) |
 | Gowin | `fcapz_ela_gowin.v` | `jtag_tap_gowin.v` | yes | yes | **yes** (BRS-100-GW1NR9) |
+| Microchip PolarFire | `fcapz_ela_polarfire.v` | `jtag_tap_polarfire.v` | yes | yes | **yes** (PolarFire SoC Discovery Kit) |
+| Efinix Trion / Titanium | `fcapz_ela_efinix.v` | `jtag_tap_efinix.v` | — | yes | **needed** |
 
-The same status applies to EIO (`fcapz_eio_<vendor>.v`) and the EJTAG-AXI /
-EJTAG-UART bridges (`fcapz_ejtagaxi_intel.v`, `fcapz_ejtaguart_intel.v`).
+The table is for the ELA. EIO is validated separately: the standalone
+`fcapz_eio_xilinx7.v` on the Arty A7-100T and Arty S7-25, `fcapz_eio_intel.v`
+on the DE0-Nano, and the EIO built into the ELA wrapper (`EIO_EN=1`) on the
+Arty A7, DE25-Nano, Kria KV260 and BRS-100. `fcapz_eio_gowin.v` is a
+placeholder that drives its outputs low; use `fcapz_ela_gowin` with `EIO_EN=1`.
+The EJTAG-AXI and EJTAG-UART bridges are validated on the Arty A7 and Kria
+KV260.
 
 ### Adding a new board example
 
