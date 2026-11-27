@@ -72,6 +72,9 @@ class RpcGateway:
 
     def __init__(self, server: Optional[RpcServer] = None) -> None:
         self._server = server or RpcServer()
+        # Web clients may be remote: a serial connect opens only a port the
+        # OS lists, never a file or (on Windows) a UNC path a client made up.
+        self._server.confine_serial_ports = True
         self._lock = threading.RLock()
 
     def call(

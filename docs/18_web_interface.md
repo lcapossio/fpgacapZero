@@ -61,8 +61,9 @@ never opens a port, on any path.)
 Cross-origin API access is **off by default** (the bundled UI is same-origin,
 and `npm run dev` proxies `/api`), so a random website cannot drive the board;
 enable it only if you serve the frontend from a different origin, with
-`--cors-origin`. CORS does not apply to WebSockets, so `/api/ws` checks the
-handshake's `Origin` itself: it must be the server's own origin (scheme, host
+`--cors-origin`. CORS does not apply to WebSockets, and it only hides the
+reply to a simple cross-site `POST`, so `/api/ws` and `/api/rpc` check the
+request's `Origin` themselves: it must be the server's own origin (scheme, host
 and port), a `--cors-origin`, or a loopback page connecting from loopback (the
 dev proxy). A client that sends no `Origin` — a script rather than a browser —
 is governed by the token as before. When bound to a loopback address the server also rejects
@@ -234,10 +235,24 @@ expose the **same** command set:
 
 Every command and field is exactly the contract in
 [chapter 11](11_rpc_server.md): `connect`, `probe`, `capture`, `eio_*`,
-`axi_*`, `uart_*`, with one exception: a request carrying `program` is
-refused, from any client, since it would make the server open that path
-and reprogram the FPGA.  Program with the CLI (`--program`), the desktop
-GUI or the stdio RPC server, then connect from the browser. **Errors are in-band** (`{"ok": false, "error": ...}`), so a
+`axi_*`, `uart_*`, with these exceptions, which hold for every client:
+
+- A request carrying `program` is refused, since it would make the server
+  open that path and reprogram the FPGA.  Program with the CLI
+  (`--program`), the desktop GUI or the stdio RPC server, then connect from
+  the browser.
+- A request carrying `quartus_stp` is refused: the server runs only the
+  `quartus_stp` it was started with (`--quartus-stp`, else the one found on
+  the machine).
+- A request carrying `probe_file` is refused: send the probe definitions
+  inline as `probes`.
+- A serial `connect` opens only a port that `list_serial_ports` lists
+  (case-insensitive on Windows), never another path.
+
+A hw_server `host` must be a host name or an IPv4 address, on every front end
+(XSDB does not parse IPv6 literals in its URL).
+
+**Errors are in-band** (`{"ok": false, "error": ...}`), so a
 bad command still returns HTTP 200 — matching the line-protocol semantics. You
 can drive the server with `curl` exactly as you would pipe JSON to
 `python -m fcapz.rpc`:

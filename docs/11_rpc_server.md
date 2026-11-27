@@ -209,7 +209,8 @@ description or serial, or as `usb:<description>` / `usb:<serial>` for a
 libusb channel, and `tck_mhz` sets the clock
 (default 6). `program` configures an AMD/Xilinx 7-series FPGA with a `.bit`
 or `.bin`, or loads a Gowin GW1NR-9C's SRAM from a `.fs`, over JTAG first.
-The web server refuses `program` (see [chapter 18](18_web_interface.md#the-api-behind-it)).
+The web server refuses `program`, `quartus_stp` and `probe_file`, and opens
+only listed serial ports (see [chapter 18](18_web_interface.md#the-api-behind-it)).
 On every backend, EIO, AXI and UART side
 connects ignore `program`, so they never reprogram the FPGA under the session.
 The IR table comes from the device IDCODE, and `ir_table` in

@@ -28,13 +28,16 @@ from fcapz.transport import (
     DataWindowError,
     check_data_window,
     find_quartus_stp,
+    hw_server_url,
     list_xilinx_hw_server_targets,
     OpenOcdTransport,
     QuartusStpTransport,
     Transport,
     XilinxHwServerTransport,
     _StpSession,
+    _tcl_braced,
     parse_xsdb_jtag_targets,
+    resolve_serial_port,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -138,9 +141,24 @@ class XsdbTargetParserTests(unittest.TestCase):
         )
 
         script = proc.communicate.call_args.args[0]
-        self.assertIn("connect -url tcp:localhost:3121", script)
-        self.assertIn("puts [jtag targets]", script)
+        self.assertIn("connect -url {tcp:localhost:3121}", script)
+        self.assertIn("catch {jtag targets} out", script)
         self.assertNotIn("configparams", script)
+
+    @patch("shutil.which", return_value="xsdb")
+    @patch("subprocess.Popen")
+    def test_a_failed_scan_is_an_error_not_an_empty_list(
+        self,
+        popen_mock: MagicMock,
+        _which_mock: MagicMock,
+    ) -> None:
+        """XSDB (through xsdb.bat) exits 0 after a failed connect; the
+        script's marker line is what tells the scan failed."""
+        popen_mock.return_value = self._xsdb_proc(
+            "fcapz-scan-error: No such host is known. \n"
+        )
+        with self.assertRaisesRegex(RuntimeError, "scan failed: No such host"):
+            list_xilinx_hw_server_targets(host="nohost", port=3121)
 
     @patch("shutil.which", return_value="xsdb")
     @patch("subprocess.Popen")
@@ -212,6 +230,87 @@ class XsdbTargetParserTests(unittest.TestCase):
         proc.kill.assert_called()
         proc.communicate.assert_called()
         self.assertIsNone(t._proc)
+
+
+class HwServerUrlTests(unittest.TestCase):
+    """The hw_server host goes into a Tcl script XSDB runs (BUG-326)."""
+
+    def test_good_hosts_make_one_braced_word(self) -> None:
+        for host in ("localhost", "127.0.0.1", "lab-pc.example.com", "hw_srv"):
+            with self.subTest(host=host):
+                self.assertEqual(hw_server_url(host, "3121"), "{tcp:" + host + ":3121}")
+        self.assertEqual(hw_server_url("localhost", 3121.0), "{tcp:localhost:3121}")
+
+    def test_tcl_syntax_in_the_host_is_refused(self) -> None:
+        for host in ("x;exec calc", "a b", "h[exec calc]", "h}", "h{", "$env",
+                     "h\nputs", "h\n", "", "-flag", "h:1/x", ".h", "x" * 254):
+            with self.subTest(host=host):
+                with self.assertRaisesRegex(ValueError, "host"):
+                    hw_server_url(host, 3121)
+
+    def test_ipv6_literals_are_refused(self) -> None:
+        """XSDB's URL parser splits ``tcp:::1:3121`` wrongly."""
+        for host in ("::1", "[::1]", "fe80::1", "[fe80::1"):
+            with self.subTest(host=host):
+                with self.assertRaisesRegex(ValueError, "IPv6"):
+                    hw_server_url(host, 3121)
+
+    def test_port_must_be_a_whole_number_in_range(self) -> None:
+        for port in (0, 65536, -1, 65535.5, True, "31x", None):
+            with self.subTest(port=port):
+                with self.assertRaisesRegex(ValueError, "port"):
+                    hw_server_url("localhost", port)
+
+    @patch("subprocess.Popen")
+    def test_scan_and_transport_refuse_a_bad_host_before_spawning(self, popen) -> None:
+        with self.assertRaises(ValueError):
+            list_xilinx_hw_server_targets(host="x;exec calc", xsdb_path="xsdb")
+        with self.assertRaises(ValueError):
+            XilinxHwServerTransport(host="x\nexec calc")
+        popen.assert_not_called()
+
+
+class TclBracedTests(unittest.TestCase):
+    def test_names_that_would_break_the_brace_group_are_refused(self) -> None:
+        self.assertEqual(_tcl_braced("USB-Blaster [USB-1]"), "{USB-Blaster [USB-1]}")
+        # A trailing backslash escapes the closing brace: quartus_stp would
+        # wait for the rest of an incomplete script, holding the session.
+        for name in ("hw\\", "a{b", "a}b", "a\nb"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "unsafe"):
+                    _tcl_braced(name)
+
+
+class ResolveSerialPortTests(unittest.TestCase):
+    """Only a port the OS lists reaches a serial transport (BUG-329)."""
+
+    def setUp(self) -> None:
+        try:
+            import serial.tools.list_ports  # noqa: F401
+        except ImportError:
+            self.skipTest("pyserial not installed")
+
+    def _ports(self, *names):
+        from types import SimpleNamespace
+
+        return patch(
+            "serial.tools.list_ports.comports",
+            return_value=[SimpleNamespace(device=n) for n in names],
+        )
+
+    def test_a_listed_port_is_returned_as_listed(self) -> None:
+        with self._ports("COM5", "/dev/ttyACM0"):
+            self.assertEqual(resolve_serial_port(" /dev/ttyACM0 "), "/dev/ttyACM0")
+            if os.name == "nt":
+                self.assertEqual(resolve_serial_port("com5"), "COM5")
+
+    def test_anything_else_is_refused(self) -> None:
+        with self._ports("COM5"):
+            for name in (r"\\attacker\share\x", "/etc/passwd", "COM6", "", None):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "serial"):
+                        resolve_serial_port(name)
+
 
 # ---------------------------------------------------------------------------
 # Transport ABC contract

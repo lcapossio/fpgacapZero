@@ -35,7 +35,14 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # brace group.  We accept typical Windows/Unix path characters including
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
-_TCL_BRACED_RE = re.compile(r"^[^{}\r\n]*$")
+# No backslash either: a trailing one would escape the closing brace and
+# leave the script incomplete, so the tool would wait for more input.
+_TCL_BRACED_RE = re.compile(r"^[^{}\\\r\n]*$")
+
+# hw_server host for XSDB's ``connect -url tcp:<host>:<port>``: a DNS name or
+# an IPv4 address -- nothing Tcl or the URL would read as syntax.  No IPv6
+# literal: XSDB's URL parser splits ``tcp:::1:3121`` at the first colons.
+_HW_SERVER_HOST_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\-]{0,252}")
 
 # Character whitelist for OpenOCD tap names. Unlike the XSDB filter/path (which
 # are quoted/braced), the tap is interpolated UNQUOTED into `irscan <tap> ...`
@@ -113,6 +120,9 @@ class _ProcessCancel:
             pass
 
 
+_XSDB_SCAN_ERROR = "fcapz-scan-error:"
+
+
 def list_xilinx_hw_server_targets(
     *,
     host: str = "127.0.0.1",
@@ -126,12 +136,19 @@ def list_xilinx_hw_server_targets(
     *register*, if given, receives a handle whose ``cancel()`` kills the
     XSDB child, so a caller on another thread can abort the scan.
     """
+    url = hw_server_url(host, port)
     xsdb = xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
     if not xsdb:
         raise RuntimeError("xsdb not found. Add Vivado bin to PATH.")
+    # A failed connect or scan must not read as "no targets": XSDB carries on
+    # after an error and (through xsdb.bat at least) exits with status 0, so
+    # the script marks the failure in its output instead.
     script = (
-        f"connect -url tcp:{host}:{int(port)}\n"
-        "puts [jtag targets]\n"
+        f"if {{[catch {{connect -url {url}}} msg]}} "
+        f'{{puts "{_XSDB_SCAN_ERROR} $msg"; exit 1}}\n'
+        f"if {{[catch {{jtag targets}} out]}} "
+        f'{{puts "{_XSDB_SCAN_ERROR} $out"; exit 1}}\n'
+        "puts $out\n"
         "exit\n"
     )
     env = os.environ.copy()
@@ -160,6 +177,11 @@ def list_xilinx_hw_server_targets(
     output = f"{stdout}\n{stderr}"
     if proc.returncode != 0:
         raise RuntimeError(output.strip() or f"xsdb exited with status {proc.returncode}")
+    for line in output.splitlines():
+        if line.startswith(_XSDB_SCAN_ERROR):
+            raise RuntimeError(
+                f"hw_server scan failed: {line[len(_XSDB_SCAN_ERROR):].strip()}"
+            )
     targets = parse_xsdb_jtag_targets(output)
     if not targets and "To connect to this hw_server instance use url" in output:
         raise RuntimeError(
@@ -178,6 +200,65 @@ def list_xilinx_hw_server_targets(
 BAUD_MIN = 300
 BAUD_MAX = 20_000_000
 BAUD_DEFAULT = 1_000_000
+
+
+def hw_server_url(host: str, port: int) -> str:
+    """The XSDB ``connect -url`` argument for *host*:*port*, as one Tcl word.
+
+    Raises :class:`ValueError` for a host that is not a DNS name or an IPv4
+    address, or a port that is not a whole number in 1..65535: the URL goes
+    into a Tcl script that XSDB runs, so a host such as ``x;exec calc`` must
+    never reach it.
+    """
+    host = str(host)
+    if not _HW_SERVER_HOST_RE.fullmatch(host):
+        raise ValueError(
+            f"hw_server host is not a host name or IPv4 address: {host!r} "
+            "(XSDB does not take IPv6 literals; use a host name)"
+        )
+    return "{tcp:" + host + ":" + str(_whole_port(port)) + "}"
+
+
+def _whole_port(port) -> int:
+    """*port* as a TCP port number; a fraction or a bool is refused, not
+    truncated to another port."""
+    if isinstance(port, bool) or (isinstance(port, float) and not port.is_integer()):
+        raise ValueError(f"hw_server port must be a whole number, got {port!r}")
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        raise ValueError(f"hw_server port must be a whole number, got {port!r}") from None
+    if not 1 <= port_i <= 65535:
+        raise ValueError(f"hw_server port must be in 1..65535, got {port!r}")
+    return port_i
+
+
+def resolve_serial_port(name) -> str:
+    """Return the serial port this machine lists under *name*.
+
+    Raises :class:`ValueError` when no listed port matches (case-insensitively
+    on Windows).  A serial transport opens its port as a device path, so a
+    name from a remote client or an agent goes through here first: otherwise
+    it could open any file the server can, or a UNC path on Windows.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        raise ValueError("the serial backend needs serial_port")
+    try:
+        from serial.tools import list_ports  # type: ignore
+    except ImportError as exc:
+        raise ValueError(
+            "the serial backend needs pyserial; install fpgacapzero[serial]"
+        ) from exc
+    ports = sorted(str(p.device) for p in list_ports.comports())
+    fold = str.casefold if os.name == "nt" else (lambda v: v)
+    for device in ports:
+        if fold(device) == fold(wanted):
+            return device
+    raise ValueError(
+        f"serial_port {wanted!r} is not a serial port on this machine"
+        + (f"; present: {', '.join(ports)}" if ports else "; none is present")
+    )
 
 
 def validate_baudrate(value) -> int:
@@ -4318,8 +4399,9 @@ class XilinxHwServerTransport(Transport):
             raise ValueError(
                 f"bitfile path contains unsafe characters for TCL: {bitfile!r}"
             )
+        hw_server_url(host, port)  # refuse a bad host or port here, not at connect
         self.host = host
-        self.port = port
+        self.port = _whole_port(port)
         self.fpga_name = fpga_name
         self.bitfile = bitfile
         self._xsdb_path = xsdb_path
@@ -4432,7 +4514,7 @@ class XilinxHwServerTransport(Transport):
         self._stdout_thread.start()
         mark("xsdb_spawned")
 
-        self._send(f"connect -url tcp:{self.host}:{self.port}")
+        self._send(f"connect -url {hw_server_url(self.host, self.port)}")
         # Widen hw_server's BSCAN switch mask so USER2-USER4 irshifts
         # reach the right BSCANE2 instead of collapsing onto USER1.
         # Defaults to 0x1 (USER1 only) on Zynq US+ MPSoC.
