@@ -35,13 +35,14 @@ _TCL_NAME_RE = re.compile(r'^[A-Za-z0-9._:/*\- ]+$')
 # brace group.  We accept typical Windows/Unix path characters including
 # backslash.  Anything outside this set is rejected outright.
 _TCL_PATH_RE = re.compile(r'^[A-Za-z0-9._:/*\-\\ ]+$')
-_TCL_BRACED_RE = re.compile(r"^[^{}\r\n]*$")
+# No backslash either: a trailing one would escape the closing brace and
+# leave the script incomplete, so the tool would wait for more input.
+_TCL_BRACED_RE = re.compile(r"^[^{}\\\r\n]*$")
 
 # hw_server host for XSDB's ``connect -url tcp:<host>:<port>``: a DNS name or
-# an IPv4/IPv6 literal -- nothing Tcl or the URL would read as syntax.
-_HW_SERVER_HOST_RE = re.compile(
-    r"^(?:[A-Za-z0-9_][A-Za-z0-9_.\-]{0,252}|\[?[0-9A-Fa-f:.]{2,45}\]?)$"
-)
+# an IPv4 address -- nothing Tcl or the URL would read as syntax.  No IPv6
+# literal: XSDB's URL parser splits ``tcp:::1:3121`` at the first colons.
+_HW_SERVER_HOST_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\-]{0,252}")
 
 # Character whitelist for OpenOCD tap names. Unlike the XSDB filter/path (which
 # are quoted/braced), the tap is interpolated UNQUOTED into `irscan <tap> ...`
@@ -119,6 +120,9 @@ class _ProcessCancel:
             pass
 
 
+_XSDB_SCAN_ERROR = "fcapz-scan-error:"
+
+
 def list_xilinx_hw_server_targets(
     *,
     host: str = "127.0.0.1",
@@ -136,9 +140,15 @@ def list_xilinx_hw_server_targets(
     xsdb = xsdb_path or shutil.which("xsdb") or shutil.which("xsdb.bat")
     if not xsdb:
         raise RuntimeError("xsdb not found. Add Vivado bin to PATH.")
+    # A failed connect or scan must not read as "no targets": XSDB carries on
+    # after an error and (through xsdb.bat at least) exits with status 0, so
+    # the script marks the failure in its output instead.
     script = (
-        f"connect -url {url}\n"
-        "puts [jtag targets]\n"
+        f"if {{[catch {{connect -url {url}}} msg]}} "
+        f'{{puts "{_XSDB_SCAN_ERROR} $msg"; exit 1}}\n'
+        f"if {{[catch {{jtag targets}} out]}} "
+        f'{{puts "{_XSDB_SCAN_ERROR} $out"; exit 1}}\n'
+        "puts $out\n"
         "exit\n"
     )
     env = os.environ.copy()
@@ -167,6 +177,11 @@ def list_xilinx_hw_server_targets(
     output = f"{stdout}\n{stderr}"
     if proc.returncode != 0:
         raise RuntimeError(output.strip() or f"xsdb exited with status {proc.returncode}")
+    for line in output.splitlines():
+        if line.startswith(_XSDB_SCAN_ERROR):
+            raise RuntimeError(
+                f"hw_server scan failed: {line[len(_XSDB_SCAN_ERROR):].strip()}"
+            )
     targets = parse_xsdb_jtag_targets(output)
     if not targets and "To connect to this hw_server instance use url" in output:
         raise RuntimeError(
@@ -190,17 +205,32 @@ BAUD_DEFAULT = 1_000_000
 def hw_server_url(host: str, port: int) -> str:
     """The XSDB ``connect -url`` argument for *host*:*port*, as one Tcl word.
 
-    Raises :class:`ValueError` for a host that is not a DNS name or an IP
-    literal, or a port outside 1..65535: the URL goes into a Tcl script that
-    XSDB runs, so a host such as ``x;exec calc`` must never reach it.
+    Raises :class:`ValueError` for a host that is not a DNS name or an IPv4
+    address, or a port that is not a whole number in 1..65535: the URL goes
+    into a Tcl script that XSDB runs, so a host such as ``x;exec calc`` must
+    never reach it.
     """
     host = str(host)
-    if not _HW_SERVER_HOST_RE.match(host):
-        raise ValueError(f"hw_server host is not a host name or IP address: {host!r}")
-    port_i = int(port)
+    if not _HW_SERVER_HOST_RE.fullmatch(host):
+        raise ValueError(
+            f"hw_server host is not a host name or IPv4 address: {host!r} "
+            "(XSDB does not take IPv6 literals; use a host name)"
+        )
+    return "{tcp:" + host + ":" + str(_whole_port(port)) + "}"
+
+
+def _whole_port(port) -> int:
+    """*port* as a TCP port number; a fraction or a bool is refused, not
+    truncated to another port."""
+    if isinstance(port, bool) or (isinstance(port, float) and not port.is_integer()):
+        raise ValueError(f"hw_server port must be a whole number, got {port!r}")
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        raise ValueError(f"hw_server port must be a whole number, got {port!r}") from None
     if not 1 <= port_i <= 65535:
         raise ValueError(f"hw_server port must be in 1..65535, got {port!r}")
-    return "{tcp:" + host + ":" + str(port_i) + "}"
+    return port_i
 
 
 def resolve_serial_port(name) -> str:
@@ -4371,7 +4401,7 @@ class XilinxHwServerTransport(Transport):
             )
         hw_server_url(host, port)  # refuse a bad host or port here, not at connect
         self.host = host
-        self.port = int(port)
+        self.port = _whole_port(port)
         self.fpga_name = fpga_name
         self.bitfile = bitfile
         self._xsdb_path = xsdb_path
