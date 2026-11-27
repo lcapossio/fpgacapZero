@@ -408,7 +408,11 @@ class GatewayCancelTests(unittest.TestCase):
             return transport
 
         gateway._server._build_transport = slow_build  # type: ignore[method-assign]
-        thread, box = _in_thread(gateway.call, {**_CONNECT, "backend": "serial"})
+        listed = mock.patch("fcapz.web.gateway.resolve_serial_port", lambda name: name)
+        listed.start()
+        self.addCleanup(listed.stop)
+        serial = {**_CONNECT, "backend": "serial", "serial_port": "COM_TEST"}
+        thread, box = _in_thread(gateway.call, serial)
         self.assertTrue(building.wait(5))
         resp = gateway.call({"cmd": "cancel"}, serial_allowed=False)
         go_on.set()

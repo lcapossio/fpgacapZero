@@ -29,6 +29,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   made the server open that path and reprogram the FPGA (any client,
   remote ones with a token included); the web UI never sends it.  Both
   `/api/rpc` and `/api/ws` now refuse it in-band.
+- **The web server refuses `quartus_stp` and `probe_file`, and opens only
+  listed serial ports.**  A web client could choose the executable the
+  server launches for USB-Blaster (`quartus_stp`), make it read any file
+  (`probe_file`, which could also block the session on a FIFO), or open any
+  path as a serial port (a UNC path on Windows).  The first two are now
+  refused in-band; a serial `connect` must name a port the machine lists.
+  The web UI sends none of these.
+- **hw_server `host` is checked before it reaches XSDB.**  It went into
+  the XSDB Tcl script unquoted, so a crafted host (from the web server, an
+  RPC client or the CLI) could run Tcl as the server's account.  It must
+  now be a host name or IP address, and the URL is passed as one Tcl word.
 - **FTDI waits at a slow TCK with a short USB timeout.**  Idle clocking and
   bitstream writes are paced in pieces that fit the channel's USB timeout,
   not a fixed quarter second, so they no longer time out there.

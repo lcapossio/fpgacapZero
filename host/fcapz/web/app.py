@@ -100,24 +100,36 @@ def _openocd_guard(req: dict, client_host: Optional[str]) -> Optional[dict]:
     return None
 
 
-def _program_guard(req: dict) -> Optional[dict]:
-    """Refuse any request that names a bitstream (``program``).
+#: Request fields that make the server open a file or launch a program the
+#: client names, with the reason each is refused.  The web interface sends
+#: none of them; a remote client must not be able to read files on the
+#: server host, run programs there, or replace the design on the board.
+_SERVER_PATH_FIELDS = {
+    "program": "programming the FPGA is not available through the web server; "
+    "use the CLI (--program), the desktop GUI or the stdio RPC server",
+    "quartus_stp": "choosing the quartus_stp executable is not available through "
+    "the web server; start the server with --quartus-stp instead",
+    "probe_file": "probe_file reads a file on the server and is not available "
+    "through the web server; send the probe definitions inline as probes",
+}
+
+
+def _server_path_guard(req: dict) -> Optional[dict]:
+    """Refuse a request that names a server file or program (see
+    :data:`_SERVER_PATH_FIELDS`).
 
     Returns an in-band error envelope to send back, or ``None`` to allow.
-    ``program`` makes the server open that path and reprogram the FPGA with
-    it.  The web interface has no bitstream field, so no web client needs
-    it, and a remote one must not be able to read files on the server host
-    or replace the design on the board.  Program with the CLI, the desktop
-    GUI or the stdio RPC server instead.
+    Any value other than ``None`` is refused, an empty one too: what is
+    downstream treated as unset is no reason for a web client to send it.
     """
-    if req.get("program") is not None:
-        return {
-            "ok": False,
-            "schema_version": _SCHEMA_VERSION,
-            "error": "programming the FPGA is not available through the web server; "
-            "use the CLI (--program), the desktop GUI or the stdio RPC server",
-            "type": "PermissionError",
-        }
+    for field, reason in _SERVER_PATH_FIELDS.items():
+        if req.get(field) is not None:
+            return {
+                "ok": False,
+                "schema_version": _SCHEMA_VERSION,
+                "error": reason,
+                "type": "PermissionError",
+            }
     return None
 
 
@@ -315,7 +327,7 @@ def create_app(
                 req,
             )
         client_host = request.client.host if request.client else None
-        blocked = _openocd_guard(req, client_host) or _program_guard(req)
+        blocked = _openocd_guard(req, client_host) or _server_path_guard(req)
         if blocked is not None:
             return _with_ids(blocked, req)
         serial_ok = _serial_allowed(client_host, token)
@@ -397,7 +409,7 @@ def create_app(
                         }
                     )
                     continue
-                blocked = _openocd_guard(req, client_host) or _program_guard(req)
+                blocked = _openocd_guard(req, client_host) or _server_path_guard(req)
                 if blocked is not None:
                     await send(_with_ids(blocked, req))
                     continue

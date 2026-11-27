@@ -581,18 +581,50 @@ def test_openocd_guard_localhost_only():
     assert _openocd_guard({"cmd": "connect"}, "10.0.0.5") is None  # non-openocd unaffected
 
 
+@pytest.mark.parametrize("field", ["program", "quartus_stp", "probe_file"])
+def test_server_path_fields_are_refused_by_the_guard(field):
+    from fcapz.web.app import _server_path_guard
+
+    for value in ("/etc/passwd", "", 0):
+        blocked = _server_path_guard({"cmd": "connect", field: value})
+        assert blocked["type"] == "PermissionError", (field, value)
+    assert _server_path_guard({"cmd": "connect", field: None}) is None
+    assert _server_path_guard({"cmd": "connect"}) is None
+
+
+@pytest.mark.parametrize(
+    "req",
+    [
+        {"cmd": "connect", "backend": "usb_blaster", "quartus_stp": "calc.exe"},
+        {"cmd": "eio_connect", "backend": "usb_blaster", "quartus_stp": "calc.exe"},
+        {"cmd": "configure", "probe_file": "/etc/passwd"},
+        {"cmd": "capture", "probe_file": "/etc/passwd"},
+    ],
+)
+def test_server_files_and_programs_are_refused_on_both_endpoints(monkeypatch, req):
+    """A web client must not choose the executable the server launches
+    (``quartus_stp``) or a file it reads (``probe_file``)."""
+    import json as _json
+
+    built = []
+    monkeypatch.setattr(
+        RpcServer, "_build_transport", lambda self, r, **_: built.append(r) or FakeTransport()
+    )
+    loaded = []
+    monkeypatch.setattr("fcapz.rpc.load_probe_file", lambda path: loaded.append(path))
+    c = TestClient(create_app(), client=("127.0.0.1", 50000))
+    r = c.post("/api/rpc", json=req).json()
+    assert (r["ok"], r["type"]) == (False, "PermissionError")
+    with c.websocket_connect("/api/ws") as ws:
+        ws.send_text(_json.dumps(req))
+        assert ws.receive_json()["type"] == "PermissionError"
+    assert built == [] and loaded == []
+
+
 def test_program_is_refused_for_every_web_client(monkeypatch):
     """``program`` would make the server open that path and reprogram the
     FPGA: refused on both endpoints, loopback clients included."""
     import json as _json
-
-    from fcapz.web.app import _program_guard
-
-    assert _program_guard({"cmd": "connect", "program": "/etc/passwd"})["type"] == (
-        "PermissionError"
-    )
-    assert _program_guard({"cmd": "connect", "program": None}) is None
-    assert _program_guard({"cmd": "connect"}) is None
 
     built = []
     monkeypatch.setattr(
@@ -625,11 +657,24 @@ class FakeSerialTransport(FakeTransport):
 _SERIAL = {"backend": "serial", "serial_port": "COM_TEST"}
 
 
+def _listed_ports(monkeypatch, *names):
+    """Make the gateway see *names* as this machine's serial ports."""
+
+    def resolve(name):
+        for device in names:
+            if device.casefold() == str(name or "").strip().casefold():
+                return device
+        raise ValueError(f"serial_port {name!r} is not a serial port on this machine")
+
+    monkeypatch.setattr("fcapz.web.gateway.resolve_serial_port", resolve)
+
+
 def _serial_app(monkeypatch, **app_kwargs):
     """One app, a loopback client and a remote one (TestClient's own peer)."""
     monkeypatch.setattr(
         RpcServer, "_build_transport", lambda self, req, **_: FakeSerialTransport()
     )
+    _listed_ports(monkeypatch, "COM_TEST")
     app = create_app(**app_kwargs)
     return TestClient(app, client=("127.0.0.1", 50000)), TestClient(app)
 
@@ -640,6 +685,25 @@ def test_a_remote_client_cannot_name_a_serial_port(monkeypatch):
         r = _rpc(remote, cmd, **kw).json()
         assert r["ok"] is False and r["type"] == "PermissionError", cmd
     assert _rpc(local, "connect", **_SERIAL).json()["ok"] is True
+
+
+def test_a_web_client_can_only_open_a_listed_serial_port(monkeypatch):
+    """The serial transport opens serial_port as a device path: a file or a
+    UNC path never reaches it, and a listed port is passed on as listed."""
+    built = []
+    monkeypatch.setattr(
+        RpcServer,
+        "_build_transport",
+        lambda self, req, **_: built.append(req["serial_port"]) or FakeSerialTransport(),
+    )
+    _listed_ports(monkeypatch, "COM_TEST")
+    local = TestClient(create_app(), client=("127.0.0.1", 50000))
+    for name in (r"\\attacker\share\x", "/etc/passwd", "", None):
+        r = _rpc(local, "connect", backend="serial", serial_port=name).json()
+        assert r["ok"] is False and "serial" in r["error"], name
+    assert built == []
+    assert _rpc(local, "connect", backend="serial", serial_port="com_test").json()["ok"]
+    assert built == ["COM_TEST"]
 
 
 def test_a_remote_client_cannot_drive_an_open_serial_session(monkeypatch):

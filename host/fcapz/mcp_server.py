@@ -64,7 +64,7 @@ from .analyzer import CaptureNotReady
 from .axi_decode import FAULT_FLAGS, PAIRING_ASSUMPTION
 from .ejtagaxi import AXIError
 from .probes import load_probe_text
-from .transport import validate_baudrate
+from .transport import resolve_serial_port, validate_baudrate
 from .rpc import (
     _SCHEMA_VERSION,
     NotConnectedError,
@@ -1271,30 +1271,9 @@ class FcapzMcpSession:
 
     @staticmethod
     def _validated_serial_port(serial_port: str | None) -> str:
-        """Confine `serial_port` to a serial port this machine has.
-
-        The transport opens it as a device path, so an arbitrary string would
-        let an agent open any file the server can.  Only a name that the OS
-        lists as a serial port is passed on.
-        """
-        name = str(serial_port or "").strip()
-        if not name:
-            raise ValueError("the serial backend needs serial_port")
-        try:
-            from serial.tools import list_ports
-        except ImportError as exc:
-            raise ValueError(
-                "the serial backend needs pyserial; install fpgacapzero[serial]"
-            ) from exc
-        ports = sorted(p.device for p in list_ports.comports())
-        fold = str.casefold if os.name == "nt" else (lambda v: v)
-        for device in ports:
-            if fold(device) == fold(name):
-                return device
-        raise ValueError(
-            f"serial_port {name!r} is not a serial port on this machine"
-            + (f"; present: {', '.join(ports)}" if ports else "; none is present")
-        )
+        """Confine `serial_port` to a serial port this machine has (see
+        :func:`fcapz.transport.resolve_serial_port`)."""
+        return resolve_serial_port(serial_port)
 
     @staticmethod
     def _validated_port(port: int) -> int:
