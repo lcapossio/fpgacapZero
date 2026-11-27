@@ -4,7 +4,7 @@
 
 // Digilent Arty S7-25 (Spartan-7 XC7S25-1CSGA324) reference design.
 //
-// ELA (USER1 + USER2) samples a free-running 8-bit counter and btn[3:0];
+// ELA (USER1, control and burst readout) samples a free-running 8-bit counter and btn[3:0];
 // EIO (USER3) reads sw[2:0] and btn[3:0] and drives led[3:0].
 // sw[3] (M5) is on the 1.35 V bank 34 and is not used.
 module arty_s7_top (

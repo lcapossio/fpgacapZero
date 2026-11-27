@@ -4,7 +4,7 @@
 #
 # Build the Arty S7-25 example (non-project mode; tested with Vivado 2025.2.1):
 #   vivado -mode batch -source build_arty_s7.tcl
-# Output: arty_s7_fcapz.bit
+# Output: arty_s7_fcapz.bit (utilization and timing reports in out/)
 cd [file dirname [info script]]
 set rtl ../../rtl
 read_verilog -sv [list \
@@ -21,5 +21,13 @@ synth_design -top arty_s7_top -part xc7s25csga324-1 -include_dirs $rtl
 opt_design
 place_design
 route_design
-report_utilization -file utilization.rpt
+file mkdir out
+report_utilization -file out/utilization.rpt
+report_timing_summary -file out/timing_summary.rpt
+# No bitstream from a design that misses timing (the JTAG clock included).
+set wns [get_property SLACK [get_timing_paths -delay_type max]]
+set whs [get_property SLACK [get_timing_paths -delay_type min]]
+if {$wns < 0 || $whs < 0} {
+    error "routed design misses timing (WNS $wns ns, WHS $whs ns); see out/timing_summary.rpt"
+}
 write_bitstream -force arty_s7_fcapz.bit

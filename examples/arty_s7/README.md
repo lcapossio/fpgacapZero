@@ -13,15 +13,16 @@ ELA and EIO wrappers (`BSCANE2`).
 | `build_arty_s7.tcl` | Vivado non-project batch build |
 | `test_hw_integration.py` | Hardware tests: probe, counter capture with trigger, EIO |
 
-`sw[3]` (M5) sits on the 1.35 V bank 34 and is not used; a 3.3 V standard there
-fails DRC and SSTL135 needs a VREF the bank does not provide.
+`sw[3]` (M5) sits on the 1.35 V bank 34 and is not used: a 3.3 V standard
+there fails DRC, and M5 is also that bank's external VREF pin.  The XDC still
+sets the bank's internal VREF (0.675 V), as Digilent's master XDC does.
 
 ## JTAG chains
 
 | USER chain | Core |
 | --- | --- |
-| 1 | ELA control/register path |
-| 2 | ELA burst readout |
+| 1 | ELA control/register path and burst readout (single-chain burst, the default) |
+| 2 | free |
 | 3 | EIO (in: `{btn[3:0], 1'b0, sw[2:0]}`, out: `led[3:0]` in bits 3:0) |
 
 ## Build, program, test
@@ -30,15 +31,20 @@ Tested with Vivado 2025.2.1 (Linux).
 
 ```bash
 cd examples/arty_s7
-vivado -mode batch -source build_arty_s7.tcl       # arty_s7_fcapz.bit
-openFPGALoader -c digilent arty_s7_fcapz.bit       # or the Vivado hardware manager
+vivado -mode batch -source build_arty_s7.tcl       # arty_s7_fcapz.bit, reports in out/
 hw_server &                                        # Vivado hardware server
-fcapz --backend hw_server --tap xc7s25 probe
+fcapz --backend hw_server --tap xc7s25 --program arty_s7_fcapz.bit probe
 python -m pytest test_hw_integration.py -v         # programs the board first
 ```
 
-The direct FTDI backend also fits this board's FT2232, but needs FTDI's D2XX
-library; the results below used `hw_server`.
+The build stops before the bitstream if routed timing fails, the JTAG clock
+(TCK, constrained at 30 MHz) included.  The tests program the board through
+the same hw_server target they then use (`FPGACAP_HW_TARGET`), so on a bench
+with several boards no other board is reprogrammed.
+
+The direct FTDI backend (`--backend ftdi`) also fits this board's FT2232H,
+through FTDI's D2XX library or libusb (`--hardware usb:<serial>`); the results
+below used `hw_server`.
 
 ## Results
 

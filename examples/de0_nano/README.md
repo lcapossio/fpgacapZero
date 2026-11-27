@@ -36,7 +36,10 @@ python -m pytest test_hw_integration.py -v             # programs the board firs
 ```
 
 `jtagconfig` should list the board as `USB-Blaster [...]` with device
-`020F30DD EP3C25/EP4CE22`.
+`020F30DD EP3C25/EP4CE22`.  With more than one cable attached, set
+`FPGACAP_QUARTUS_HARDWARE` to the board's cable name as `jtagconfig` prints it
+(and pass `-c` / `--hardware` by hand): the tests then program and test that
+cable only, so no other board is reprogrammed.
 
 ## Results
 
