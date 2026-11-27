@@ -33,6 +33,7 @@ examples/*/out_manager_stale_*/
 examples/*/out_stale_*/
 # Intel/Altera Quartus: generated databases, checkpoints, outputs
 examples/**/qdb/
+examples/**/db/
 examples/**/dni/
 examples/**/incremental_db/
 examples/**/output_files/

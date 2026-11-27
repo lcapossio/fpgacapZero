@@ -187,7 +187,7 @@ TAP bridge for boards with no JTAG to the fabric:
 - **AMD/Xilinx hw_server / XSDB** — the default for AMD/Xilinx boards.
   Driven by Vivado's `hw_server` (running on `localhost:3121` by
   default).  Programs the FPGA, talks to BSCANE2, hardware-validated
-  on Arty A7-100T and on the Kria KV260 (Zynq UltraScale+ MPSoC), no
+  on Arty A7-100T, Arty S7-25 and the Kria KV260 (Zynq UltraScale+ MPSoC), no
   extra software to install if you already have Vivado.  On MPSoC parts
   the chain mode is picked from the tap name (see
   [chapter 14](14_transports.md)).
@@ -203,9 +203,9 @@ TAP bridge for boards with no JTAG to the fabric:
 - **Quartus USB-Blaster / `quartus_stp`** - Intel/Altera virtual
   JTAG access through Quartus Prime.  Uses `sld_virtual_jtag`
   instance indices from the Intel RTL wrapper `CHAIN` parameters.
-  Hardware-validated on the DE25-Nano (Agilex 5); see
-  [`specs/transport_api.md`](specs/transport_api.md) for the tested
-  Quartus edition.
+  Hardware-validated on the DE25-Nano (Agilex 5) and the DE0-Nano
+  (Cyclone IV E); see [`specs/transport_api.md`](specs/transport_api.md)
+  for the tested Quartus editions.
 - **Direct FTDI (`ftdi`)** — drives an FTDI MPSSE cable (the FlashPro5
   on Microchip boards, Digilent cables, the Kria KV260 carrier, or any
   FT2232H/FT4232H) through FTDI's D2XX library or libusb, with no OpenOCD

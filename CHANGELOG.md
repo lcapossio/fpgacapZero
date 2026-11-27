@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **DE0-Nano and Arty S7-25 examples** (contributed in #85).  ELA + EIO
+  reference designs with build scripts and hardware tests for the Terasic
+  DE0-Nano (Cyclone IV E, Quartus II 13.1, USB-Blaster) and the Digilent
+  Arty S7-25 (Spartan-7, hw_server); both reported passing on hardware.
+  The Arty S7 build now constrains the JTAG clock and stops on a timing
+  failure; both test suites program only the board under test and check
+  the EIO outputs by reading them back.
 - **Gowin GW1NR-9C programming over FTDI.**  `FtdiMpsseTransport.program()`
   (CLI `--program`, the GUI's *Program on connect*, RPC `program`) loads a
   Gowin `.fs` into the SRAM of a GW1NR-9C, with the sequence Gowin's

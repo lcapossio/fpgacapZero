@@ -322,8 +322,8 @@ def transport(request):
 
 ## Testing on other vendors and boards
 
-RTL wrappers exist for four vendor families. Only the Xilinx 7-series path has
-been fully hardware-validated. Every other vendor is **implemented but
+RTL wrappers exist for several vendor families.  The table shows which have
+been hardware-validated, and on which boards; the rest are **implemented but
 unvalidated** — which means a contributor with the right hardware can make a
 meaningful impact without writing a single line of host Python.
 
@@ -334,9 +334,9 @@ meaningful impact without writing a single line of host Python.
 | Xilinx 7-series / UltraScale | `fcapz_ela_xilinx7.v` | `jtag_tap_xilinx7.v` | yes | yes | **yes** (Arty A7-100T, Arty S7-25) |
 | Lattice ECP5 | `fcapz_ela_ecp5.v` | `jtag_tap_ecp5.v` | — | yes | **needed** |
 | Intel / Altera | `fcapz_ela_intel.v` | `jtag_tap_intel.v` | yes | yes | **yes** (DE25-Nano, DE0-Nano) |
-| Gowin | `fcapz_ela_gowin.v` | `jtag_tap_gowin.v` | — | yes | **needed** |
+| Gowin | `fcapz_ela_gowin.v` | `jtag_tap_gowin.v` | yes | yes | **yes** (BRS-100-GW1NR9) |
 
-The same gap applies to EIO (`fcapz_eio_<vendor>.v`) and the EJTAG-AXI /
+The same status applies to EIO (`fcapz_eio_<vendor>.v`) and the EJTAG-AXI /
 EJTAG-UART bridges (`fcapz_ejtagaxi_intel.v`, `fcapz_ejtaguart_intel.v`).
 
 ### Adding a new board example
