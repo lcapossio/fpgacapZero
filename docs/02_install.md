@@ -23,10 +23,11 @@
     FTDI is the most common.  Install from your distro package manager
     (Linux), Homebrew (macOS), or [openocd.org](https://openocd.org/)
     (Windows).
-  - **Quartus Prime with `quartus_stp`** — required for Intel/Altera
-    USB-Blaster access through `sld_virtual_jtag`.  See
+  - **Quartus with `quartus_stp`** — required for Intel/Altera
+    USB-Blaster access through `sld_virtual_jtag`: Quartus Prime, or
+    Quartus II 13.1 for older parts such as Cyclone IV.  See
     [`specs/transport_api.md`](specs/transport_api.md) for the
-    hardware-validated Quartus edition.
+    hardware-validated Quartus editions.
   - **Direct FTDI** — an FTDI MPSSE JTAG adapter through FTDI's D2XX
     library or libusb, with no other software; see
     [Option D](#option-d-direct-ftdi-flashpro5-digilent-kv260).

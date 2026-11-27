@@ -180,8 +180,10 @@ selected ELA control chain instead of switching to USER2.
   `CHAIN` parameter. The default fcapz Intel control path is instance 1.
 - USB cable discovery, device open, `fcapz probe`, EIO access, and ELA capture
   were exercised on a DE25-Nano with Quartus Prime Pro 26.1 and an Intel
-  `sld_virtual_jtag` fcapz bitstream.  Quartus Lite is expected to work with
-  the same Tcl commands, but this branch was not re-validated on Lite.
+  `sld_virtual_jtag` fcapz bitstream.  A contributor ran `fcapz probe`, EIO
+  access and ELA capture on a DE0-Nano (Cyclone IV E) with Quartus II 13.1
+  Web Edition (`examples/de0_nano`).  Current Quartus Lite is expected to work
+  with the same Tcl commands, but has not been validated.
 - Inside a `slot_scope`, each locked script that reaches a slot starts, after
   `device_lock`, with the `MGR_ACTIVE` write and 20 idle TCKs: one per
   register access and window read, and once before `BURST_PTR` in a burst.

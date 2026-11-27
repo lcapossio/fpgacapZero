@@ -36,7 +36,10 @@ python -m pytest test_hw_integration.py -v             # programs the board firs
 ```
 
 `jtagconfig` should list the board as `USB-Blaster [...]` with device
-`020F30DD EP3C25/EP4CE22`.
+`020F30DD EP3C25/EP4CE22`.  With more than one cable attached, set
+`FPGACAP_QUARTUS_HARDWARE` to the board's cable name as `jtagconfig` prints it
+(and pass `-c` / `--hardware` by hand): the tests then program and test that
+cable only, so no other board is reprogrammed.
 
 ## Results
 
@@ -46,4 +49,5 @@ python -m pytest test_hw_integration.py -v             # programs the board firs
 | Toolchain | Quartus II 13.1 (Build 162) |
 | Transport | `usb_blaster` (`quartus_stp`), onboard USB-Blaster |
 | Resources | 2,186 / 22,320 LEs, 1,636 registers, 10,240 memory bits |
-| `test_hw_integration.py` | 3 passed (probe, capture: trigger at counter 0x40 lands on sample 8 and the counter increments by 1 per sample, EIO write/read) |
+| Hardware tests (PR #85 version) | 3 passed (probe, capture: trigger at counter 0x40 lands on sample 8 and the counter increments by 1 per sample, EIO output write and input read) |
+| Current `test_hw_integration.py` | Not yet run on this board: it now programs through the target under test and reads the EIO outputs back |
