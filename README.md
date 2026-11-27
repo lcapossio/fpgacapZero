@@ -208,14 +208,14 @@ The canonical register / shift maps live in
 
 | Area | Status |
 |------|--------|
-| AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7 and Kria KV260 (Zynq UltraScale+ MPSoC) |
+| AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7, Arty S7-25 and Kria KV260 (Zynq UltraScale+ MPSoC) |
 | OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100 and the PolarFire SoC Discovery Kit; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
-| Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) |
+| Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) and DE0-Nano (Cyclone IV E, Quartus II 13.1) |
 | Direct FTDI backend (`--backend ftdi`, D2XX or libusb) | ✅ Hardware-validated over D2XX on the PolarFire SoC Discovery Kit's embedded FlashPro5, the Arty A7 (including 7-series programming) and the Kria KV260 (multi-device JTAG chain, on `main`); libusb (on `main`, unreleased) validated for raw JTAG scans only, full sessions not yet |
 | Serial TAP bridge (`--backend serial`, `fcapz_ela_uart`) | ✅ Hardware-validated on Forgix (Efinix Trion T8F49, over its configuration pins) |
-| AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T |
+| AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T and Arty S7-25 (Spartan-7; ELA + EIO) |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |
-| Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) via USB-Blaster |
+| Intel / Altera wrapper | ✅ Hardware-validated on DE25-Nano (Agilex 5) and DE0-Nano (Cyclone IV E; ELA + EIO) via USB-Blaster |
 | Microchip PolarFire wrapper | ✅ Hardware-validated on the PolarFire SoC Discovery Kit (MPFS095T) over OpenOCD |
 | AMD/Xilinx UltraScale / UltraScale+ wrappers | ✅ Hardware-validated on Kria KV260 (`xck26`) and on a Kintex UltraScale KU035 (proprietary board); standalone UltraScale+ not yet tested |
 | ECP5 wrappers | RTL complete; host / hardware validation still limited |
@@ -248,7 +248,7 @@ CI jobs, and the hardware-in-the-loop tests are all documented in
 ```
 rtl/        Portable Verilog cores + vendor TAP wrappers (VHDL in rtl/vhdl/)
 host/fcapz/ Python host stack: Analyzer, transports, CLI, RPC, web, MCP
-examples/   Reference designs (Arty A7, Kria KV260, DE25-Nano, Gowin BRS-100,
+examples/   Reference designs (Arty A7, Arty S7-25, Kria KV260, DE25-Nano, DE0-Nano, Gowin BRS-100,
             PolarFire SoC Discovery Kit, Forgix, and more)
 docs/       User manual (start at docs/README.md) + canonical specs
 tb/, sim/   Testbenches and simulation runners

@@ -331,9 +331,9 @@ meaningful impact without writing a single line of host Python.
 
 | Vendor | RTL wrapper | JTAG TAP | Verilog top | VHDL top | HW validated |
 |--------|-------------|----------|-------------|----------|--------------|
-| Xilinx 7-series / UltraScale | `fcapz_ela_xilinx7.v` | `jtag_tap_xilinx7.v` | yes | yes | **yes** (Arty A7-100T) |
+| Xilinx 7-series / UltraScale | `fcapz_ela_xilinx7.v` | `jtag_tap_xilinx7.v` | yes | yes | **yes** (Arty A7-100T, Arty S7-25) |
 | Lattice ECP5 | `fcapz_ela_ecp5.v` | `jtag_tap_ecp5.v` | — | yes | **needed** |
-| Intel / Altera | `fcapz_ela_intel.v` | `jtag_tap_intel.v` | — | yes | **needed** |
+| Intel / Altera | `fcapz_ela_intel.v` | `jtag_tap_intel.v` | yes | yes | **yes** (DE25-Nano, DE0-Nano) |
 | Gowin | `fcapz_ela_gowin.v` | `jtag_tap_gowin.v` | — | yes | **needed** |
 
 The same gap applies to EIO (`fcapz_eio_<vendor>.v`) and the EJTAG-AXI /
