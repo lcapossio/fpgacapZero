@@ -27,6 +27,10 @@ on:
         type: boolean
         default: true
 
+# Read-only by default; the publish jobs add only the OIDC token they need.
+permissions:
+  contents: read
+
 jobs:
   # ── 1. Build sdist + wheel (no special permissions) ────────────────
   build:

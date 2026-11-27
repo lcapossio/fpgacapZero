@@ -12,6 +12,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   # ── 0. Version sync guard ──────────────────────────────────────────
   # Catches stale generated HDL constants before any other job wastes minutes.
