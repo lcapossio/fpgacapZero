@@ -45,8 +45,9 @@ path for timestamp data.
   Raised to the caller.
 - Any other exception from a burst propagates; nothing reads around it.
 - `burst` (constructor) — declares whether the bitstream has a burst path.
-  It is never probed: `False` reads every capture through the register
-  window.  Defaults: `True` for the hw_server, Quartus and TAP-bridge /
+  The bitstream is never probed for one: `False` reads every capture through
+  the register window.  A TAP-bridge transport also bursts only when the
+  bridge reports the burst data chain and a DR of at least 32 bits.  Defaults: `True` for the hw_server, Quartus and TAP-bridge /
   serial transports; `False` for `OpenOcdTransport` (the CLI, RPC and GUI
   turn it on for the PolarFire IR table); `None` for `FtdiMpsseTransport`,
   meaning the detected family's wrapper default.

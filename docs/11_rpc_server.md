@@ -233,12 +233,13 @@ The burst readout fields depend on the backend:
 | `hw_server` | default `true` | honoured |
 | `openocd` | default on for the PolarFire preset only; `true` opts other presets in | honoured |
 | `ftdi` | default per detected family | honoured |
-| `usb_blaster` | default `true` | ignored: Quartus uses its own data chain |
+| `usb_blaster` | default `true` | ignored: Quartus picks its burst chain per core |
 | `serial` | ignored | ignored |
 
-`"burst": false` is for a bitstream with no burst readout path; every capture
-is then read through the register window. `"single_chain_burst": false`
-selects a legacy two-chain build. The Python `SerialTapTransport` takes
+`"burst": false` is for a bitstream with no burst readout path; on the
+backends that take it, every capture is then read through the register
+window. `"single_chain_burst": false` selects a legacy two-chain build on the
+backends marked "honoured". The Python `SerialTapTransport` takes
 `burst=False`, but RPC and the CLI pass a serial session only its port and
 baud rate.
 
@@ -583,8 +584,9 @@ session's chain is restored afterwards.
 {"cmd": "axi_mon_probe"}
 ```
 
-Response: `{"ok": true, "schema_version": "1.2", "present": true, "chain": 2, "proto": "AXI4LITE", "addr_w": 32, "data_w": 32, "decode": true, "sample_width": 160, "probes": [{"name": ..., "width": ..., "lsb": ...}, ...]}`,
-or `{"present": false}` when no monitor answers.
+Response: `{"ok": true, "schema_version": "1.2", "present": true, "chain": 2, "proto": "AXI4LITE", "addr_w": 32, "data_w": 32, "decode": true, "sample_width": 160, "probes": [{"name": "aw_hs", "width": 1, "lsb": 0}, {"name": "w_hs", "width": 1, "lsb": 1}, ...]}`
+(the `probes` list is cut short here),
+or `{"ok": true, "schema_version": "1.2", "present": false}` when no monitor answers.
 
 #### `configure`
 
@@ -740,7 +742,8 @@ For `format=csv` or `format=vcd`, the response has `"content": "..."`
 with the file body as a string instead of `result`.
 
 Other options: `"immediate": true` rewrites the trigger to an always-true
-condition so the capture fires at once; `"include_vcd": true` and
+condition, with `pretrigger` 0 and external trigger gating off, so the capture
+fires at once (a configured trigger holdoff and delay still apply); `"include_vcd": true` and
 `"include_csv": true` add `vcd` / `csv` text beside the chosen format;
 `"decode_axi": true` adds an `axi` transaction decode when the probe names
 look like an AXI monitor's (ignored otherwise). The capture's probe map, when
@@ -963,8 +966,9 @@ Response: `{"ok": true, "schema_version": "1.2", "count": 4}`
 
 With `"burst": true`, `axi_dump` and `axi_write_block` split the transfer into
 as many AXI4 bursts as it takes: each at most the bridge's `fifo_depth` and
-256 beats, and none crossing a 4 KiB boundary. Any `count` works, but `addr`
-must be word-aligned and the range must end within the 32-bit address space.
+256 beats, and none crossing a 4 KiB boundary. The total may exceed
+`fifo_depth`; `count` must be positive (`data` non-empty), `addr`
+must be word-aligned, and the range must end within the 32-bit address space.
 The single-burst limits (one burst no longer than `fifo_depth`) apply only to
 the Python `burst_read` / `burst_write` methods and the desktop GUI's AXI
 panel, not to these RPC commands.

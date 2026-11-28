@@ -162,9 +162,9 @@ connected. The panels:
 - **Cores** — stacked with Connection; the dock **jumps to it once a connect
   lands**. Lists the cores the RPC `list_cores` command finds, with their
   parameters: the connected ELA (plus the other slots of a core manager on
-  its chain), an EIO on USER1/2, and plain ELAs or AXI monitors on chains 1, 2
-  and 5. Bridges are not listed (the RPC `discover` command sweeps every
-  chain, bridges included). The
+  its chain), the session's EIO (else the first found on USER1/2), and plain
+  ELAs or AXI monitors on chains 1, 2 and 5. Bridges are not listed (the RPC
+  `discover` command sweeps the backend's discovery chains, bridges included). The
   core the session is bound to is marked **in use**, and any other capture
   core gets a **Use this core** button that switches to it in one click. EIO
   is also auto-discovered into its own panel on connect.
@@ -275,7 +275,8 @@ reports an error instead of an empty target list.
 
 **Command errors are in-band** (`{"ok": false, "error": ...}`), so a
 bad command still returns HTTP 200 — matching the line-protocol semantics.
-Authentication comes first: a missing or wrong token is an HTTP 401. You
+A missing or wrong token is an HTTP 401, checked before the command runs (a
+body that is not valid JSON is refused even earlier, with HTTP 422). You
 can drive the server with `curl` exactly as you would pipe JSON to
 `python -m fcapz.rpc`:
 

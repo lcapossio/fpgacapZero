@@ -45,7 +45,8 @@ The global transport options (`--backend`, `--host`, `--port`, `--tap`,
 cable on first use.  Commands that name the same board the same way share
 one connection.  A few spellings are folded together: host names are
 compared without case, and `localhost`, `::1`, `[::1]` and an empty host
-are `127.0.0.1`; hw_server's default port 6666 is its port 3121, and its
+count as `127.0.0.1` (only for this comparison: the cable opens with the host
+as given, and hw_server takes `localhost` or `127.0.0.1`, not `::1`); hw_server's default port 6666 is its port 3121, and its
 `--tap` matches with or without `.tap`; for `usb_blaster`, `auto`, an empty
 tap and the default `xc7a100t.tap` are one.  Nothing
 else is resolved: the `ftdi` and `usb_blaster` adapters are keyed by the

@@ -45,9 +45,10 @@ option that matches the build; it is never read around, since a JTAG
 fault mid-burst would otherwise come back as a slow, silent re-read.
 The frontends do not pass these options to every backend: the serial TAP
 bridge takes `burst=False` from Python only (the CLI and RPC build it from
-the port and baud rate alone), and `QuartusStpTransport` always bursts on its
-own data chain, so it ignores `single_chain_burst` / CLI
-`--two-chain-burst`.
+the port and baud rate alone), and `QuartusStpTransport` picks its burst path
+per core (the ELA's separate data chain for a legacy build, the core's own
+instance for a wide single-chain core or a managed slot), so it ignores
+`single_chain_burst` / CLI `--two-chain-burst`.
 
 The 256-bit burst DR packs **whole samples** per scan, so `read_block`
 uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
@@ -281,9 +282,10 @@ Two methods serve the EJTAG-AXI [streaming read](07_ejtag_axi_bridge.md#streamin
 
 Talks to OpenOCD's TCL listener (default port `6666`) via raw
 `irscan` / `drscan` commands.  Cross-platform, vendor-neutral,
-usually **slower than hw_server** per scan.  Each batch of scans goes to
+usually **slower than hw_server** per scan.  Each burst readout goes to
 OpenOCD as one Tcl command line (a run of identical scans becomes a Tcl
-`for` loop), so no other client can interleave a scan within a batch.
+`for` loop), so no other client can interleave a scan within a burst.
+`raw_dr_scan_batch()` sends its scans as separate commands.
 
 ```python
 from fcapz import OpenOcdTransport
@@ -802,8 +804,9 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   USB timeout when that is shorter, each waited for, so no USB transfer
   outlasts `timeout_ms`; a cancel between pieces returns the TAP to
   Run-Test/Idle first.  On `main` (unreleased) programming and long idle
-  clocks use the same capped piece; in 0.5.2 they always use a quarter
-  second.  The
+  clocks use the same capped piece; in 0.5.2 they use a quarter second,
+  without the USB-timeout cap.  A programming piece also holds at most
+  64 KiB of bitstream (about 87 ms of TCK at 6 MHz).  The
   Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
   Single-die UltraScale takes the same sequence but is not
   hardware-validated.
@@ -1150,7 +1153,8 @@ t.connect()
 ```
 
 Any non-zero value passes: an ELA's `VERSION` on an unmanaged chain,
-or the core manager's identity (`"CM"`) at `0x0000` on a managed one.
+or the selected slot's `VERSION` on a managed one.  To poll the core
+manager's own identity (`"CM"`), pass `ready_probe_addr=0xF000`.
 
 If the timeout elapses, the transport raises:
 

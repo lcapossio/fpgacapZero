@@ -301,11 +301,12 @@ If the watchdog fires, what happens depends on whether the RPC layer can
 cancel the call:
 
 - **Cancellation hook present** (the normal case: the stock session runs an
-  `RpcServer`, whose `cancel_active()` is the hook) — the call is cancelled
-  and given the grace window to unwind. The board session is torn down and
-  the tool fails with `watchdog_timeout`; reconnect before retrying. If the
-  call is still running when the grace window ends, it is abandoned as
-  described below.
+  `RpcServer`, whose `cancel_active()` is the hook) — if the call is still
+  pending, it is cancelled and given the grace window to unwind; the board
+  session is torn down and the tool fails with `watchdog_timeout`, so
+  reconnect before retrying. If the call is still running when the grace
+  window ends, it is abandoned as described below. A call that committed its
+  reply just as the watchdog fired returns that reply.
 - **No cancellation hook** (an RPC implementation without `cancel_active()`)
   — the call may simply be a slow readback finishing late, so the grace
   window is allowed to elapse and a completed result is returned rather than
