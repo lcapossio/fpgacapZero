@@ -56,9 +56,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   a false path (with a warning) only on probes launched by a clock the ELA
   does not sample on, so same-clock and clock-muxed paths stay timed.  It
   refuses, before editing, output nets named twice, constant-driven or
-  driverless nets, one-sided clock groups over TCK, ELAs wider than 256
-  bits, a bad `-chain` or `-tck_mhz` (NaN and Inf included) and projects
-  open on disk.
+  driverless nets, ELAs wider than 256 bits, a bad `-chain` or `-tck_mhz`
+  (NaN and Inf included) and projects open on disk, and stops before
+  writing the output checkpoint when a one-sided clock group covers the
+  TCK crossings.
 - **CI workflow tokens are read-only by default.**  Both workflows set
   `permissions: contents: read`; only the publishing jobs add
   `id-token: write`.

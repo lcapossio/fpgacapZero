@@ -105,8 +105,9 @@ The `--program` flag tells fcapz to:
    added in v0.2.0.  It reads register `0x0000` on the active chain
    (USER1) for up to 2 s until it returns any non-zero value.  It is
    a "the chain is alive" check, not an ELA identity check: on this
-   reference design `0x0000` on USER1 is the debug core manager's
-   identity word.  If it stays zero, you get a clear
+   reference design `0x0000` on USER1 reads the version word of the
+   core manager's active slot (ELA0 after configuration; the manager's
+   own identity is at `0xF000`).  If it stays zero, you get a clear
    `ConnectionError: FPGA did not become ready within 2.0s ...`.
 6. Run the actual subcommand (`probe`), which checks the ELA's identity.
 
@@ -273,19 +274,23 @@ captured 25 samples from channel 0 -> my_capture.json
 
 If the CLI printed `error: capture did not complete within timeout`
 (from Python, `Analyzer.capture()` raises `CaptureNotReady`, a
-`TimeoutError` subclass), the trigger never fired — usually because
-your trigger value can never appear on the probe (the counter is
-masked, the counter clock is dead, etc.).  Picking another value will
-not help: the free-running 8-bit counter passes every value once per
-wrap.  Instead rerun with `--trigger-mask 0`, which matches any sample
-and fires at once; if that still times out, the ELA is not seeing its
-sample clock or is not being armed (see
+`TimeoutError` subclass), the capture never reached `DONE`, most often
+because the trigger never fired: your trigger value can never appear on
+the probe (the counter is masked, the counter clock is dead, etc.).
+Picking another value will not help: the free-running 8-bit counter
+passes every value once per wrap.  Instead rerun with
+`--trigger-mask 0`, which drops the value-match condition, so the
+trigger fires as soon as the pretrigger history is stored.  If that
+still times out, read `Analyzer.status()` from Python: not `armed`
+means the ELA was not armed, `armed` without `triggered` usually means
+it is not seeing its sample clock, and `triggered` without `done`
+means the post-trigger window is still filling (see
 [chapter 17](17_troubleshooting.md)).
 
 Quick peek at what's in the file:
 
 ```bash
-python -m json.tool my_capture.json | head -40
+python -m json.tool my_capture.json
 ```
 
 An abridged excerpt (the `samples` list and the `timestamps` list are cut

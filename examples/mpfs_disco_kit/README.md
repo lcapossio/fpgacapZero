@@ -42,12 +42,13 @@ LSRAM, with timing met at 50 MHz.
    fcapz --backend ftdi probe
    fcapz --backend ftdi capture \
        --pretrigger 8 --posttrigger 23 --trigger-value 0x40 --trigger-mask 0xFF \
-       --sample-clock-hz 50000000 \
        --out ramp.vcd --format vcd
    ```
 
-   The ELA samples the board's 50 MHz reference clock; without
-   `--sample-clock-hz` the export assumes 100 MHz.
+   The ELA samples the board's 50 MHz reference clock.  A VCD's time axis
+   counts samples, so the rate does not change it; for a JSON export
+   (`--out ramp.json`) add `--sample-clock-hz 50000000`, or the file records
+   the 100 MHz default.
 
    The transport reads the PolarFire IDCODE and picks the IR table and burst
    readout itself. With other FTDI adapters plugged in (an Arty, say), name the

@@ -93,8 +93,9 @@ bridge reports the transaction complete.  The host side caches the
 bridge's `FIFO_DEPTH` from the FEATURES register and rejects oversized
 bursts at the API boundary so a buggy host can never overflow the
 on-chip read FIFO.  Since 0.5.2 the bridge also keeps the AXI bus legal
-when a transfer times out or is reset (VALIDs held to READY, every
-write burst completed, a timed-out read drained), advertised as
+when a transfer times out or the host sends `CMD_RESET`: it keeps
+servicing the bus work already started (VALIDs held to READY, a started
+write burst finished, a timed-out read drained), advertised as
 `safe_writes` (the `has_safe_writes` property), with `axi_status()` reporting what
 is still outstanding.  Hardware-validated on Arty A7-100T with the
 batched-scan transport.  Full chapter:
@@ -143,7 +144,9 @@ A7 reference design places it on USER2.  Full chapter:
 By default, each core uses a **separate JTAG USER chain** (USER1 through
 USER4 on AMD/Xilinx 7-series / UltraScale, equivalent on other vendors), so
 multiple cores can coexist in the same bitstream and the host stack can
-talk to all of them in one xsdb / OpenOCD session.  Designs can also put
+talk to all of them in one xsdb / OpenOCD session.  The AXI monitor is the
+exception: it also defaults to USER1, so next to an ELA it needs another
+chain (`CTRL_CHAIN`).  Designs can also put
 multiple ELA and EIO slots behind one core manager on a single chain when you
 want more debug endpoints than free USER chains: the
 `fcapz_debug_multi_<vendor>` hubs (`xilinx7`, `xilinxus`, `intel`, `ecp5`,
@@ -156,7 +159,7 @@ the TAP adapter.
 | ELA burst data | USER1 by default; USER2 for legacy dual-chain burst | `0x02` / `0x03` |
 | EIO | USER3 | `0x22` |
 | EJTAG-AXI / EJTAG-UART | USER4 | `0x23` |
-| AXI monitor | USER1 (`CTRL_CHAIN`; USER2 on the Arty A7 reference) | `0x02` / `0x03` |
+| AXI monitor | USER1 (`CTRL_CHAIN`; USER2 on the Arty A7 reference) | `0x02` (`0x03` on the Arty A7) |
 
 Multi-die UltraScale(+) parts (KU085, KU115, most Virtex UltraScale+) and
 Zynq UltraScale+ have a longer IR with other codes.  You don't have to look
@@ -200,7 +203,8 @@ Everything talks to a Python package called `fcapz`.  After
 - **`fcapz-mcp` MCP server** (install with
   `pip install "fpgacapzero[mcp]"`) — gives coding agents the lab
   controls (capture, paging and search, AXI transaction decode, EIO,
-  AXI and UART access) behind opt-in safety flags.  Documented in
+  AXI and UART access); programming, EIO and AXI writes and UART sends
+  need opt-in safety flags.  Documented in
   [chapter 20](20_mcp_server.md).
 - **Broker** (opt-in, `fcapz --broker` or `FCAPZ_BROKER=1`) — lets
   several CLI or Python (`fcapz.broker.BrokerSession`) programs share

@@ -258,7 +258,7 @@ vid_pid`, `ftdi channel`, and the IDCODE to match your device.
 ```bash
 # In a second terminal (OpenOCD must already be running):
 fcapz --backend openocd --port 6666 probe
-fcapz --backend openocd --port 6666 capture --pretrigger 0 --posttrigger 63 --trigger-mask 0 --out /tmp/out.json
+fcapz --backend openocd --port 6666 capture --pretrigger 0 --posttrigger 63 --trigger-mask 0 --sample-clock-hz 150000000 --out /tmp/out.json
 ```
 
 **Running the hardware suite against the OpenOCD backend**

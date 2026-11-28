@@ -370,7 +370,7 @@ fcapz_debug_multi_xilinx7 #(
     .eio_probe_out({eio1_out, eio0_out})
 );
 
-// 2. AXI monitor on USER2, watching the shared AXI4-Lite bus
+// 2. AXI monitor on USER2, tapping the AXI4-Lite signals of the shared AXI4 bus
 fcapz_axi_mon_xilinx7 #(
     .ADDR_W     (32),
     .DATA_W     (32),
