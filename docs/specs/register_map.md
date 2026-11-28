@@ -66,11 +66,11 @@ in that bridge’s section.
 | `0x0094` | STREAM_CTRL | RW | `COMPARE_CAPS` bit 23 only. Bit 0 = ring: the segmented capture wraps to segment 0 after the last one instead of ending, writing only segments the host has released. Bit 1 = raw blocks (with bit 0): every stored sample is a trigger, so with `PRETRIG_LEN = 0`, `POSTTRIG_LEN >= 1`, `TRIG_DELAY = 0` and `TRIG_HOLDOFF = 0` the windows hold consecutive stored samples (a delay or holdoff skips samples between windows, unmarked; a one-sample window skips every other sample). Bits 0-1 are taken on arm; the core ignores the ring while run-length capture is on. Bits `[5:4]` select the `STREAM_DATA` field. Resets to 0. See [Continuous capture](../05_ela_core.md#continuous-capture). |
 | `0x0098` | STREAM_RELEASE | RW | `COMPARE_CAPS` bit 23 only. Write `{session[7:0], seq[23:0]}` to release every window before `seq`; reads back the last write. Taken only while the ring runs, for the current session, and for `seq` from the released count up to the completed count; otherwise refused (`STREAM_STATUS[4]`). A write while `STREAM_STATUS[0]` is set is dropped. |
 | `0x009C` | STREAM_DATA | RO | `COMPARE_CAPS` bit 23 only. Field `STREAM_CTRL[5:4]`: 0 = `{session[7:0], completed[23:0]}`, the windows completed since the arm (modulo 2^24); 1 = `[23:0]` the windows released; 2 = what waiting for a free segment has lost since the arm: stored samples in raw mode, sample clocks otherwise, saturating at 2^32 - 1; 3 = 0. Window `n` is in segment `n mod NUM_SEGMENTS`. A window counted here is complete in the buffer, and its `SEG_START` is published with it. |
-| `0x00A0` | CHAN_SEL | RW | `NUM_CHANNELS > 1` only. `[7:0]` = probe channel to capture, taken on arm; a channel at or past `NUM_CHANNELS` captures channel 0. Reads 0 and ignores writes on single-channel cores. |
+| `0x00A0` | CHAN_SEL | RW | `NUM_CHANNELS > 1` only. `[7:0]` = probe channel to capture, taken on arm; a channel at or past `NUM_CHANNELS` captures channel 0. On a core with `PROBE_MUX_W > 0`, `PROBE_SEL` selects the slice instead. Reads 0 and ignores writes on single-channel cores. |
 | `0x00A4` | NUM_CHAN | RO | `NUM_CHANNELS` parameter (1 on single-channel cores). |
 | `0x00A8` | RLE_CTRL | RW | `RLE_W` cores only. Bit 0 = run-length capture enable, taken on arm (resets to 0). Bit 1 = the timestamp DATA window returns run counts instead of timestamps; arm and soft reset clear it. The core ignores bit 0 while decimation or storage qualification is on. See [Run-length capture](../05_ela_core.md#run-length-capture). |
 | `0x00AC` | PROBE_SEL | RW | `PROBE_MUX_W > 0` only. `[7:0]` = probe-mux slice index (slice `i` is bits `[(i+1)*SAMPLE_W-1 : i*SAMPLE_W]` of the packed `probe_in`), taken on arm; a slice at or past `PROBE_MUX_W / SAMPLE_W` captures slice 0. Reads 0 and ignores writes otherwise. |
-| `0x00B0` | DECIM | RW | `DECIM_EN=1` only. `[23:0]` = decimation ratio N: store one sample every N+1 sample clocks (0 = every clock), taken on arm. The trigger still runs every clock. Reads 0 and ignores writes otherwise. |
+| `0x00B0` | DECIM | RW | `DECIM_EN=1` only. `[23:0]` = decimation ratio N: ordinary stores happen once every N+1 sample clocks (0 = every clock), taken on arm. The trigger still runs every clock, and the trigger sample is stored even on a non-store clock. Reads 0 and ignores writes otherwise. |
 | `0x00B4` | TRIG_EXT | RW | `EXT_TRIG_EN=1` only. `[1:0]` = external trigger mode, taken on arm: 0 = disabled (internal trigger only), 1 = internal OR `trigger_in`, 2 = internal AND `trigger_in`, 3 = disabled. Resets to the `DEFAULT_TRIG_EXT` parameter. Reads 0 and ignores writes otherwise. |
 | `0x00B8` | NUM_SEGMENTS | RO | `NUM_SEGMENTS` parameter (1 = unsegmented). |
 | `0x00BC` | SEG_STATUS | RO | `[31]` = every segment of the capture is done; low `clog2(NUM_SEGMENTS)` bits = segments completed (wraps to 0 when the last one completes). Unsegmented cores read `0x8000_0000`. |
@@ -339,7 +339,8 @@ since a Test-Logic-Reset there cancels a burst after its header was checked.
   discard the first to get `N × (256/SAMPLE_W)` samples.  The priming scan
   holds the stale staging word, or the burst header on a manager with
   `MGR_CAPS[4]` (below), which the host checks before discarding it.  Sample
-  payloads carry no CRC.  The USER1 DATA window has no priming scan.
+  payloads carry no CRC.  The USER1 DATA window has no burst priming scan; its
+  register reads use their own pipeline, which the transport primes and discards.
 - **Timestamp mode** (`bit[31]=1`): each scan returns `256 / TIMESTAMP_W` timestamps
   packed LSB-first.  The host uses `read_timestamp_block()` to retrieve timestamps
   via this path, with the same priming scan.  Whether the host reads timestamps
@@ -426,8 +427,10 @@ scans: a scan's Capture-DR shows the oldest queued response with
 `prev_valid=1`, or no result (`prev_valid=0`, usually with `busy`) while it
 is still owed. The host therefore submits commands and then drains
 responses with wait scans (`NOP`, or `BURST_RDATA` during a burst read),
-batched where the transport allows, until it has seen `prev_valid` once
-per queued command. `CONFIG` is a separate case: its value appears on the
+batched where the transport allows, until every queued command has
+answered. `prev_valid` also marks burst words and `CONFIG` values, so the
+host counts a burst read's data words and its one response separately.
+`CONFIG` is a separate case: its value appears on the
 next scan with `prev_valid=1` and leaves any queued AXI response for a
 later scan. See [chapter 07](../07_ejtag_axi_bridge.md) for the host
 sequences.
@@ -448,7 +451,7 @@ sequences.
 | Bits | Field | Description |
 |------|-------|-------------|
 | `[31:0]` | rdata | Read data of the response or burst word this scan shows, or the `CONFIG` value |
-| `[63:32]` | info | `[47:32]` = low 16 bits of the auto-increment address, `[55:48]` = burst-read FIFO occupancy, `[63:56]` = 0 |
+| `[63:32]` | info | `[47:32]` = low 16 bits of the auto-increment address, `[55:48]` = low 8 bits of the burst-read FIFO occupancy (256 reads as 0; test `fifo_notempty` for empty), `[63:56]` = 0 |
 | `[65:64]` | resp | AXI response code (OKAY=0, SLVERR=2, DECERR=3) |
 | `[67:66]` | rsvd | Reserved |
 | `[71:68]` | status | Status bits (see below) |
@@ -466,7 +469,7 @@ sequences.
 | 0x5 | SET_ADDR | Set auto-increment base address (no response) |
 | 0x6 | BURST_SETUP | No response. addr = burst start address; payload `[7:0]` = AxLEN (beats − 1), `[10:8]` = AxSIZE, `[13:12]` = AxBURST |
 | 0x7 | BURST_WDATA | Queue one beat (payload, wstrb) of the burst write set up by `BURST_SETUP`. The bridge collects all AxLEN+1 beats before raising AW; each beat gets a response (OKAY when stored, the last one the write's B) |
-| 0x8 | BURST_RDATA | Request burst-read data: the next scan's Capture-DR shows the next burst FIFO word. The word a scan shows is popped at that scan's Update-DR whatever command it shifts in (`RESET` flushes the FIFO instead), so the first `BURST_RDATA` after `BURST_RSTART` is a priming scan |
+| 0x8 | BURST_RDATA | Request burst-read data: the next scan's Capture-DR shows the next burst FIFO word, or, when the FIFO is empty, the oldest queued response or no result. The word a scan shows is popped at that scan's Update-DR whatever command it shifts in (`RESET` flushes the FIFO instead), so the first `BURST_RDATA` after `BURST_RSTART` is a priming scan |
 | 0x9 | BURST_RSTART | Queue the burst read set up by `BURST_SETUP` (its own addr field is not used). AR goes out only when all beats fit in the burst FIFO; the burst's one response can arrive after its last data word |
 | 0xA | STREAM_RSTART | Start a streaming read: addr = start (word aligned), payload = word count. Only with `STREAM_EN=1` (`FEATURES[24]`); otherwise a NOP (nothing is queued, no response). |
 | 0xE | CONFIG | Latch config register `addr[15:0]` at Update-DR; the next scan shows it with `prev_valid=1`, and a queued AXI response stays queued for a later scan |

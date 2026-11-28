@@ -36,7 +36,7 @@ Drop the wrapper onto the AXI4-Lite interface you want to watch:
 fcapz_axi_mon_xilinx7 #(
     .ADDR_W(32), .DATA_W(32),
     .DEPTH(1024),        // capture depth (ELA)
-    .TRIG_STAGES(4),     // trigger sequencer stages (ELA)
+    .TRIG_STAGES(1),     // trigger sequencer stages (ELA); 1 for the address presets
     .DECODE_EN(1)        // P2: add the transaction-events word (see below)
 ) u_mon (
     .ACLK(aclk), .ARESETN(aresetn),
@@ -139,7 +139,11 @@ bit (from `mon.probe_map().probes`) in `cfg.trigger.value` and
 `cfg.trigger.mask` before `configure`. `read_addr_capture_config` is the
 read-channel mirror (`araddr` plus `arvalid`, same caveat for `arready`).
 It works on **both** `DECODE_EN` builds (the address is reached wherever it lands
-in the sample, not just the low 32 bits — see *Full-width triggering* below).
+in the sample, not just the low 32 bits — see *Full-width triggering* below),
+but needs `TRIG_STAGES=1`: its mask reaches above bit 31 (the `VALID` bit,
+and on a decode build the address too), and a sequencer stage compares
+only the low 32 bits, so `Analyzer.configure` refuses it on a multi-stage
+build (the wrapper default is 4).
 
 ## Full-width triggering (`WIDE_TRIG`)
 
@@ -166,9 +170,9 @@ built with both `DECODE_EN=1` and the ELA's storage qualifier (`STOR_QUAL=1`);
 
 ## The decode layer (`DECODE_EN=1`)
 
-With `WIDE_TRIG`, one value-match mask can already combine bits from several
-fields (that is how `write_addr_capture_config` matches `awaddr` plus
-`awvalid`), but it is still one AND-of-bits match. The decode layer prepends
+With `WIDE_TRIG` (on a `TRIG_STAGES=1` build), one value-match mask can
+already combine bits from several fields (that is how
+`write_addr_capture_config` matches `awaddr` plus `awvalid`), but it is still one AND-of-bits match. The decode layer prepends
 an **8-bit transaction-events word** at bit 0 so handshake/response events
 are triggerable as a group (e.g. "any error", pre-ORed in hardware). The
 events (each one combinational, one sample wide) are:
@@ -275,7 +279,7 @@ uses the lossless VCD/CSV paths (JSON download is disabled to avoid rounding).
 - **Bundled probe-map files** ship for `ADDR_W=DATA_W=32` only. Other
   geometries need no file at run time (`probe_map()` builds the map from the
   monitor's geometry); to use a CLI `--probe-file` or a saved `.prob`, export
-  the matching map with `fcapz axi-mon --write-probe-file` (the layout is in
+  the matching map with `fcapz axi-mon --write-probe-file axi.prob` (the layout is in
   [What gets captured](#what-gets-captured)).
 
 The design rationale, register-map plans, and phasing are in

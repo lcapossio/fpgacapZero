@@ -55,10 +55,10 @@ designed to fit on any FPGA with minimal resource usage.
 | `DEFAULT_TRIG_EXT` | 0 | Reset value of the external trigger mode (0-3) |
 | `REL_COMPARE` | 0 | Relational compare modes (`<`, `>`, `<=`, `>=`) |
 | `DUAL_COMPARE` | 1 | Comparator B and the combine modes (`0` = comparator A only) |
-| `USER1_DATA_EN` | 1 | USER1 DATA window readback and `DATA_OFFSET` (`0` = burst-only readout) |
+| `USER1_DATA_EN` | 1 | USER1 DATA window readback and `DATA_OFFSET` (`0` = no window readback; samples then need a burst path) |
 | `RLE_W` | 0 | Run-length capture count width (`0` = off, 1-16) |
 | `WIDE_TRIG` | 0 | Comparator A programmable across the full `SAMPLE_W` through `WIDE_SEL`/`WIDE_DATA` (only above 32 bits) |
-| `READBACK_RAM` | 1 | Keep the readback-only upper bits of value/mask registers (`SAMPLE_W < 32`) in a small inferred RAM; `0` = flops, for families without async-read LUT RAM (iCE40, Efinix) |
+| `READBACK_RAM` | 1 | Keep the readback-only upper bits of value/mask registers (`SAMPLE_W < 32`, `TRIG_STAGES > 1`) in a small inferred RAM; `0` = flops, for families without async-read LUT RAM (iCE40, Efinix) |
 
 Continuous (segment-ring) capture has no parameter of its own: it is built
 whenever `NUM_SEGMENTS > 1` and advertised by `COMPARE_CAPS` bit 23.
@@ -210,17 +210,18 @@ AXI work (reads, writes, burst beats, burst-read and stream starts) into an
 asynchronous command FIFO. In the `axi_clk` domain an FSM fetches each
 command and dispatches it; a separate write engine owns AW, W and B. Every
 queued command produces exactly one response (data + `resp`), pushed into an
-asynchronous response FIFO. A DR capture shows the oldest queued response
-with `prev_valid`, or no result (`prev_valid=0`, `busy`) while responses are
+asynchronous response FIFO. A DR capture shows the next burst word (after
+`BURST_RDATA`, when the burst FIFO has one) or else the oldest queued
+response with `prev_valid`, or no result (`prev_valid=0`, `busy`) while responses are
 still owed, so the host drains completions with wait scans. `SET_ADDR`,
 `BURST_SETUP`, `CONFIG` and `RESET` are handled on the TCK side; a `CONFIG`
 result appears on the next scan and leaves queued responses in place.
 
-**CDC strategy:** All TCK ↔ `axi_clk` traffic goes through asynchronous
-FIFOs (Gray-coded pointers, or AMD/Xilinx XPM FIFOs when
-`ASYNC_FIFO_IMPL=1`): the command FIFO (`CMD_FIFO_DEPTH`, default
-`2*FIFO_DEPTH`), the response FIFO (`RESP_FIFO_DEPTH`, default
-`2*FIFO_DEPTH`) and the burst-read data FIFO (`FIFO_DEPTH`). `RESET` crosses
+**CDC strategy:** Commands, responses and burst data cross TCK ↔ `axi_clk`
+through asynchronous FIFOs (Gray-coded pointers, or AMD/Xilinx XPM FIFOs
+when `ASYNC_FIFO_IMPL=1`): the command FIFO (`CMD_FIFO_DEPTH`), the
+response FIFO (`RESP_FIFO_DEPTH`) and the burst-read data FIFO
+(`FIFO_DEPTH`). `RESET` crosses
 as a toggle with an acknowledgment; new AXI commands are refused until it
 completes. The `CFG_AXI_STATUS` flags cross through per-bit 2-FF
 synchronisers.
@@ -230,7 +231,9 @@ synchronisers.
 beat's response carries the B. Illegal bursts (4 KB crossing, bad
 FIXED/WRAP, size, type, longer than `FIFO_DEPTH`) are refused with SLVERR
 before the bus. A burst read raises AR only when all its beats fit in the
-burst FIFO, so the R channel never waits on the host.
+burst FIFO (checked against `FIFO_DEPTH`), so the R channel does not wait
+on the host; `RREADY` still follows the FIFO's `full` flag, and the
+no-drain regression runs on the portable FIFO.
 
 **Burst timing:** The AXI-side timeout (`TIMEOUT` parameter) is a
 no-progress timeout on the bus: the write wait restarts on every AW, W or B
@@ -258,7 +261,7 @@ bandwidth you actually see.
 
 Parameters: `ADDR_W` (default 32), `DATA_W` (default 32), `FIFO_DEPTH`
 (default 16), `CMD_FIFO_DEPTH` and `RESP_FIFO_DEPTH` (default
-`2*FIFO_DEPTH`), `TIMEOUT` (default 4096 axi_clk cycles), `STREAM_EN`
+`2*FIFO_DEPTH` in Verilog, 32 in VHDL), `TIMEOUT` (default 4096 axi_clk cycles), `STREAM_EN`
 (default 0), `DEBUG_EN` (default 0), `ASYNC_FIFO_IMPL` (core default 0,
 portable FIFO; the AMD/Xilinx wrappers default to 1, XPM).
 
@@ -273,4 +276,4 @@ USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 | RTL lint | `python sim/run_sim.py --lint-only` | Shared `iverilog -Wall` elaboration target list used by CI |
 | Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core-manager, and channel-mux testbenches |
 | Hardware | `pytest examples/arty_a7/test_hw_integration.py` | Arty A7-100T hardware regression for the reference bitstream |
-| Hardware (other boards) | `pytest examples/<board>/test_hw_integration.py` | Per-board suites (see each example README), including the Arty S7-25 and DE0-Nano ELA + EIO examples (on `main`, unreleased; the contributor reported 3 passing tests on each board for PR #85) |
+| Hardware (other boards) | `pytest examples/arty_s7/test_hw_integration.py`, `pytest examples/de0_nano/test_hw_integration.py` | Arty S7-25 and DE0-Nano ELA + EIO examples (on `main`, unreleased; the contributor reported 3 passing tests on each board for PR #85); the other board examples ship their own suites (see each example README) |

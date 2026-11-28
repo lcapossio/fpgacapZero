@@ -42,13 +42,13 @@ the schema identifier, `"1.0"`; it is not the package version.
 | `depth` | int | always | Hardware buffer depth |
 | `pretrigger` | int | always | Configured pre-trigger sample (entry) count |
 | `posttrigger` | int | always | Configured post-trigger sample (entry) count |
-| `channel` | int | always | Probe mux channel captured (`NUM_CHANNELS > 1`; else 0) |
+| `channel` | int | always | Configured channel (`CaptureConfig.channel`; 0 on single-channel cores). On a `PROBE_MUX_W > 0` core the `PROBE_SEL` slice is captured instead |
 | `decimation` | int | always | Decimation ratio (0 = every sample clock) |
 | `stor_qual_mode` | int | always | Storage qualification mode (0 = off) |
 | `ext_trigger_mode` | int | always | External trigger mode (0 = disabled, 1 = OR, 2 = AND) |
 | `trigger` | object | always | Simple trigger configuration (`mode`: `value_match`, `edge_detect` or `both`; `value`; `mask`). Sequencer stages are not recorded. |
 | `overflow` | bool | always | True if the hardware overflow flag was set |
-| `segment` | int | always | Segment the samples came from (0 when unsegmented) |
+| `segment` | int | always | Segment index given to `capture_segment()` or read by `stream_segments`. Plain `capture()` reports 0, though it reads whichever segment `SEG_SEL` selects |
 | `samples` | array | always | Captured samples (entries) as `{index, value}` objects |
 | `probes` | array | when the capture had a probe map | `{name, width, lsb}` per named lane |
 | `timestamps` | array | `TIMESTAMP_W > 0` | `{index, value}`: raw hardware timestamp of each sample |

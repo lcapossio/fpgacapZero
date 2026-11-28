@@ -552,8 +552,8 @@ omitted `value_a` / `value_b` is 0):
 ```json
 {
   "cmp_a":      0,           // 0..8 — compare mode A (default 0 = EQ)
-  "cmp_b":      0,           // 0..8 — compare mode B (needs DUAL_COMPARE=1)
-  "combine":    0,           // 0=A, 1=B, 2=A&B, 3=A|B (default 0)
+  "cmp_b":      0,           // 0..8 — compare mode B (used when combine selects B)
+  "combine":    0,           // 0=A, 1=B, 2=A&B, 3=A|B (default 0; nonzero needs DUAL_COMPARE=1)
   "next_state": 0,           // which stage to advance to (default 0)
   "is_final":   false,       // true on the final stage that fires the trigger
   "count":      1,           // advance after this many matches (default 1)
@@ -1094,9 +1094,12 @@ code 2):
   `Analyzer.configure()`
 - `--trigger-sequence`: malformed JSON, an unreadable file or a value that
   is not a JSON array
-- anything the bitstream cannot do (more stages than `TRIG_STAGES`, a
-  relational compare without `REL_COMPARE=1`, comparator B without
-  `DUAL_COMPARE=1`, ...)
+- features the bitstream lacks: more stages than `TRIG_STAGES`, a
+  relational compare without `REL_COMPARE=1`, a nonzero `combine` without
+  `DUAL_COMPARE=1`, storage qualification or run-length capture the core
+  was built without, a trigger above 32 bits without `WIDE_TRIG`.
+  Decimation and the external-trigger mode are not checked; a core built
+  without them ignores the writes
 
 **By the transport**, with rules that depend on the backend: for example
 `--tap`, `--program` and `--host` are checked before they reach an XSDB or

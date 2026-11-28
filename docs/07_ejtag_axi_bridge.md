@@ -154,8 +154,9 @@ never be that command's own result.  AXI completions come back
 between show `busy` (or nothing) while the AXI side works.  The host
 therefore submits its commands and then drains responses with wait
 scans (NOP, or BURST_RDATA during a burst read) until it has seen as
-many results as it queued; with a fast slave the result is often in
-the very next scan, but nothing guarantees it.  CONFIG is a separate
+many results as it queued (a burst read's data words and its one
+response are counted separately); with a fast slave the result is often
+in the very next scan, but nothing guarantees it.  CONFIG is a separate
 pipeline: its answer is in the next scan, and any queued AXI response
 is left for the scan after.
 
@@ -297,7 +298,8 @@ Issues one `SET_ADDR` then `count` `READ_INC` commands plus NOP
 drain scans, all in **one batched JTAG sequence** via
 `raw_dr_scan_batch()`, and keeps the first `count` valid results.  The
 command queue can take reads faster than the AXI side completes them,
-so the drain continues until every queued read has answered.
+so the batch carries `count + 16` NOP drain scans, and the call raises
+`AXIError` if a read is still unanswered after them.
 It is much faster than issuing one single read per word because the
 inter-scan tool overhead is amortised in one batch.
 
@@ -491,7 +493,8 @@ is written in the same cycle it is accepted, so no beat is dropped or
 written twice.  Together with the admission check above (on bridges
 with `FEATURES[25]`, a burst read goes out only when all its beats fit
 in the room left in the FIFO), the R channel does not wait for the
-host to pop words.  (Historically, before both fixes, a registered
+host to pop words (the no-drain regression runs on the portable FIFO).
+(Historically, before both fixes, a registered
 `rready` accepted a beat in the cycle the FIFO filled and dropped it;
 the AMD/Xilinx XPM FIFO reports full at `FIFO_DEPTH - 1`, so a 16-beat
 read on a 16-deep XPM FIFO failed with SLVERR, and a full FIFO could

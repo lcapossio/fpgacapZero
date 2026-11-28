@@ -476,8 +476,9 @@ The analyzer picks the readout path per capture:
   timestamp burst (32 bits on the JTAG transports), it uses
   `transport.read_timestamp_block()`.
 - Everything else (no burst path, `--no-burst`, a 48-bit timestamp on
-  a JTAG transport, a transport without these methods, or a burst the
-  transport reports unavailable) reads the timestamp words through the
+  a JTAG transport where the single-chain helper does not apply, a
+  transport without these methods, or a burst the transport reports
+  unavailable) reads the timestamp words through the
   USER1 DATA window (in `DATA_OFFSET` pages past the end of the
   16-bit window, on cores that have it).  That is correct but
   significantly slower.

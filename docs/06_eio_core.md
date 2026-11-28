@@ -243,8 +243,9 @@ eio.close()
 
 Closes the transport (`Transport.close()`); on a transport shared with
 other controllers that closes it for them too.  What a later call does
-depends on the transport, so `connect()` again (or construct a new
-`EioController`) before using the EIO after `close()`.
+depends on the transport, so call `connect()` again (on this or a new
+`EioController`), or `attach()` once the shared transport is open again,
+before using the EIO after `close()`.
 
 ## Worked example: a runtime control register
 

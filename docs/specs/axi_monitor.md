@@ -139,8 +139,9 @@ maps (`host/fcapz/probes/axi4lite_32.prob`, `axi4lite_32_decode.prob`).
 In the plan, `SAMPLE_W` is computed from `PROTO`, the widths, and
 `CAP_CHANNELS`; full AXI4 adds `*ID/*LEN/*SIZE/*BURST/*LAST`, and a generator
 emits both the RTL slice constants and the matching probe map so they never
-drift. The shipped module captures all five channels, and its probe maps are
-kept in lockstep with the RTL (no generator yet).
+drift. The shipped module captures all five channels; its probe maps are
+generated from `fcapz.axi_layout` by `tools/gen_axi_probes.py`, and the RTL
+slice layout is kept in lockstep with that by hand.
 
 ### Transaction decoder (P2)
 
