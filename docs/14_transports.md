@@ -28,11 +28,11 @@ that setup even though the bridge was alive, while the same USER4
 traffic worked when kept inside one `raw_dr_scan_batch()` / single
 XSDB `jtag sequence`.
 
-There is also `read_block(addr, words)` for batched register reads,
-which by default falls back to a loop of `read_reg()` but can be
-overridden by transports that want to batch round-trips for
-throughput (the AMD/Xilinx hw_server transport does this for the ELA
-burst readback). Default AMD/Xilinx builds keep those wide burst scans on
+There is also `read_block(addr, words)` for batched register reads.
+It is abstract, so every transport implements it: a loop of
+`read_reg()` is enough, and transports that want to batch round-trips
+for throughput do more (the AMD/Xilinx hw_server transport uses it for
+the ELA burst readback). Default AMD/Xilinx builds keep those wide burst scans on
 the selected ELA control chain; pass `single_chain_burst=False` only
 for legacy two-chain builds.
 
@@ -43,6 +43,11 @@ readout: None"), and every capture is then read through the register
 window. Otherwise a burst that fails is raised, with a hint naming the
 option that matches the build; it is never read around, since a JTAG
 fault mid-burst would otherwise come back as a slow, silent re-read.
+The frontends do not pass these options to every backend: the serial TAP
+bridge takes `burst=False` from Python only (the CLI and RPC build it from
+the port and baud rate alone), and `QuartusStpTransport` always bursts on its
+own data chain, so it ignores `single_chain_burst` / CLI
+`--two-chain-burst`.
 
 The 256-bit burst DR packs **whole samples** per scan, so `read_block`
 uses it only when a sample fits one 32-bit word (`SAMPLE_W <= 32`); it
@@ -65,8 +70,12 @@ completes — a hard readback hang, not a throughput issue.
 Every burst readback is a single pass.  The `BURST_PTR` write, the
 staging-fill idle (real TCKs) and every burst scan run as one JTAG
 transaction, so nothing else can reach the chain mid-burst, and the first
-scan, which primes the staging register, is discarded.  Burst data carries
-no framing or CRC: the reference Arty and DE25-Nano hardware tests capture a
+scan, which primes the staging register, is not returned as data.  Behind a
+core manager that advertises the burst header (`MGR_CAPS` bit 4), that
+priming scan carries a header (slot, start pointer, sample width, epochs)
+which the host checks, raising `BurstIntegrityError` on a mismatch; otherwise
+it is discarded.  The sample payload itself carries no CRC: the reference
+Arty and DE25-Nano hardware tests capture a
 free-running counter and require adjacent samples to increment by +1 when
 decimation is disabled.  Designs with critical readback requirements should
 check a similar application-level invariant.
@@ -87,7 +96,9 @@ spec you implement against if you're adding a new backend.
 
 Drives Vivado's `hw_server` daemon via `xsdb` (the AMD/Xilinx system
 debugger console).  This is the **default for AMD/Xilinx boards** and
-hardware-validated on Arty A7-100T (direct FTDI is too).
+hardware-validated on Arty A7-100T (direct FTDI is too).  The Arty S7-25
+example added after 0.5.2 (unreleased, PR #85) also runs over it: its
+contributor reported its 3 hardware tests (probe, capture, EIO) passing.
 
 ```python
 from fcapz import XilinxHwServerTransport
@@ -98,7 +109,7 @@ t = XilinxHwServerTransport(
     fpga_name="xc7a100t",                 # JTAG target name
     bitfile="my_design.bit",              # optional, programs FPGA on connect
     ir_table=None,                        # default = 7-series IR codes
-    ready_probe_addr=0x0000,              # ELA VERSION register
+    ready_probe_addr=0x0000,              # polled after programming until non-zero
     ready_probe_timeout=2.0,              # seconds
     read_timeout_sec=None,                # None = $FCAPZ_XSDB_TIMEOUT or 60 s
 )
@@ -119,7 +130,13 @@ What `connect()` does:
 
 1. Spawns `xsdb` as a subprocess (uses `xsdb_path` if set,
    otherwise looks on `PATH`).
-2. Sends `connect -url tcp:HOST:PORT` to xsdb's stdin.
+2. Sends `connect -url {tcp:HOST:PORT}` to xsdb's stdin, braced as one
+   Tcl word.  The host and port are checked when the transport is
+   constructed: a host that is not a DNS name or an IPv4 address (XSDB
+   takes no IPv6 literal) or a port that is not a whole number in
+   `1..65535` is refused.  Both the braces and the checks are on `main`,
+   unreleased; 0.5.2 sends `tcp:HOST:PORT` unchecked.  See
+   [TCL injection prevention](#tcl-injection-prevention).
 3. If `bitfile` is set: waits for a live FPGA target (step 4), selects the
    **configuration target** (see below), then sends `fpga -file {BITFILE}`
    and `after <ms>` (GUI default 200 ms post-program delay).
@@ -185,7 +202,7 @@ Verified on a chain carrying an Arty A7 (`xc7a100t`), a KV260 (`xck26`) and a
 ZCU-class board (`xczu7`) simultaneously, xsdb 2025.2.
 
 > [!NOTE]
-> **Fixed in this release.** Programming previously filtered `targets` by the
+> **Fixed in 0.5.0.** Programming previously filtered `targets` by the
 > part name, which matches nothing on MPSoC. xsdb printed an error, the
 > transport discarded it, `fpga -file` loaded nothing, and the session then ran
 > against whatever configuration was already in the FPGA — wrong data with no
@@ -264,8 +281,9 @@ Two methods serve the EJTAG-AXI [streaming read](07_ejtag_axi_bridge.md#streamin
 
 Talks to OpenOCD's TCL listener (default port `6666`) via raw
 `irscan` / `drscan` commands.  Cross-platform, vendor-neutral,
-**slower than hw_server** because OpenOCD's batched-scan support
-is limited.
+usually **slower than hw_server** per scan.  Each batch of scans goes to
+OpenOCD as one Tcl command line (a run of identical scans becomes a Tcl
+`for` loop), so no other client can interleave a scan within a batch.
 
 ```python
 from fcapz import OpenOcdTransport
@@ -321,9 +339,12 @@ bridge on the FlashPro5, 1024 8-bit samples come back in about 0.06 s; the
 same capture through the register window took about 41 s.  How fast it goes
 depends mostly on the adapter path.
 
-- **Default:** on for the PolarFire preset (`openocd_burst_default()`), off
-  otherwise.  The CLI's `--burst` / `--no-burst` and the RPC's `"burst"`
-  override it.  Gowin wrappers have no burst engine.  The ECP5 and Intel
+- **Default:** the constructor defaults to `burst=False` for every IR table,
+  the PolarFire preset included; Python callers pass `burst=True`.  The CLI,
+  RPC and GUI turn it on for the PolarFire preset
+  (`openocd_burst_default()`) and leave it off otherwise.  The CLI's
+  `--burst` / `--no-burst` and the RPC's `"burst"` override that.  Gowin
+  wrappers have no burst engine.  The ECP5 and Intel
   wrappers burst on a second chain only (`single_chain_burst=False`, CLI
   `--two-chain-burst`).  Burst over OpenOCD is hardware-validated on
   PolarFire only.
@@ -365,7 +386,8 @@ The CLI and board discovery select it for a tap name starting with `MPF`.
 - On PolarFire SoC the MSS RISC-V debug module answers at IR `0x10`/`0x11`.
   Declare only the FPGA TAP in the OpenOCD config (no RISC-V `target create`)
   unless you also debug the MSS, and keep the fcapz IRs out of that range.
-- With the PolarFire preset, captures are read by burst (see above): on USER1
+- With the PolarFire preset, the CLI, RPC and GUI read captures by burst (see
+  above; in Python pass `burst=True`): on USER1
   by default (`SINGLE_CHAIN_BURST=1`), or on USER2 for a
   `SINGLE_CHAIN_BURST=0` build (`single_chain_burst=False`).
 - On Windows, Microchip's FlashPro driver owns the embedded FlashPro5's JTAG
@@ -562,8 +584,9 @@ wrappers keep 256, where the scan engine is free silicon.
 
 All of those wide scans travel as **one** `CMD_BREAD` command and one reply
 (bridge protocol 2 and later).  That is not mainly a byte saving — it removes a
-USB CDC round trip per scan, and a 1024-sample readback is ~33 of them, which
-costs about as much as the bytes do.  A protocol-1 bridge is driven one scan at
+USB CDC round trip per scan, and a 1024-sample 8-bit readback on the default
+64-bit DR is 129 of them (128 data scans plus the prime; about 33 on a 256-bit
+DR), which costs about as much as the bytes do.  A protocol-1 bridge is driven one scan at
 a time instead; the result is identical either way.
 
 The burst width defaults to the bridge's `MAX_DR_BITS`, since `fcapz_ela_uart`
@@ -727,9 +750,9 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   library explicitly.
 - **libusb.** An adapter bound to WinUSB or libusbK on Windows (as OpenOCD
   or Zadig sets it up), or any adapter on Linux and macOS without FTDI's
-  library, works through libusb: `pip install fpgacapzero[usb]` (pyusb and
-  a bundled libusb; until the next release, `pip install -e ".[usb]"` from a
-  `main` checkout), then name the channel with a `usb:` selector.  `usb:`
+  library, works through libusb: `pip install "fpgacapzero[usb]"` (pyusb and
+  a bundled libusb; released in 0.5.2), then name the channel with a `usb:`
+  selector.  `usb:`
   alone picks the one known adapter, `usb:Digilent USB Device A` names it
   by description and `usb:<serial>` by serial.  libusb channels are named as
   D2XX names them (product string, channel letter on a multi-channel chip),
@@ -746,9 +769,12 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   process share one handle: for example the ELA, EIO and bridge sessions of
   the RPC server or the GUI.  The first transport's clock, layout and sample
   edge apply,
-  and the channel closes with the last transport.  A channel is matched by
-  USB VID/PID, serial and channel letter, so a D2XX name and a `usb:` name
-  for the same channel share it.  If a USB transfer fails partway, the
+  and the channel closes with the last transport.  Two libusb channels are
+  matched by where libusb found them (USB location and interface), which
+  also tells apart adapters that share a serial number or have none.
+  Across backends a channel is matched by USB VID/PID, serial and channel
+  letter, so a D2XX name and a `usb:` name for the same channel share it
+  when the adapter has a serial.  If a USB transfer fails partway, the
   channel closes for every transport on it (the adapter may be left
   mid-command); each refuses I/O until it connects again, which opens the
   channel afresh.  A channel opened with `open_pins()` (`fcapz
@@ -772,14 +798,18 @@ CLI: `fcapz --backend ftdi probe`.  `--hardware` names the channel,
   channel the same way, and any other call stops at its next USB transfer,
   leaving other transports on the channel working.  A batch of scans
   longer than about a quarter second of TCK (a very wide `raw_dr_scan` at
-  a slow clock) goes in pieces of that length, each waited for, so no USB
-  transfer outlasts `timeout_ms`; a cancel between pieces returns the TAP
-  to Run-Test/Idle first.  The
+  a slow clock) goes in pieces of that length, or of half the channel's
+  USB timeout when that is shorter, each waited for, so no USB transfer
+  outlasts `timeout_ms`; a cancel between pieces returns the TAP to
+  Run-Test/Idle first.  On `main` (unreleased) programming and long idle
+  clocks use the same capped piece; in 0.5.2 they always use a quarter
+  second.  The
   Arty A7's `xc7a100t` loads in 1.2 s at 30 MHz and 5.2 s at 6 MHz.
   Single-die UltraScale takes the same sequence but is not
   hardware-validated.
 
-  A Gowin GW1NR-9C (IDCODE `0x1100481B`) takes a `.fs` instead, loaded into
+  On `main` (unreleased, not in 0.5.2), a Gowin GW1NR-9C (IDCODE
+  `0x1100481B`) takes a `.fs` instead, loaded into
   SRAM only: the flash is never written, so a power cycle boots the flash
   image again.  The sequence is the one Gowin's programmer uses on that
   part: erase the SRAM, load each configuration frame in a DR scan of its
@@ -1097,51 +1127,60 @@ GUI users never have to remember the codes.
 
 ## Readiness wait
 
-`XilinxHwServerTransport.connect()` does **not** return until the
-FPGA is alive and responding on the JTAG chain.  After programming
-the bitstream, the host polls the configured `ready_probe_addr`
-register every 50 ms until it returns a non-zero value or
-`ready_probe_timeout` seconds elapse.
+When `XilinxHwServerTransport.connect()` programs a bitstream
+(`bitfile=` set) and `ready_probe_addr` is not `None`, it does **not**
+return until the FPGA answers on the JTAG chain.  After programming
+and selecting the target, the host polls the `ready_probe_addr`
+register on the active chain (USER1 by default) every
+`ready_poll_interval_sec` (default 20 ms) until it returns a non-zero
+value or `ready_probe_timeout` seconds elapse.  A connect without
+`bitfile` (attach to the image already in the FPGA) skips the poll.
 
 ```python
 t = XilinxHwServerTransport(
     port=3121,
     fpga_name="xc7a100t",
     bitfile="my_design.bit",
-    ready_probe_addr=0x0000,        # ELA VERSION register (default)
+    ready_probe_addr=0x0000,        # default
     ready_probe_timeout=2.0,        # 2 seconds is plenty for any 7-series
 )
 t.connect()
-# At this point the FPGA is provably alive — Analyzer.probe() will succeed
+# The chain now answers with a non-zero value at 0x0000.  That is not an
+# identity check: Analyzer.probe() still verifies the core separately.
 ```
+
+Any non-zero value passes: an ELA's `VERSION` on an unmanaged chain,
+or the core manager's identity (`"CM"`) at `0x0000` on a managed one.
 
 If the timeout elapses, the transport raises:
 
 ```
 ConnectionError: FPGA did not become ready within 2.0s after program()
-(probe addr=0x0000, last_value=0x00000000, attempts=40).
+(probe addr=0x0000, last_value=0x00000000, attempts=...).
 Either the bitstream failed to load, the wrong fpga_name was selected,
 or the probe register address is wrong for this design.
 ```
 
-Three things this catches:
+The message names three causes, but by the time the poll runs
+`connect()` has already selected the target matching `fpga_name`
+and checked it with an IDCODE scan, so a part name that matches no
+target fails earlier, during target selection.  What the timeout
+usually means:
 
 1. **Bitstream failed to load** — Vivado's `fpga -file` reported
    success but the FPGA didn't actually configure.  Sometimes
    happens with corrupted bitfiles or USB issues.
-2. **Wrong fpga_name** — you typed `xc7a100t` but your board is
-   `xc7a35t` and Vivado bound the wrong target on the chain.
-3. **Wrong probe address** — your design doesn't have an ELA core
-   on USER1 at register `0x0000`.  Pass
-   `ready_probe_addr=None` to skip the wait if you genuinely
-   don't have an ELA in your bitstream (e.g. you only have the
-   AXI bridge).
+2. **Nothing non-zero at the probe address** — the design has no
+   register at `ready_probe_addr` on the active chain that reads
+   non-zero once configured (no ELA or core manager on USER1, for
+   example).  Pass `ready_probe_addr=None` to skip the wait for
+   such a design (e.g. one with only the AXI bridge).
 
 The wait was added in v0.2.0 and eliminated a class of "first read
 returns garbage" race conditions where tests would `connect()`,
 immediately read the ELA's identity, and get back zeros from a
-not-yet-configured FPGA.  Now `connect()` either succeeds with a
-provably-alive FPGA or fails loudly.
+not-yet-configured FPGA.  It only shows that the chain answers;
+`Analyzer.probe()` is the identity check.
 
 ## TCL injection prevention
 
@@ -1166,10 +1205,10 @@ a double-quoted TCL string in the `targets -set -filter` command).
 where backslash is fine but `{`/`}`/`"` are not — Windows paths
 need backslash, hence the split).
 
-If either pattern fails to match, the transport raises
-`ValueError: bitfile path contains unsafe characters for TCL`
-**before** sending anything to xsdb.  This means a CLI invocation
-like:
+If either pattern fails to match, the transport raises `ValueError`
+(`fpga_name contains unsafe characters for TCL` or `bitfile path
+contains unsafe characters for TCL`) **before** sending anything to
+xsdb.  This means a CLI invocation like:
 
 ```bash
 fcapz --tap 'xc7a100t"; exec rm -rf /' probe
@@ -1177,6 +1216,17 @@ fcapz --tap 'xc7a100t"; exec rm -rf /' probe
 
 dies at the host with a clear error instead of executing arbitrary
 TCL inside Vivado's xsdb session.
+
+On `main` (unreleased), the `hw_server` host and port are checked the
+same way, by `hw_server_url()`, both in the constructor and in the
+target scan (`list_xilinx_hw_server_targets()`, behind the GUI's
+**Scan** button and RPC `scan_targets`): the host must be a DNS name or
+an IPv4 address (XSDB takes no IPv6 literal, so `::1` is refused; use
+`localhost`), the port a whole number in `1..65535`, and the URL goes to
+XSDB braced as one Tcl word.  A front end may apply its own host
+allowlist first (the MCP server does); this check still applies after
+it.  A target scan whose connect or `jtag targets` fails now raises
+instead of returning an empty target list.
 
 The unit tests in
 [`tests/test_transport.py`](../tests/test_transport.py) cover
@@ -1227,6 +1277,10 @@ class MyTransport(Transport):
     def write_reg(self, addr: int, value: int) -> None:
         ...
 
+    def read_block(self, addr: int, words: int) -> list[int]:
+        # abstract in the ABC: a plain loop is enough to start with
+        return [self.read_reg(addr + 4 * i) for i in range(words)]
+
     # Optional override for throughput:
     def raw_dr_scan_batch(self, scans: list[tuple[int, int]], *, chain=None) -> list[int]:
         # default falls back to a loop of raw_dr_scan; override if your
@@ -1238,13 +1292,17 @@ Once that's done, your transport drops into any controller:
 
 ```python
 t = MyTransport(...)
-t.connect()
 analyzer = Analyzer(t)
-analyzer.connect()
+analyzer.connect()      # calls t.connect() itself; don't connect twice
 ```
 
-No other code changes.  The whole point of the ABC is that the
-controllers don't care which cable they're talking through.
+A second controller on the same, already connected transport uses
+`attach()` instead of `connect()`.
+
+No controller changes.  The whole point of the ABC is that the
+controllers don't care which cable they're talking through.  (To offer
+the backend in the CLI, RPC or GUI as well, add it to their transport
+factories.)
 
 ### Existing transport reference implementations
 
@@ -1253,7 +1311,7 @@ for the full implementations of:
 
 - `OpenOcdTransport` — TCP socket to OpenOCD's TCL listener;
   ~150 LOC; the simplest reference impl
-- `QuartusStpTransport` â€” subprocess + `quartus_stp` Tcl framing
+- `QuartusStpTransport` — subprocess + `quartus_stp` Tcl framing
   for Intel/Altera USB-Blaster access to `sld_virtual_jtag`
   instances via `device_virtual_ir_shift` / `device_virtual_dr_shift`
 - `XilinxHwServerTransport` — subprocess + xsdb stdin/stdout
@@ -1280,7 +1338,9 @@ something new.
    If your transport doesn't switch the IR opcode
    between calls, you'll silently scan against the wrong chain
    and read garbage.  The cooperating controller pattern only works
-   if your `select_chain` actually emits a new `irscan`.
+   if every scan after `select_chain(n)` reaches chain `n`: shift
+   the IR right away, or (as the built-in transports may) remember
+   the chain and shift its IR as part of the next operation.
 4. **Not raising the right exceptions.**  The host stack and the
    tests assume:
    - `RuntimeError` if called before `connect()` or after `close()`
@@ -1310,13 +1370,14 @@ will differ.
 **OpenOCD:** hardware-validated on Gowin BRS-100-GW1NR9 and the PolarFire
 SoC Discovery Kit, but not yet
 benchmarked with the same detail as the Arty A7 `hw_server` path. Expect it
-to be slower than `hw_server` per scan because OpenOCD's TCL listener has
-limited batched-scan support, but the delta is not documented until somebody
-benchmarks it.
+to be slower than `hw_server` per scan (each batch is still one Tcl command
+line), but the delta is not documented until somebody benchmarks it.
 
 **Quartus USB-Blaster:** hardware probe/capture is validated on the
 DE25-Nano (Agilex 5); see [`specs/transport_api.md`](specs/transport_api.md) for
-the tested Quartus edition.  Latency depends heavily on Quartus Tcl
+the tested Quartus edition.  The DE0-Nano (Cyclone IV E) example added
+after 0.5.2 (unreleased, PR #85) runs over it with Quartus II 13.1: its
+contributor reported its 3 hardware tests (probe, capture, EIO) passing.  Latency depends heavily on Quartus Tcl
 startup and USB-Blaster speed; `QuartusStpTransport` keeps one
 `quartus_stp` process alive and batches composite reads under one
 `device_lock` to avoid avoidable round trips.

@@ -1,4 +1,4 @@
-# Transport API — v0.4.0
+# Transport API
 
 ## Purpose
 Abstracts access to the JTAG register map across different backends (AMD/Xilinx
@@ -7,14 +7,25 @@ Abstracts access to the JTAG register map across different backends (AMD/Xilinx
 ## Interface (Python)
 ```python
 class Transport(ABC):
-    def connect() -> None
-    def close() -> None
-    def read_reg(addr: int) -> int
-    def write_reg(addr: int, value: int) -> None
-    def read_block(addr: int, words: int) -> list[int]
+    # Abstract: every transport implements these.
+    def connect(self) -> None
+    def close(self) -> None
+    def read_reg(self, addr: int) -> int
+    def write_reg(self, addr: int, value: int) -> None
+    def read_block(self, addr: int, words: int) -> list[int]
+
+    # Optional hooks with a base implementation.  select_chain() and
+    # raw_dr_scan() raise NotImplementedError unless overridden (a
+    # multi-chain transport overrides select_chain; raw-scan users such as
+    # the EJTAG bridges need raw_dr_scan); the others fall back to them.
+    def select_chain(self, chain: int) -> None
+    def raw_dr_scan(self, bits: int, width: int, *, chain: int | None = None) -> int
+    def raw_dr_scan_batch(self, scans: list[tuple[int, int]], *, chain: int | None = None) -> list[int]
+    def raw_dr_capture(self, width: int, *, chain: int | None = None, tdi: int = 0) -> int
+    def cancel(self) -> None              # base: close()
 
     # Optional — implement for timestamp burst readback acceleration:
-    def read_timestamp_block(addr: int, words: int, timestamp_width: int) -> list[int]
+    def read_timestamp_block(self, addr: int, words: int, timestamp_width: int) -> list[int]
 ```
 
 `read_timestamp_block` is an **optional extension method**, not part of the ABC
@@ -33,9 +44,12 @@ path for timestamp data.
   analyzer expected, or the hub or slot was reset under it (epochs changed).
   Raised to the caller.
 - Any other exception from a burst propagates; nothing reads around it.
-- `burst: bool = True` (constructor of the hw_server and Quartus transports) —
-  declares whether the bitstream has a burst path.  It is never probed:
-  `False` reads every capture through the register window.
+- `burst` (constructor) — declares whether the bitstream has a burst path.
+  It is never probed: `False` reads every capture through the register
+  window.  Defaults: `True` for the hw_server, Quartus and TAP-bridge /
+  serial transports; `False` for `OpenOcdTransport` (the CLI, RPC and GUI
+  turn it on for the PolarFire IR table); `None` for `FtdiMpsseTransport`,
+  meaning the detected family's wrapper default.
 - `burst_start_sync: bool` (attribute, default `False`) — set by the
   analyzer before a burst on a core manager with two or more slots and
   `MGR_CAPS` bit 2 clear.  The transport then adds, ahead of the prime scan
@@ -59,15 +73,17 @@ path for timestamp data.
   burst rather than reading the register window.  A window read ends at
   `data_window_end`, so the analyzer pages it through `DATA_OFFSET` when it
   would pass the end; a burst does not.  The base returns `False`; the
-  hw_server and Quartus transports return whether they would burst, and
-  decide their own `read_block` with it.
+  hw_server, Quartus, OpenOCD, FTDI and TAP-bridge transports return whether
+  they would burst, and decide their own `read_block` with it.
 - `release_manager_ownership()` — writes 0 to `MGR_OWNER` on each manager
   where this session wrote its token and the token is still there.  The
   token is written the first time the session selects a slot on a manager
   with `MGR_CAPS` bit 3; a different nonzero token found there is logged as a
   warning, not obeyed.  The hw_server, Quartus and OpenOCD transports call
   it from `close()` (not `close_fast()`), unless a scan is in flight on
-  another thread.
+  another thread.  The FTDI transport calls it from a normal `close()`
+  under the channel lock (bounded wait), but not after a cancel or a broken
+  channel.
 
 ### Core-manager slot selection
 
@@ -147,11 +163,15 @@ For `SINGLE_CHAIN_BURST=1`, the burst-chain steps below remain on the
 selected ELA control chain instead of switching to USER2.
 1. IR shift to the ELA control chain, DR shift to write `BURST_PTR` (0x002C) — triggers
    staging buffer fill from `start_ptr`.
-2. Idle 40 TCK cycles (staging buffer needs ~33 cycles to load).
+2. Idle 160 TCK cycles (`BURST_PREFILL_IDLE_CYCLES`) for the staging buffer
+   to load.
 3. Perform N × 256-bit DR scans with capture. Legacy two-chain builds switch
    IR to USER2 first; default single-chain builds stay on the selected ELA
-   control chain.
+   control chain.  The first scan primes staging and returns no samples:
+   with `burst_expect` set (a core manager with `MGR_CAPS` bit 4) it is
+   checked as the burst header, otherwise it is discarded.
 4. Parse: each captured 256-bit token contains packed samples LSB-first.
+   Sample payloads carry no CRC.
 
 ### `OpenOcdTransport`
 - Connects to OpenOCD TCL socket (default port 6666).
@@ -159,8 +179,9 @@ selected ELA control chain instead of switching to USER2.
 - Hardware-validated on Gowin BRS-100-GW1NR9 and on the PolarFire SoC
   Discovery Kit. The AMD/Xilinx/OpenOCD path is still less exercised than the
   `hw_server` backend.
-- With `burst=True` (the default for the PolarFire IR table), captures are
-  read by burst.  The whole burst, with its slot select ahead of `BURST_PTR`,
+- With `burst=True`, captures are read by burst.  The constructor defaults
+  to `burst=False` for every IR table; the CLI, RPC and GUI pass `True` for
+  the PolarFire IR table (`openocd_burst_default()`).  The whole burst, with its slot select ahead of `BURST_PTR`,
   is one Tcl command line; repeated scans become a Tcl `for` loop, so the line
   stays short at any depth.  Hardware-validated on the PolarFire SoC
   Discovery Kit.
