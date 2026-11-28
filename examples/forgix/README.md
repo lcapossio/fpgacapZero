@@ -10,7 +10,7 @@ board pairing an Efinix Trion T8F49 with a Raspberry Pi RP2354.
 
 This is a worked example of the generic UART TAP path, not a special case: the
 RTL and the host transport it uses are board- and vendor-agnostic. See
-[`docs/14_transports.md`](../../docs/14_transports.md#tapbridgetransport) for
+[`docs/14_transports.md`](../../docs/14_transports.md#tapbridgetransport-and-serialtaptransport) for
 the general mechanism.
 
 ## Quick start
@@ -245,7 +245,10 @@ returning garbage. `baudrate` must match the firmware's `FCAPZ_BRIDGE_BAUD_HZ`
 
 In the web GUI (`fcapz-web`, see
 [docs/18_web_interface.md](../../docs/18_web_interface.md)), pick the
-**serial** backend and enter the port.
+**serial** backend, pick the board's port from the **Serial port**
+suggestions (**Rescan ports** refreshes them), and keep **Baud** at its
+`1000000` default.  On `main` (unreleased), the web server opens only a
+port the OS lists, so pick the board's entry rather than typing a path.
 
 ## Fitting the core in a T8
 

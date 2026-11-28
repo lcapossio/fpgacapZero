@@ -12,7 +12,7 @@ Every fcapz core ships in two flavors:
 
 | Flavor | Files | Use when |
 |---|---|---|
-| **Vendor wrapper** | `rtl/fcapz_*_xilinx7.v`, `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v`, `_polarfire.v`, `_efinix.v` (not every core exists for every vendor; Efinix has the ELA and the core-manager hub) | **Almost always.** Single instantiation, bundles the TAP primitive + register interface + core internally.  No JTAG knowledge required. |
+| **Vendor wrapper** | `rtl/fcapz_*_xilinx7.v`, `_xilinxus.v`, `_ecp5.v`, `_intel.v`, `_gowin.v`, `_polarfire.v`, `_efinix.v` (not every core exists for every vendor; Efinix has the ELA, the core-manager hub and the AXI monitor) | **Almost always.** Single instantiation, bundles the TAP primitive + register interface + core internally.  No JTAG knowledge required. |
 | **Vendor-agnostic core** | `rtl/fcapz_ela.v`, `fcapz_eio.v`, `fcapz_ejtagaxi.v`, `fcapz_ejtaguart.v` | Only if you already have your own JTAG TAP plumbing.  Advanced use.  `fcapz_ejtagaxi` and `fcapz_ejtaguart` take the TAP signals (`tck`/`tdi`/`tdo`/`capture`/`shift`/`update`/`sel`) directly.  `fcapz_ela` and `fcapz_eio` take a decoded register bus (`jtag_clk`, `jtag_wr_en`, `jtag_addr`, `jtag_wdata`, `jtag_rdata`, ...); put [`jtag_reg_iface`](../rtl/jtag_reg_iface.v) (49-bit register DR) or [`jtag_pipe_iface`](../rtl/jtag_pipe_iface.v) (register DR plus single-chain 256-bit burst) between your TAP and the core, as the wrappers do. |
 
 **99% of users want the wrappers.**  This chapter is about wrappers.
@@ -58,7 +58,12 @@ validates the PolarFire wrapper. The Kria KV260 test
 ([`examples/kv260`](../examples/kv260/)) validates Zynq UltraScale+ MPSoC: the
 `_xilinxus` JTAG-UART and AXI bridge, and the `_xilinx7` multi-core manager
 (4-stage sequencer, storage qualification, relational compares) and AXI
-monitor, all on `xck26` over hw_server's `-register` mode. For the
+monitor, all on `xck26` over hw_server's `-register` mode. Two contributed
+board examples on `main` (unreleased) add ELA/EIO results: the Arty S7-25
+([`examples/arty_s7`](../examples/arty_s7/)) for the `_xilinx7` wrapper over
+`hw_server`, and the DE0-Nano ([`examples/de0_nano`](../examples/de0_nano/))
+for the `_intel` wrapper over Quartus II 13.1 and the onboard USB-Blaster;
+their READMEs record the reported runs. For the
 remaining families (ECP5, standalone UltraScale / UltraScale+) see the
 [vendor support matrix](01_overview.md#vendor-support-matrix); a family with
 no board result there is RTL-implemented and lint-clean only.
@@ -74,11 +79,18 @@ no board result there is RTL-implemented and lint-clean only.
 
 ## The version header (`fcapz_version.vh`)
 
-Every fcapz RTL file starts with:
+Every version-bearing Verilog core (`fcapz_ela.v`, `fcapz_eio.v`,
+`fcapz_ejtagaxi.v`, `fcapz_ejtaguart.v`, `fcapz_axi_mon.v` and
+`fcapz_core_manager.v`) starts with:
 
 ```verilog
 `include "fcapz_version.vh"
 ```
+
+The wrappers and helper modules do not include it themselves, but the
+cores they instantiate do, so the build still needs it (see below).  The
+VHDL sources use the generated
+package [`rtl/vhdl/pkg/fcapz_pkg.vhd`](../rtl/vhdl/pkg/fcapz_pkg.vhd) instead.
 
 This is an **auto-generated** Verilog header at
 [`../rtl/fcapz_version.vh`](../rtl/fcapz_version.vh).  It exposes
@@ -332,7 +344,10 @@ inserted core:
 
 ## Adding more cores in the same design
 
-The reference Arty A7 design uses one USER1 debug manager plus AXI on USER4:
+The reference Arty A7 design ([`arty_a7_vex_top.v`](../examples/arty_a7/arty_a7_vex_top.v))
+uses one USER1 debug manager, an AXI monitor on USER2 and the EJTAG-AXI bridge
+on USER4.  The ELAs sample at 150 and 130 MHz; the whole AXI fabric runs on a
+separate 100 MHz clock.  Trimmed to the wiring:
 
 ```verilog
 // 1. Managed USER1 debug chain: ELA0, ELA1, EIO0, EIO1.
@@ -355,19 +370,31 @@ fcapz_debug_multi_xilinx7 #(
     .eio_probe_out({eio1_out, eio0_out})
 );
 
-// 2. EJTAG-AXI bridge on USER4
+// 2. AXI monitor on USER2, watching the shared AXI4-Lite bus
+fcapz_axi_mon_xilinx7 #(
+    .ADDR_W     (32),
+    .DATA_W     (32),
+    .DEPTH      (256),
+    .CTRL_CHAIN (2)
+) u_axi_mon (
+    .ACLK    (clk_100mhz),
+    .ARESETN (~rst_100mhz),
+    // ... AW/W/B/AR/R signals of the bus being observed ...
+);
+
+// 3. EJTAG-AXI bridge on USER4
 fcapz_ejtagaxi_xilinx7 #(
     .ADDR_W     (32),
     .DATA_W     (32),
     .FIFO_DEPTH (16)
 ) u_axi (
-    .axi_clk      (clk_150mhz),
-    .axi_rst      (rst_150mhz),
+    .axi_clk      (clk_100mhz),
+    .axi_rst      (rst_100mhz),
     // ... 30 AXI signals connected to your AXI slave or interconnect ...
 );
 ```
 
-The checked-in [Arty top](../examples/arty_a7/arty_a7_top.v) enables more
+The checked-in [Arty top](../examples/arty_a7/arty_a7_vex_top.v) enables more
 ELA options (`DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W`, `NUM_SEGMENTS`) and
 ties `trigger_in` to an EIO-controlled fabric signal for hardware tests.
 In that reference top:
@@ -390,6 +417,10 @@ default chain assignments are:
 | ELA legacy burst data (`SINGLE_CHAIN_BURST=0`) | USER2 | `0x03` |
 | EIO | USER3 | `0x22` |
 | EJTAG-AXI / EJTAG-UART | USER4 | `0x23` |
+| AXI monitor (control + burst) | USER1 | `0x02` |
+
+The AXI monitor's default collides with the ELA's, which is why the Arty
+reference sets its `CTRL_CHAIN` to 2 (USER2).
 
 If you need different chains (e.g. you have another debug core
 already on USER1), every wrapper has `CHAIN` parameters you can
@@ -633,6 +664,7 @@ module fcapz_ejtagaxi_xilinx7 #(
     parameter CMD_FIFO_MEMORY_TYPE   = "auto",
     parameter RESP_FIFO_MEMORY_TYPE  = "auto",
     parameter BURST_FIFO_MEMORY_TYPE = "auto",
+    parameter ASYNC_FIFO_IMPL = 1,
     parameter CHAIN      = 4
 ) ( ... );
 ```
@@ -644,12 +676,13 @@ module fcapz_ejtagaxi_xilinx7 #(
 | `FIFO_DEPTH` | 1..256, **power of 2** | Async FIFO depth for burst reads.  Limits the maximum burst length the host can request — the host caches this from `FEATURES[23:16]` and rejects oversized requests at the API boundary.  See [chapter 07](07_ejtag_axi_bridge.md). |
 | `CMD_FIFO_DEPTH` | power of 2 | TCK-to-AXI command queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; AMD/Xilinx XPM FIFO builds require at least 16. |
 | `RESP_FIFO_DEPTH` | power of 2 | AXI-to-TCK response queue depth. The wrapper default follows the core (`2*FIFO_DEPTH`) for compatibility; AMD/Xilinx XPM FIFO builds require at least 16. |
-| `TIMEOUT` | int | AXI handshake timeout in `axi_clk` cycles.  Applies to `wready`/`bvalid`/`arready`/`rvalid` waits, **not** between burst beats. |
+| `TIMEOUT` | int | No-progress timeout in `axi_clk` cycles.  The counter restarts on every handshake, so it covers each `arready`/`rvalid` wait, the write engine's waits between W handshakes and for `bvalid`, and the gap before each further R beat of a burst read.  On expiry the bridge answers `SLVERR`; the AXI activity it started is still finished or drained in the background (a raised `VALID` stays up until its handshake, late read beats are discarded), so the slave may see it complete after the error. |
 | `DEBUG_EN` | 0, 1 | Enables the 256-bit debug buses and debug CONFIG capture records. Defaults off to let synthesis prune debug-only storage and counters. |
 | `STREAM_EN` | 0, 1 | Builds the streaming read (`CMD_STREAM_RSTART`, `FEATURES[24]`): up to 16383 words per long DR scan instead of one per scan.  About 200 LUTs and 200 FFs, no BRAM; needs `DATA_W=32`.  Verilog wrappers only for now.  See [chapter 07](07_ejtag_axi_bridge.md#streaming-read). |
 | `CMD_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the command queue. Ignored by the portable behavioral FIFO. |
 | `RESP_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the response queue. Ignored by the portable behavioral FIFO. |
 | `BURST_FIFO_MEMORY_TYPE` | `"auto"`, `"block"`, `"distributed"` | AMD/Xilinx XPM storage selector for the burst read FIFO. Ignored by the portable behavioral FIFO. |
+| `ASYNC_FIFO_IMPL` | 0, 1 | Clock-crossing FIFO implementation: `1` (the `_xilinx7` default) uses AMD/Xilinx XPM FIFOs, `0` the portable behavioral FIFO. |
 | `CHAIN` | 1..4 | BSCANE2 USER chain. |
 
 ## EJTAG-UART wrapper parameter reference
@@ -708,9 +741,11 @@ is on by default.  `probe()` reports `has_wide_trigger`.
 fcapz_ela_xilinx7 #(.SAMPLE_W(8), .DEPTH(1000)) u_ela ( ... );
 ```
 
-Synthesis fails with `DEPTH_must_be_power_of_2 _depth_check_FAILED`
-— that's a deliberate compile-time trap inside the core.  The next
-power of 2 (1024 here) is what you want.  See
+Simulation reports `$error("fcapz_ela: DEPTH must be a power of 2 ...")`,
+and elaboration fails on `SEG_DEPTH_must_be_power_of_two` — a
+deliberate compile-time trap inside the core that checks the segment
+depth (`DEPTH / NUM_SEGMENTS`, which is `DEPTH` itself when
+unsegmented).  The next power of 2 (1024 here) is what you want.  See
 [chapter 17](17_troubleshooting.md) for the full list of
 parameter-validation traps.
 
@@ -721,7 +756,9 @@ fcapz_ela_xilinx7 #(.DEPTH(1024), .NUM_SEGMENTS(3)) u_ela ( ... );
 ```
 
 `1024 / 3` is not an integer.  Pick `NUM_SEGMENTS = 1, 2, 4, 8, ...`
-that divides `DEPTH` evenly.  Same compile-time trap as DEPTH.
+that divides `DEPTH` evenly.  Simulation reports a `$error`, and the
+non-power-of-2 segment depth trips the same `SEG_DEPTH_must_be_power_of_two`
+trap as above.
 
 ### TIMESTAMP_W must be 0, 32, or 48
 
@@ -729,8 +766,8 @@ that divides `DEPTH` evenly.  Same compile-time trap as DEPTH.
 fcapz_ela_xilinx7 #(.TIMESTAMP_W(16)) u_ela ( ... );
 ```
 
-Only `0` (off), `32`, or `48` are supported.  `64` doesn't fit in
-the burst DR; arbitrary widths aren't supported.
+Only `0` (off), `32`, or `48` are supported; other widths, including
+`64`, are outside the supported and tested configurations.
 
 ### Forgetting to add `fcapz_version.vh` in your build flow
 
@@ -754,8 +791,13 @@ across vendors:
 
 - `_xilinx7` and `_xilinxus` have identical ports and parameters; only the
   module name differs.
-- `_intel` matches them for an ELA-only design but has no EIO ports
-  (`EIO_EN` is not a parameter there).
+- `fcapz_ela_intel` matches them for an ELA-only design, but has no
+  integrated EIO (`EIO_EN` / `EIO_IN_W` / `EIO_OUT_W` are not parameters
+  there) and none of the Xilinx burst options (`BURST_EN`,
+  `SINGLE_CHAIN_BURST`): burst data always uses its second virtual JTAG
+  instance (`DATA_CHAIN`).  For EIO on Intel, instantiate the separate
+  [`fcapz_eio_intel`](../rtl/fcapz_eio_intel.v) wrapper (or use the
+  `fcapz_debug_multi_intel` hub).
 - `_ecp5` has no external-trigger ports (`trigger_in` / `trigger_out` /
   `armed_out`).
 - `_gowin` and `_polarfire` need top-level JTAG pad connections

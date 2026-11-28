@@ -155,8 +155,13 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
   --program examples/arty_a7/arty_a7_vex_top.bit \
   capture --pretrigger 64 --posttrigger 191 \
   --trigger-value 66 --trigger-mask 0xff \
+  --sample-clock-hz 150000000 \
   --out capture.json --format json
 ```
+
+`--sample-clock-hz` records ELA0's 150 MHz sample clock in the export;
+without it the CLI assumes 100 MHz.  ELA1 (`--ela-instance 1`) samples at
+130 MHz.
 
 Exercise the EIO LEDs:
 

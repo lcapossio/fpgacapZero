@@ -61,12 +61,33 @@ is copied to `examples/kv260/kv260_top.bit`.
 ## Test
 
 Power the kit, connect its USB-JTAG, and leave `hw_server` reachable on
-the default port. The tests program the bitstream once, through the same
-RPC `connect` the web UI and MCP server use:
+the default port. With `hw_server` (the default backend) the tests program
+the bitstream once, through the RPC `connect` command with a `program`
+field, sent straight to `RpcServer.handle()` (the dispatcher behind the
+stdio RPC server, the web UI and the MCP server):
 
 ```bash
 python -m pytest examples/kv260/test_hw_integration.py -v
 ```
+
+That one-time programming step is `hw_server` only, and it is not
+something a web client can repeat: on `main` (unreleased), the web
+endpoints refuse a non-null `program` field.  Program the board from the
+CLI or a local RPC session instead.
+
+The suite also runs directly over the carrier card's FTDI channel A
+(D2XX), scanning the PL TAP past the ARM DAP that shares the chain.  FTDI
+does not program a Zynq UltraScale+, so load the bitstream first (a
+`hw_server` run of this suite, or the CLI command below), stop `hw_server`
+so it releases the cable, then run:
+
+```bash
+FPGACAP_BACKEND=ftdi python -m pytest examples/kv260/test_hw_integration.py -v
+```
+
+The FTDI run attaches to the image already loaded.  It defaults to the
+channel named `ML Carrier Card A` at 15 MHz TCK; override them with
+`FPGACAP_FTDI_DEVICE` and `FPGACAP_FTDI_TCK_MHZ`.
 
 Program or connect by hand with the CLI. The tap name `xck26` selects the
 MPSoC chain shape, and `--program` loads the PL through the PS TAP:

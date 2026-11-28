@@ -98,16 +98,28 @@ why the CLI default looks slightly different from the commands in this chapter.
 The `--program` flag tells fcapz to:
 
 1. Connect to `hw_server`.
-2. Bind the JTAG target named `xc7a100t`.
+2. Select the configuration target named `xc7a100t`.
 3. Send `fpga -file examples/arty_a7/arty_a7_vex_top.bit` to xsdb.
-4. Wait for the FPGA to come up — this is the **readiness wait** I
-   added in v0.2.0; it polls the ELA `VERSION` register up to 2 s
-   until it returns a non-zero value.  If it stays zero, you get
-   a clear `ConnectionError: FPGA did not become ready within 2.0s`.
-5. Run the actual subcommand (`probe`).
+4. Bind the `xc7a100t` target again for the JTAG scans.
+5. Wait for the FPGA to come up — this is the **readiness wait** I
+   added in v0.2.0.  It reads register `0x0000` on the active chain
+   (USER1) for up to 2 s until it returns any non-zero value.  It is
+   a "the chain is alive" check, not an ELA identity check: on this
+   reference design `0x0000` on USER1 is the debug core manager's
+   identity word.  If it stays zero, you get a clear
+   `ConnectionError: FPGA did not become ready within 2.0s ...`.
+6. Run the actual subcommand (`probe`), which checks the ELA's identity.
 
-If the readiness wait fails, check the board cable, `hw_server`, the FPGA
-target name, and the bitfile path.
+The readiness wait only runs when fcapz programs the FPGA.  If the readiness
+wait fails, check the board cable, `hw_server`, the FPGA target name, and the
+bitfile path.  From Python, a design with no register that reads non-zero at
+`0x0000` on its active chain can skip the wait with
+`XilinxHwServerTransport(..., ready_probe_addr=None)`.
+
+If you run `probe` without `--program` against an FPGA that does not hold an
+fcapz bitstream, there is no readiness wait to fail.  The error comes instead
+from target selection (no `xc7a100t` target found) or from the core identity
+check in `probe`.
 
 Expected output:
 
@@ -259,17 +271,25 @@ You should see:
 captured 25 samples from channel 0 -> my_capture.json
 ```
 
-If you got `TimeoutError: capture did not complete within timeout`,
-the trigger never fired — usually because your trigger value can
-never appear on the probe (the counter is masked, the counter clock
-is dead, etc.).  Try `--trigger-value 0x10` (a smaller, more frequent
-value) and see if that hits.
+If the CLI printed `error: capture did not complete within timeout`
+(from Python, `Analyzer.capture()` raises `CaptureNotReady`, a
+`TimeoutError` subclass), the trigger never fired — usually because
+your trigger value can never appear on the probe (the counter is
+masked, the counter clock is dead, etc.).  Picking another value will
+not help: the free-running 8-bit counter passes every value once per
+wrap.  Instead rerun with `--trigger-mask 0`, which matches any sample
+and fires at once; if that still times out, the ELA is not seeing its
+sample clock or is not being armed (see
+[chapter 17](17_troubleshooting.md)).
 
 Quick peek at what's in the file:
 
 ```bash
 python -m json.tool my_capture.json | head -40
 ```
+
+An abridged excerpt (the `samples` list and the `timestamps` list are cut
+short):
 
 ```json
 {
@@ -280,12 +300,16 @@ python -m json.tool my_capture.json | head -40
     "pretrigger": 8,
     "posttrigger": 16,
     "channel": 0,
+    "decimation": 0,
+    "stor_qual_mode": 0,
+    "ext_trigger_mode": 0,
     "trigger": {
         "mode": "value_match",
         "value": 66,
         "mask": 255
     },
     "overflow": false,
+    "segment": 0,
     "samples": [
         { "index": 0, "value": 58 },
         { "index": 1, "value": 59 },
@@ -298,9 +322,20 @@ python -m json.tool my_capture.json | head -40
         { "index": 8, "value": 66 },   <-- trigger sample
         { "index": 9, "value": 67 },
         ...
+    ],
+    "probes": [
+        { "name": "counter", "width": 8, "lsb": 0 }
+    ],
+    "timestamps": [
+        ...
     ]
 }
 ```
+
+`probes` is present because the command passed `--probes`, and
+`timestamps` (one entry per sample) because ELA0 is built with
+`TIMESTAMP_W=32`.  [Chapter 15](15_export_formats.md#json) describes the
+JSON format.
 
 Note how the trigger sample (`index = 8 = pretrigger`) has value
 `66 = 0x42`, exactly what we asked for, and the surrounding samples
