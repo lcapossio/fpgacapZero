@@ -43,21 +43,22 @@ play.
 
 **Response on success**:
 ```json
-{"ok":true,"schema_version":"1.2"}
+{"ok":true,"schema_version":"1.2","session_epoch":1}
 ```
 
 **Response on failure**:
 ```json
-{"ok":false,"schema_version":"1.2","error":"...","type":"RuntimeError","trace":"RuntimeError: ..."}
+{"ok":false,"schema_version":"1.2","error":"...","type":"RuntimeError","trace":"RuntimeError: ...","session_epoch":1}
 ```
 
 Every response carries `"schema_version"` so a stale client can
 detect when it's talking to a newer server and update its
 parser.  The current schema version is `"1.2"`.  Every response
 also carries `"session_epoch"`, a number that goes up when a command
-that starts or ends a session finishes (`connect`, `close`, and the
-`eio_`/`axi_`/`uart_` connect and close commands), and when a cancel
-ends a session; see [`cancel`](#cancel).
+that starts or ends a session finishes (`connect`, `close`,
+`eio_discover`, and the `eio_`/`axi_`/`uart_` connect and close
+commands), and when a cancel ends a session; see [`cancel`](#cancel).
+The shorter response examples below leave `session_epoch` out.
 
 ## Spawning the server
 
@@ -191,7 +192,10 @@ or on the analyzer's chain — shares that transport and works.
 The chain carrying the burst reader's data DR is also excluded from every core
 sweep: it is a streaming interface, not a register one.
 
-Response: `{"ok": true, "schema_version": "1.2", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1, "instance": null}`
+Response: `{"ok": true, "schema_version": "1.2", "ir_table": "xilinx7", "transport_kind": "jtag", "link": null, "chain": 1, "instance": null, "device": null, "session_epoch": 1}`
+
+`device` names the device the backend opened when it can tell (the FTDI
+channel, or the Quartus JTAG device on `usb_blaster`), else `null`.
 
 `transport_kind` is `"jtag"` for a link that reaches the fabric through a real
 TAP, or `"bytestream"` for one that addresses chains directly by index. IR-table
@@ -208,9 +212,11 @@ For a direct FTDI cable (FlashPro5, Digilent, the KV260 carrier), use
 description or serial, or as `usb:<description>` / `usb:<serial>` for a
 libusb channel, and `tck_mhz` sets the clock
 (default 6). `program` configures an AMD/Xilinx 7-series FPGA with a `.bit`
-or `.bin`, or loads a Gowin GW1NR-9C's SRAM from a `.fs`, over JTAG first.
-The web server refuses `program`, `quartus_stp` and `probe_file`, and opens
-only listed serial ports (see [chapter 18](18_web_interface.md#the-api-behind-it)).
+or `.bin`, or (unreleased, on `main`; the FPGA must be alone on the chain)
+loads a Gowin GW1NR-9C's SRAM from a `.fs`, over JTAG first.
+On `main` (unreleased) the web server refuses `program`, `quartus_stp` and
+`probe_file`, and opens only listed serial ports (see
+[chapter 18](18_web_interface.md#the-api-behind-it)).
 On every backend, EIO, AXI and UART side
 connects ignore `program`, so they never reprogram the FPGA under the session.
 The IR table comes from the device IDCODE, and `ir_table` in
@@ -220,18 +226,30 @@ the response echoes the detected family:
 {"cmd": "connect", "backend": "ftdi", "hardware": "Embedded FlashPro5 A"}
 ```
 
-Every backend takes `"burst": false` for a bitstream with no burst readout
-path (the CLI's `--no-burst`); every capture is then read through the
-register window. `"single_chain_burst": false` selects a legacy two-chain
-build (the CLI's `--two-chain-burst`). Without `burst`, `hw_server` and
-`usb_blaster` read by burst, `openocd` only for the PolarFire preset, and
-`ftdi` per detected family. `"burst": true` opts OpenOCD in for other
-presets.
+The burst readout fields depend on the backend:
+
+| Backend | `"burst"` (CLI `--no-burst` = `false`) | `"single_chain_burst": false` (CLI `--two-chain-burst`) |
+| --- | --- | --- |
+| `hw_server` | default `true` | honoured |
+| `openocd` | default on for the PolarFire preset only; `true` opts other presets in | honoured |
+| `ftdi` | default per detected family | honoured |
+| `usb_blaster` | default `true` | ignored: Quartus uses its own data chain |
+| `serial` | ignored | ignored |
+
+`"burst": false` is for a bitstream with no burst readout path; every capture
+is then read through the register window. `"single_chain_burst": false`
+selects a legacy two-chain build. The Python `SerialTapTransport` takes
+`burst=False`, but RPC and the CLI pass a serial session only its port and
+baud rate.
 
 `ir_table` echoes the resolved IR-table preset. When the request omits it, the
-server infers the preset from the tap name (`gw*` → `gowin`,
-`xcku*`/`xcvu*`/`xcau*` → `ultrascale`, else `xilinx7`) — clients don't need
-their own copy of that mapping.
+server infers the preset from the tap name (the same mapping `discover_boards`
+tries first): `gw*` → `gowin`, `mpf*` → `polarfire`, `xcku*`/`xcvu*`/`xcau*` →
+`ultrascale`, `trion*`/`titanium*`/`efinix*` → `efinix`, `ecp5*`/`lfe5*` →
+`ecp5`, else `xilinx7` — clients don't need their own copy of that mapping.
+Three backends skip the tap-name inference: `ftdi` reads the family from the
+device IDCODE and echoes it, `usb_blaster` reports `intel`, and `serial`
+reports `null`.
 
 `chain` echoes the BSCAN USER chain the session bound to. When the request
 omits it, the server **autodetects**: it connects on chain 1 and, if no debug
@@ -275,7 +293,7 @@ none are found. Requires no active connection.
   "cmd": "discover_boards",
   "host": "127.0.0.1",
   "port": 6666,        // sweep base; each board is one OpenOCD instance
-  "port_span": 4,      // scan port .. port+span-1 (or pass "ports": [6666, 6667])
+  "port_span": 4,      // example; default 1. Scans port .. port+span-1 (or pass "ports": [6666, 6667])
   "timeout": 5,        // per-step timeout (per port connect / per tap probe)
   "budget": 12         // optional: overall wall-clock cap for the whole sweep
 }
@@ -399,6 +417,13 @@ is the richer OpenOCD variant that also probes each tap for an fcapz ELA.
 
 Response: `{"ok": true, "backend": "openocd", "targets": ["GW1NR-9C.tap"]}`
 
+For `hw_server` the address is checked before XSDB starts (unreleased, on
+`main`): `host` must be a host name or an IPv4 address (XSDB does not parse
+IPv6 literals) and `port` a whole number in 1..65535, and the two go to XSDB as
+one braced `{tcp:host:port}` URL. The same check applies to a hw_server
+`connect`. A scan whose XSDB connection fails returns an error rather than an
+empty `targets` list.
+
 ### OpenOCD control (web, localhost only)
 
 Start/stop OpenOCD **on the server host** so the browser UI can bring the board
@@ -502,7 +527,9 @@ listed once, by the ELA slot a `rebind` to that chain binds. Each entry has
 `null` for a core reached directly), `version_major`/`version_minor`, and a
 type-specific `info` (the ELA probe dict, `{in_w, out_w}` for the EIO, the
 manager's probe dict, or the monitor geometry `{proto, addr_w, data_w, decode,
-sample_width}` for `axi_mon`).
+sample_width}` for `axi_mon`). Bridges are not listed; use
+[`discover`](#discover) for the transport's full chain sweep, bridge
+identities included.
 
 ```json
 {"cmd": "list_cores"}
@@ -532,7 +559,10 @@ List every fcapz core on the session, chain by chain, as
 monitor, a core manager and each of its slots) and the EJTAG-AXI and
 EJTAG-UART bridges.  Each chain is read only at `0x0000` until it answers as
 an ELA or EIO, which the bridges see as a NOP.  Optional `chains` narrows the
-sweep (default USER1-4, or `sld_virtual_jtag` instances 1-8);
+sweep.  The default comes from the backend: on `openocd` and `hw_server` the
+chains its IR table defines (USER1-4 on the AMD/Xilinx presets, USER1-2 on the
+others), `sld_virtual_jtag` instances 1-8 on `usb_blaster`, USER1-4 otherwise,
+never including a byte-stream TAP bridge's burst data chain;
 `"bridges": false` skips the bridge identity reads.  Entries have the
 `list_cores` fields plus `instance` (manager slot or `null`); bridge `type`s
 are `ejtag_axi` and `ejtag_uart`.  The session's chain is selected again
@@ -542,10 +572,24 @@ afterwards and a manager's active slot is left as it was.
 {"cmd": "discover", "chains": [1, 4]}
 ```
 
+#### `axi_mon_probe`
+
+Look for an [AXI monitor](19_axi_monitor.md) on the session's chain, then on
+the other ELA-protocol chains (1, 2 and 5), and return its geometry with the
+bundled probe map, so a client can capture with named AXI fields. The
+session's chain is restored afterwards.
+
+```json
+{"cmd": "axi_mon_probe"}
+```
+
+Response: `{"ok": true, "schema_version": "1.2", "present": true, "chain": 2, "proto": "AXI4LITE", "addr_w": 32, "data_w": 32, "decode": true, "sample_width": 160, "probes": [{"name": ..., "width": ..., "lsb": ...}, ...]}`,
+or `{"present": false}` when no monitor answers.
+
 #### `configure`
 
-Write the trigger / pre-post / decimation / etc. registers.  All
-fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
+Write the trigger / pre-post / decimation / etc. registers.  Every
+field is optional; an omitted one takes the default in the table below.
 
 ```json
 {
@@ -573,6 +617,20 @@ fields optional except `pretrigger`, `posttrigger`, `trigger_value`.
 }
 ```
 
+| Field | Default | Notes |
+| --- | --- | --- |
+| `pretrigger` / `posttrigger` | `8` / `16` | `pretrigger + posttrigger + 1` must fit the depth (the segment depth on a segmented core) |
+| `trigger_mode` | `"value_match"` | |
+| `trigger_value` / `trigger_mask` | `0` / `0xFF` | |
+| `sample_width` / `depth` | read from the core | see below |
+| `sample_clock_hz` | the `probe_file`'s, else `100000000` | |
+| `channel`, `probe_sel`, `decimation`, `ext_trigger_mode` | `0` | |
+| `stor_qual_mode` / `stor_qual_value` / `stor_qual_mask` | `0` | mode `0` off, `1` store matching, `2` store non-matching |
+| `trigger_delay`, `trigger_holdoff` | `0` | each `0`..`65535` |
+| `startup_arm` | `false` | |
+| `rle` / `post_clocks` | `false` / `0` | see below |
+| `sequence` (alias `trigger_sequence`) | none | trigger sequencer stages, see below |
+
 `depth` and `sample_width` must match the synthesized core; omit them to
 read them from the connected core (a `probe_file`'s `sample_width` takes
 precedence). An explicit value that disagrees is rejected.
@@ -595,19 +653,40 @@ from disk; `probes` and `probe_file` are mutually exclusive.
 a base-prefixed string (`"0x..."` or decimal) as well as an int, so bit vectors
 wider than a JS-safe integer (53 bits) survive JSON transport unrounded.
 
+`sequence` programs the hardware trigger sequencer: a JSON array (or a string
+holding one) with one object per stage, each taking `cmp_mode_a`/`cmp_mode_b`
+(default `0`), `value_a`/`value_b` (default `0`), `mask_a`/`mask_b` (default
+`0xFFFFFFFF`), `combine` and `next_state` (default `0`), `count_target`
+(default `1`) and `is_final` (default `false`). See the trigger sequencer in
+[ELA core](05_ela_core.md).
+
 #### `arm`
 
 ```json
 {"cmd": "arm"}
 ```
 
+#### `capture_status`
+
+Read the capture status bits without transferring samples — how a client
+shows "waiting for trigger" and then "reading back".
+
+```json
+{"cmd": "capture_status"}
+```
+
+Response: `{"ok": true, "schema_version": "1.2", "armed": true, "triggered": false, "done": false, "overflow": false}`
+
 #### `capture_wait`
 
-Wait on an **already-armed** capture (`configure` + `arm`) and read it out —
-the same result shape and options as `capture`, but without re-configuring or
-re-arming. A `CaptureNotReady` here just means "still waiting" and leaves
-the core armed, so clients can hold one hardware arm across many short polls
-(this is how the web UI waits for a trigger with no deadline). It subclasses
+Wait on an **already-armed** capture and read it out. It uses the capture
+the last `configure` (or `capture`) set up, and is refused if there is none.
+It returns the same result shape and takes the same readout options as
+`capture` (`timeout`, `format`, `summarize`, `segments`, `include_vcd`,
+`include_csv`, `decode_axi`), but does not re-configure or re-arm. A
+`CaptureNotReady` here just means "still waiting" and leaves the core
+armed, so clients can hold one hardware arm across many short polls (this is
+how the web UI waits for a trigger with no deadline). It subclasses
 `TimeoutError`, so it is distinguishable from a transport that stopped
 answering — which is *not* safe to retry against a still-armed core.
 
@@ -626,7 +705,8 @@ in-flight capture — how a client's Stop button cancels an armed wait.
 
 #### `capture`
 
-Configure + arm + capture in one call, returning the result.
+Configure + arm + capture in one call, returning the result. It takes every
+[`configure`](#configure) field plus the readout options below.
 
 ```json
 {
@@ -659,6 +739,13 @@ Response (format = "json"):
 For `format=csv` or `format=vcd`, the response has `"content": "..."`
 with the file body as a string instead of `result`.
 
+Other options: `"immediate": true` rewrites the trigger to an always-true
+condition so the capture fires at once; `"include_vcd": true` and
+`"include_csv": true` add `vcd` / `csv` text beside the chosen format;
+`"decode_axi": true` adds an `axi` transaction decode when the probe names
+look like an AXI monitor's (ignored otherwise). The capture's probe map, when
+it has one, is echoed as `probes`. `timeout` defaults to 10 s.
+
 With `"segments": true` the response carries one entry per segment under
 `segments` (each shaped like a single-capture response in the requested
 format); `include_vcd` returns **all** segments concatenated on the time axis
@@ -670,6 +757,11 @@ on the web server each request holds a threadpool worker for its full wait, so
 unbounded timeouts could starve all clients.
 
 ### EIO
+
+The EIO, EJTAG-AXI and EJTAG-UART commands below all need an analyzer
+session: send [`connect`](#connect) first, or they fail with
+`NotConnectedError` (`"not connected"`). Their own connection fields still
+pick the board for a side session that opens its own transport.
 
 #### `eio_connect`
 
@@ -683,11 +775,14 @@ unbounded timeouts could starve all clients.
 }
 ```
 
-Response: `{"ok": true, "schema_version": "1.2", "in_w": 8, "out_w": 8, "chain": 3}`
+`chain` defaults to `3` and `base_addr` to `0`.
 
-With `"instance"` (an EIO in a core-manager slot) the EIO shares the ELA
-session's transport, so the two keep one lock and one cache of the hub's
-active slot, provided the request names the same board: connection fields it
+Response: `{"ok": true, "schema_version": "1.2", "in_w": 8, "out_w": 8, "chain": 3, "base_addr": 0, "instance": null}`
+
+An EIO on the analyzer's own chain, for the same board, shares the analyzer's
+transport even without an `instance`. With `"instance"` (an EIO in a
+core-manager slot) the EIO shares the ELA session's transport, so the two
+keep one lock and one cache of the hub's active slot, provided the request names the same board: connection fields it
 leaves out are the session's, and any it names (`backend`, `host`, `port`,
 `tap`, `hardware`) must match.  A request for another board opens its own
 transport, with the session's values for the fields it leaves out.
@@ -866,6 +961,14 @@ Response:
 
 Response: `{"ok": true, "schema_version": "1.2", "count": 4}`
 
+With `"burst": true`, `axi_dump` and `axi_write_block` split the transfer into
+as many AXI4 bursts as it takes: each at most the bridge's `fifo_depth` and
+256 beats, and none crossing a 4 KiB boundary. Any `count` works, but `addr`
+must be word-aligned and the range must end within the 32-bit address space.
+The single-burst limits (one burst no longer than `fifo_depth`) apply only to
+the Python `burst_read` / `burst_write` methods and the desktop GUI's AXI
+panel, not to these RPC commands.
+
 ### EJTAG-UART
 
 #### `uart_connect`
@@ -960,9 +1063,10 @@ On any exception, the response shape is:
 {
   "ok": false,
   "schema_version": "1.2",
-  "error": "burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH",
+  "error": "burst range: base_addr 0x40000002 is not word-aligned",
   "type": "ValueError",
-  "trace": "ValueError: burst_read: count 17 exceeds bridge FIFO_DEPTH (16); rebuild bitstream with larger FIFO_DEPTH"
+  "trace": "ValueError: burst range: base_addr 0x40000002 is not word-aligned",
+  "session_epoch": 3
 }
 ```
 
@@ -985,8 +1089,8 @@ Common error types you should expect:
   `"xsdb: no bit string in output"`
 - `ConnectionError` — `"FPGA did not become ready within 2.0s"`,
   `"OpenOCD closed the connection"`
-- `ValueError` — argument validation, FIFO_DEPTH overflow, sequencer
-  bound violations, probe overlaps
+- `ValueError` — argument validation, unaligned or out-of-range AXI burst
+  ranges, sequencer bound violations, probe overlaps
 - `CaptureNotReady` — the trigger has not fired; the core is still armed
 - `TimeoutError` — a wait expired for any other reason, including a
   transport that stopped answering
