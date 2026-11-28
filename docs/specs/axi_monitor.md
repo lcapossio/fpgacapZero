@@ -68,6 +68,16 @@ target initially).
 
 ### Module
 
+> [!NOTE]
+> **Proposed interface (design sketch).** The block below is the original plan
+> for the full monitor, not the shipped module. The shipped
+> `fcapz_axi_mon` defaults to `PROTO = "AXI4LITE"` (the only protocol it
+> supports), has no `ID_W`, `CAP_CHANNELS`, `ADDR_FILTERS` or
+> `PROTO_CHECK_EN` parameters, taps `AWPROT`/`ARPROT`, and adds `DECODE_EN`
+> (an 8-bit events byte below the channel block) and `WIDE_TRIG` (default 1).
+> See [chapter 19](../19_axi_monitor.md#instantiate-it) and
+> [`rtl/fcapz_axi_mon.v`](../../rtl/fcapz_axi_mon.v) for the real parameters.
+
 ```verilog
 module fcapz_axi_mon #(
     // protocol + interface geometry
@@ -108,21 +118,30 @@ connection as a passive monitor.
 
 ### Capture-vector layout (P1)
 
-The selected channels concatenate, LSB-first, into `probe_in`. The exact bit
-layout is the contract the probe map and the host depend on, e.g. for AXI4-Lite
-write+read with `ADDR_W=32, DATA_W=32`:
+The channels concatenate, LSB-first, into `probe_in`. The exact bit layout is
+the contract the probe map and the host depend on. The shipped AXI4-Lite
+layout with `ADDR_W=32, DATA_W=32` is 152 bits:
 
 ```
-[ awaddr(32) | awvalid(1) | awready(1) |
+[ awaddr(32) | awprot(3) | awvalid(1) | awready(1) |
   wdata(32)  | wstrb(4)   | wvalid(1)  | wready(1) |
   bresp(2)   | bvalid(1)  | bready(1)  |
-  araddr(32) | arvalid(1) | arready(1) |
-  rdata(32)  | rresp(2)   | rvalid(1)  | rready(1)  | … ]
+  araddr(32) | arprot(3) | arvalid(1) | arready(1) |
+  rdata(32)  | rresp(2)   | rvalid(1)  | rready(1)  ]
 ```
 
-`SAMPLE_W` is computed from `PROTO`, the widths, and `CAP_CHANNELS`. Full AXI4
-adds `*ID/*LEN/*SIZE/*BURST/*LAST`. A generator emits both the RTL slice
-constants and the matching probe map so they never drift.
+With `DECODE_EN=1` the 8-bit transaction-events word sits **before** this
+block, at bits `[7:0]`, and the channel block moves up by 8 (160 bits). The
+field offsets are tabulated in
+[chapter 19](../19_axi_monitor.md#what-gets-captured) and in the shipped probe
+maps (`host/fcapz/probes/axi4lite_32.prob`, `axi4lite_32_decode.prob`).
+
+In the plan, `SAMPLE_W` is computed from `PROTO`, the widths, and
+`CAP_CHANNELS`; full AXI4 adds `*ID/*LEN/*SIZE/*BURST/*LAST`, and a generator
+emits both the RTL slice constants and the matching probe map so they never
+drift. The shipped module captures all five channels; its probe maps are
+generated from `fcapz.axi_layout` by `tools/gen_axi_probes.py`, and the RTL
+slice layout is kept in lockstep with that by hand.
 
 ### Transaction decoder (P2)
 
@@ -150,24 +169,33 @@ all existing tooling drive capture/trigger unchanged. The ELA owns config space
 `0x0000–0x00FF` and exposes **captured samples in a register window at `0x0100+`**
 (`jtag_addr >= ADDR_DATA_BASE`), so AM registers must **not** sit at `0x0100`.
 
-**P1** needs only the identity, which fits the free gap between the ELA's last
-config register (`0x00E0`, COMPARE_CAPS) and the data window:
+**P1** needs only the identity. It answers at `0x00E8`/`0x00EC`, two
+addresses the ELA leaves unused for it (the ELA's own registers now fill the
+rest of `0x00E0`–`0x00FC`: `COMPARE_CAPS`, `WIDE_SEL`, `WIDE_DATA`,
+`DATA_OFFSET`, `CAPTURE_GEN`, `STREAM_STATUS`). As shipped:
 
 | Address | Reg | Notes |
 |---------|-----|-------|
-| `0x0000` | VERSION | The embedded ELA's identity — reports `"LA"`. (P1 detects an AXI monitor via the AM identity register below, not via `0x0000`.) |
-| `0x0004`–`0x00E0` | *(ELA register map)* | CTRL/STATUS/TRIG_*/SEQ_*/SQ_*/FEATURES/… exactly as [`register_map.md`](register_map.md). |
-| `0x00E8` | AXI_MON_ID | `[31:16]` = `"AM"` (`0x414D`), `[15:8]` = `PROTO` code (1 = AXI4-Lite), `[7:0]` = capability flags (DECODE_EN, PROTO_CHECK_EN). |
-| `0x00EC` | AXI_GEOM | `[7:0]` ADDR_W, `[15:8]` DATA_W, `[19:16]` ID_W, `[24:20]` CAP_CHANNELS. |
+| `0x0000` | VERSION | The embedded ELA's identity — reports `"LA"`. (The host detects an AXI monitor via the AM identity register below, not via `0x0000`.) |
+| `0x0004`–`0x00FC` (except `0x00E8`/`0x00EC`) | *(ELA register map)* | CTRL/STATUS/TRIG_*/SEQ_*/SQ_*/FEATURES/… exactly as [`register_map.md`](register_map.md). |
+| `0x00E8` | AXI_MON_ID | `[31:16]` = `"AM"` (`0x414D`), `[15:8]` = `PROTO` code (1 = AXI4-Lite), `[7:0]` = capability flags: bit 0 = `DECODE_EN`; the other bits read 0 (no protocol checker yet). |
+| `0x00EC` | AXI_GEOM | `[7:0]` ADDR_W, `[15:8]` DATA_W, `[19:16]` ID_W (0 for AXI4-Lite), `[24:20]` number of captured channels (5: AW, W, B, AR, R). |
 | `0x0100+` | *(ELA sample-data window)* | captured sample words — do not place AM registers here. |
 
-**P2+** adds the decoder/filter/violation registers, which need more than the
-`0x00E4–0x00FC` gap allows. Those get their own window via a `fcapz_regbus_mux`
+**P2+** adds the decoder/filter/violation registers, which do not fit in the
+ELA's config space. Those get their own window via a `fcapz_regbus_mux`
 split (the same pattern the ELA-wrapper uses to host EIO at `0x8000`), e.g. the
 AM block at `0x8000+`: `DEC_CTRL`, `ID_MATCH`, `ADDR_FILTER_i_BASE/LIMIT`,
 `VIOLATION`.
 
 ## Host & viewer integration
+
+Shipped so far: the two 32/32 AXI4-Lite probe maps under `host/fcapz/probes/`,
+and an `AxiMonitor` class that builds the probe map from the hardware
+geometry and offers capture presets (`write_addr_capture_config`,
+`read_addr_capture_config`, `event_capture_config`, `beat_storage_qual`); see
+[chapter 19](../19_axi_monitor.md#from-python). The rest of this section is
+the plan.
 
 - **Probe map**: ship `probes/axi4lite_32.prob` (and AXI4 variants) describing
   the capture-vector layout as named signals. The web/CLI/GUI already load
@@ -195,10 +223,9 @@ AM block at `0x8000+`: `DEC_CTRL`, `ID_MATCH`, `ADDR_FILTER_i_BASE/LIMIT`,
 
 ## Open questions / decisions
 
-1. **Identity**: dual-report (`"AM"` with an ELA-compatible `FEATURES`
-   contract) vs. report `"LA"` and advertise AXI via a `FEATURES` bit + the
-   `AXI_MON_ID` register. Leaning toward `"AM"` + a documented "is-ELA-capable"
-   `FEATURES` bit so the generic `Analyzer` path still works.
+1. **Identity** (decided): `0x0000` reports the embedded ELA's `"LA"`, so the
+   generic `Analyzer` path works unchanged, and the monitor is recognised by
+   `"AM"` in `AXI_MON_ID` at `0x00E8`. No `FEATURES` bit was added.
 2. **Clock domains**: capture runs in `ACLK`. JTAG register access already
    crosses to `jtag_clk` inside `fcapz_ela`; confirm the decoder's counters live
    wholly in `ACLK`.

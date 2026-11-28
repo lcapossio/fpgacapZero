@@ -9,9 +9,10 @@
 ## Prerequisites
 
 - **Python 3.10 or later.** Check with `python --version`.  Earlier
-  versions will not work — fcapz uses `dataclass | None` syntax,
-  `tomllib`, and `importlib.metadata`'s `PackageNotFoundError` shape
-  that all require ≥3.10.
+  versions will not work — the package declares
+  `requires-python = ">=3.10"`.  pip also installs the two small runtime
+  dependencies: `tomli-w`, and on Python 3.10 `tomli` (3.11+ reads
+  TOML with the standard library's `tomllib`).
 - **Git** to clone the repository.
 - **A supported transport**, one of:
   - **Vivado / hw_server (2022.2 or later)** — required for the
@@ -63,12 +64,14 @@ immediately, no reinstall needed.  Editable installs are the
 recommended path for both development and day-to-day use because
 fpgacapZero is small and you may want to read the source.
 
-After install, three things are available:
+After install, these are available (the base install also registers
+the `fcapz-web`, `fcapz-gui` and `fcapz-mcp` console scripts, but each
+needs its extra from the steps below before it runs):
 
 ```bash
 $ fcapz --help                          # CLI tool on your PATH
 $ python -c "import fcapz; print(fcapz.__version__)"
-0.5.1
+0.5.2
 $ python -m fcapz.cli --help            # equivalent to `fcapz`
 ```
 
@@ -94,8 +97,8 @@ a development machine.
 pip install -e ".[web]"
 ```
 
-This adds **`fastapi`** and **`uvicorn`** and registers the browser
-front-end:
+This adds **`fastapi`** and **`uvicorn`**, which the browser
+front-end's `fcapz-web` command needs:
 
 ```bash
 $ fcapz-web                             # serves on http://127.0.0.1:7373
@@ -110,8 +113,8 @@ $ fcapz-web                             # serves on http://127.0.0.1:7373
 pip install -e ".[gui]"
 ```
 
-This adds **`PySide6`** and **`pyqtgraph`** and registers a second
-console script:
+This adds **`PySide6`** and **`pyqtgraph`**, which the `fcapz-gui`
+console script needs:
 
 ```bash
 $ fcapz-gui                             # launches the desktop GUI
@@ -171,9 +174,11 @@ debugger console.
          --tap xc7a100t \
          probe
    ```
-   You will get an error from the readiness wait if the FPGA isn't
-   programmed yet — that's expected and *correct*.  See step 4
-   below.
+   Without `--program`, `probe` only attaches: if the FPGA isn't
+   programmed yet with a fpgacapZero design it fails, either while
+   selecting the target (no device matches `--tap`) or at the core
+   identity check — that's expected and *correct*.  See step 4 below.
+   (The readiness wait runs only when `connect()` programs the FPGA.)
 
 ### Option B: OpenOCD (vendor-neutral)
 
@@ -200,9 +205,14 @@ works.
    fcapz --backend openocd --port 6666 --tap xc7a100t.tap probe
    ```
 
-OpenOCD is slower than hw_server (no batched scan support) and has
-not been as thoroughly hardware-validated, but it is still useful on
-non-AMD/Xilinx boards with an OpenOCD-supported cable.  See
+OpenOCD runs each batch of scans as one Tcl command, so its round
+trips are batched too, but it is usually slower than hw_server.  The
+CLI, RPC server and GUI read captures by burst over OpenOCD only for
+the PolarFire preset by default (`--burst` opts in elsewhere; a direct
+`OpenOcdTransport(...)` defaults to `burst=False`), and the AMD/Xilinx
+path has not been as thoroughly hardware-validated as hw_server.  It
+is still useful on non-AMD/Xilinx boards with an OpenOCD-supported
+cable.  See
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
 for the OpenOCD validation gaps if you want to help close them.
 
@@ -249,18 +259,22 @@ Quartus device name with `--tap`.
 or vendor server.  It covers the embedded FlashPro5 on Microchip PolarFire
 boards, Digilent's FTDI-based cables (the Arty A7's onboard one), the Kria
 KV260 carrier, and any FT2232H/FT4232H JTAG adapter, which you name with
-`--hardware`.
+`--hardware`.  With `--program` it loads an AMD/Xilinx 7-series bitstream,
+or (on `main`, unreleased) a Gowin `.fs` into the SRAM of a GW1NR-9C that
+is alone on its JTAG chain.
 
-1. **Get a driver.**  The released package uses FTDI's D2XX library.  On
-   Windows it is already installed with the cable's driver
+1. **Get a driver.**  By default the transport uses FTDI's D2XX
+   library.  On Windows it is already installed with the cable's driver
    (`ftd2xx.dll`).  On Linux, install FTDI's D2XX library and detach
    `ftdi_sio` from the adapter.
 
    Alternatively, libusb needs no FTDI library: on Linux and macOS, or on
-   Windows for an adapter bound to WinUSB or libusbK.  It is on `main`,
-   not yet released, so install from a checkout with
-   `pip install -e ".[usb]"`, then name the channel with a `usb:`
-   selector, for example `--hardware usb:` for the one known adapter.
+   Windows for an adapter bound to WinUSB or libusbK.  Install the `usb`
+   extra (`pip install "fpgacapzero[usb]"`, or `pip install -e ".[usb]"`
+   from a checkout; released in 0.5.2), then name the channel with a
+   `usb:` selector, for example `--hardware usb:` for the one known
+   adapter.  libusb is hardware-validated for raw JTAG scans only; a
+   full session over it is not yet.
 
 2. **Close whatever holds the cable** (Libero's programmer, FlashPro
    Express, hw_server, OpenOCD): a channel opens for one program at a time.
@@ -344,7 +358,7 @@ encoding.
 ## Step 5: run the test suite (optional but recommended)
 
 ```bash
-pytest tests/                          # 218 unit tests, ~3 seconds
+pytest tests/                          # host unit tests, no hardware
 python sim/run_sim.py                  # RTL lint + simulation matrix
 python sim/run_sim.py --lint-only      # RTL lint only
 python tools/sync_version.py --check   # version-sync regression guard
@@ -367,10 +381,8 @@ running `hw_server`, and a programmed bitstream):
 pytest examples/arty_a7/test_hw_integration.py
 ```
 
-Currently this is `54` collected items on the checked-in Arty reference
-suite: `47` passing tests and `7` optional UART tests skipped unless
-their separate UART loopback bitstream is enabled, plus `13` subtests.
-Wall-clock time is about 4-5 minutes on Arty A7-100T.  See
+The optional UART tests in that suite are skipped unless their
+separate UART loopback bitstream is enabled.  See
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md) for environment variables
 that gate the optional UART loopback tests.
 

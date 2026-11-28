@@ -41,9 +41,9 @@ is Python, and you can read every line of the FSM in
   the AXI slave streams beats into an async FIFO inside the bridge,
   the host scans them out.
 - **AXI4 burst write** — a single AXI4 burst write with up to
-  `FIFO_DEPTH` beats.  The host paces the writes one per JTAG scan;
-  the bridge returns one completion per beat so the host
-  knows when to send the next beat.
+  `FIFO_DEPTH` beats.  The host shifts one beat per JTAG scan; the
+  bridge buffers and acknowledges each beat, and puts the burst on
+  the bus only once its last beat is in.
 - **Streaming read** (opt-in, `STREAM_EN=1`) — up to 16383 words per
   long DR scan, so the cable sets the rate instead of the per-scan
   tool overhead.  See [Streaming read](#streaming-read).
@@ -62,7 +62,7 @@ What it **can't** do (yet):
 ```mermaid
 flowchart LR
     host["Host<br>(XSDB or OpenOCD)"] <-->|"72-bit DR via USER4"| tck["TCK domain<br>shadow registers"]
-    tck <-->|"toggle handshake (CDC)"| axi["axi_clk domain<br>command FSM + write engine<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
+    tck <-->|"async command / response FIFOs (CDC)"| axi["axi_clk domain<br>command FSM + write engine<br>async FIFO (Gray-coded pointers, FIFO_DEPTH)"]
     axi <-->|"AXI4 master"| bus["Your AXI4 bus"]
 ```
 
@@ -147,8 +147,18 @@ flop on the AXI side and has no such gap; `axi_status()["idle"]` uses it.
 ## The 72-bit DR shift format
 
 Every JTAG scan moves exactly 72 bits in and 72 bits out.  The
-shift-out is the result of the **previous** scan — pipelined, no
-polling.
+shift-out is captured before the new command is shifted in, so it can
+never be that command's own result.  AXI completions come back
+**asynchronously** through the response FIFO: a scan whose
+`prev_valid` bit is set carries one completed result, and scans in
+between show `busy` (or nothing) while the AXI side works.  The host
+therefore submits its commands and then drains responses with wait
+scans (NOP, or BURST_RDATA during a burst read) until it has seen as
+many results as it queued (a burst read's data words and its one
+response are counted separately); with a fast slave the result is often
+in the very next scan, but nothing guarantees it.  CONFIG is a separate
+pipeline: its answer is in the next scan, and any queued AXI response
+is left for the scan after.
 
 **Shift-in (host → FPGA):**
 
@@ -252,13 +262,15 @@ After `connect()`, the controller has:
 value = bridge.axi_read(0x40000000)        # returns int
 ```
 
-Two JTAG scans: one to issue the READ command, one NOP to wait
-until `prev_valid` is set and read the data back.
+One READ scan, then NOP scans until one shows `prev_valid` with the
+data.  The controller issues the READ together with a fixed budget of
+NOP wait scans in one `raw_dr_scan_batch()` call and takes the first
+valid result; with a fast slave that is the scan right after the READ.
 
-When running over AMD/Xilinx `hw_server` / `xsdb`, the host may batch
-that command and its drain scans into one USER4 raw-scan sequence
-internally.  That is a transport detail; the bridge protocol is the
-same.
+On AMD/Xilinx `hw_server` / `xsdb` that batch runs as one USER4
+raw-scan sequence; transports without native batching run the same
+scans one by one.  That is a transport detail; the bridge protocol is
+the same.
 
 ### Single write
 
@@ -268,8 +280,9 @@ resp = bridge.axi_write(0x40000000, 0xDEADBEEF)
 # resp == 2 (SLVERR) or 3 (DECERR) on failure → raises AXIError
 ```
 
-Two scans.  Wstrb defaults to `0xF` (write all four bytes).  Pass
-`wstrb=0x3` to write only the low two bytes:
+Same shape as the read: one WRITE scan, then NOP scans until the
+write's completion shows `prev_valid`.  Wstrb defaults to `0xF` (write
+all four bytes).  Pass `wstrb=0x3` to write only the low two bytes:
 
 ```python
 bridge.axi_write(0x40000000, 0x0000ABCD, wstrb=0x3)
@@ -281,8 +294,12 @@ bridge.axi_write(0x40000000, 0x0000ABCD, wstrb=0x3)
 words = bridge.read_block(0x40000000, count=64)    # returns list[int]
 ```
 
-Issues one `SET_ADDR` then `count` `READ_INC` commands plus a NOP
-drain, all in **one batched JTAG sequence** via `raw_dr_scan_batch()`.
+Issues one `SET_ADDR` then `count` `READ_INC` commands plus NOP
+drain scans, all in **one batched JTAG sequence** via
+`raw_dr_scan_batch()`, and keeps the first `count` valid results.  The
+command queue can take reads faster than the AXI side completes them,
+so the batch carries `count + 16` NOP drain scans, and the call raises
+`AXIError` if a read is still unanswered after them.
 It is much faster than issuing one single read per word because the
 inter-scan tool overhead is amortised in one batch.
 
@@ -472,13 +489,16 @@ clear error message that points at the fix (rebuild with a bigger
 
 On the AXI side a burst read is flow-controlled exactly: while the
 bridge fills the FIFO, `rready` is the FIFO's own not-full, and a beat
-is written in the same cycle it is accepted.  A full FIFO holds the
-slave off until the host pops a beat, and no beat is dropped or
-written twice.  The AMD/Xilinx XPM FIFO reports full one entry early
-(`FIFO_DEPTH - 1`), so the last beat of a full-depth burst simply
-waits for the host's first pop.  (Before this was fixed, a registered
-`rready` accepted a beat in the cycle the FIFO filled and dropped it,
-so a 16-beat read on a 16-deep XPM FIFO failed with SLVERR.)
+is written in the same cycle it is accepted, so no beat is dropped or
+written twice.  Together with the admission check above (on bridges
+with `FEATURES[25]`, a burst read goes out only when all its beats fit
+in the room left in the FIFO), the R channel does not wait for the
+host to pop words (the no-drain regression runs on the portable FIFO).
+(Historically, before both fixes, a registered
+`rready` accepted a beat in the cycle the FIFO filled and dropped it;
+the AMD/Xilinx XPM FIFO reports full at `FIFO_DEPTH - 1`, so a 16-beat
+read on a 16-deep XPM FIFO failed with SLVERR, and a full FIFO could
+hold the slave off until the host popped a beat.)
 
 The host learns the bitstream's FIFO_DEPTH from the FEATURES
 register at `0x002C`:

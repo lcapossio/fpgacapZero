@@ -45,6 +45,11 @@ LSRAM, with timing met at 50 MHz.
        --out ramp.vcd --format vcd
    ```
 
+   The ELA samples the board's 50 MHz reference clock.  A VCD's time axis
+   counts samples, so the rate does not change it; for a JSON export
+   (`--out ramp.json`) add `--sample-clock-hz 50000000`, or the file records
+   the 100 MHz default.
+
    The transport reads the PolarFire IDCODE and picks the IR table and burst
    readout itself. With other FTDI adapters plugged in (an Arty, say), name the
    channel: `--hardware "Embedded FlashPro5 A"`.
@@ -69,6 +74,7 @@ LSRAM, with timing met at 50 MHz.
    a = Analyzer(t, chain=1)
    a.connect()
    a.configure(CaptureConfig(pretrigger=8, posttrigger=23, sample_width=8, depth=1024,
+                             sample_clock_hz=50_000_000,
                              trigger=TriggerConfig(mode="value_match", value=0x40, mask=0xFF)))
    a.arm()
    print([s & 0xFF for s in a.capture(timeout=10.0).samples])

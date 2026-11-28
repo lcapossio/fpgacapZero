@@ -36,7 +36,7 @@ Drop the wrapper onto the AXI4-Lite interface you want to watch:
 fcapz_axi_mon_xilinx7 #(
     .ADDR_W(32), .DATA_W(32),
     .DEPTH(1024),        // capture depth (ELA)
-    .TRIG_STAGES(4),     // trigger sequencer stages (ELA)
+    .TRIG_STAGES(1),     // trigger sequencer stages (ELA); 1 for the address presets
     .DECODE_EN(1)        // P2: add the transaction-events word (see below)
 ) u_mon (
     .ACLK(aclk), .ARESETN(aresetn),
@@ -91,9 +91,13 @@ The five channels are flattened **LSB-first** into the capture vector. For
 | `rdata` | 32 | 116 |
 | `rresp` / `rvalid` / `rready` | 2 / 1 / 1 | 148 / 150 / 151 |
 
-A bundled **probe map** (`fcapz/probes/axi4lite_32.prob`) names every field at
-these offsets, so captures and VCD show `awaddr`, `wdata`, `bresp`, … instead of
-one opaque `sample` word. The host loads it for you (next section).
+A **probe map** names every field at these offsets, so captures and VCD show
+`awaddr`, `wdata`, `bresp`, … instead of one opaque `sample` word. At run time
+the host builds it from the geometry the monitor reports
+(`AxiMonitor.probe_map()`), for the reported `ADDR_W` / `DATA_W`. Two
+sidecars generated from the same layout also ship as convenience files for
+the 32/32 geometry: `fcapz/probes/axi4lite_32.prob` and
+`axi4lite_32_decode.prob`.
 
 ## Detecting it
 
@@ -105,8 +109,8 @@ The monitor answers two read-only registers in the free config gap (the ELA owns
 | `0x00E8` | `AXI_MON_ID` | `[31:16]` = `"AM"` (`0x414D`), `[15:8]` = `PROTO` (1 = AXI4-Lite), `[7:0]` = capability flags (bit0 = `DECODE_EN`). |
 | `0x00EC` | `AXI_GEOM` | `[7:0]` `ADDR_W`, `[15:8]` `DATA_W`, `[19:16]` `ID_W`, `[24:20]` `CAP_CHANNELS`. |
 
-The host checks the `"AM"` magic to recognise a monitor and pick the right probe
-map.
+The host checks the `"AM"` magic to recognise a monitor, and builds the probe
+map from `AXI_GEOM` and the `DECODE_EN` flag.
 
 ## From Python
 
@@ -135,7 +139,11 @@ bit (from `mon.probe_map().probes`) in `cfg.trigger.value` and
 `cfg.trigger.mask` before `configure`. `read_addr_capture_config` is the
 read-channel mirror (`araddr` plus `arvalid`, same caveat for `arready`).
 It works on **both** `DECODE_EN` builds (the address is reached wherever it lands
-in the sample, not just the low 32 bits — see *Full-width triggering* below).
+in the sample, not just the low 32 bits — see *Full-width triggering* below),
+but needs `TRIG_STAGES=1`: its mask reaches above bit 31 (the `VALID` bit,
+and on a decode build the address too), and a sequencer stage compares
+only the low 32 bits, so `Analyzer.configure` refuses it on a multi-stage
+build (the wrapper default is 4).
 
 ## Full-width triggering (`WIDE_TRIG`)
 
@@ -156,13 +164,17 @@ A passive tap samples **every** `ACLK`, so a mostly-idle bus fills the buffer
 with idle repeats. On a `DECODE_EN` build, `event_capture_config(...,
 store_on_beats=True)` enables the ELA storage qualifier (no-match-vs-zero over the
 handshake bits) so only cycles where a channel handshakes are stored — the buffer
-holds transaction beats around the trigger instead of idle.
+holds transaction beats around the trigger instead of idle. It needs a monitor
+built with both `DECODE_EN=1` and the ELA's storage qualifier (`STOR_QUAL=1`);
+`Analyzer.configure` refuses it on a `STOR_QUAL=0` build.
 
 ## The decode layer (`DECODE_EN=1`)
 
-Even with `WIDE_TRIG`, a single value-match reaches one contiguous field; the
-decode layer prepends an **8-bit transaction-events word** at bit 0 so
-handshake/response events are triggerable as a group (e.g. "any error"). The
+With `WIDE_TRIG` (on a `TRIG_STAGES=1` build), one value-match mask can
+already combine bits from several fields (that is how
+`write_addr_capture_config` matches `awaddr` plus `awvalid`), but it is still one AND-of-bits match. The decode layer prepends
+an **8-bit transaction-events word** at bit 0 so handshake/response events
+are triggerable as a group (e.g. "any error", pre-ORed in hardware). The
 events (each one combinational, one sample wide) are:
 
 | Bit | Event | Asserted when |
@@ -177,8 +189,8 @@ events (each one combinational, one sample wide) are:
 | 7 | `any_err` | <code>b_err &#124; r_err</code> |
 
 With `DECODE_EN=1` the capture width grows to **160 bits** (events + the 152-bit
-channel block shifted up by 8), `CAP_FLAGS` bit0 reads back `1`, and the host
-loads `axi4lite_32_decode.prob` automatically. Trigger on an error response:
+channel block shifted up by 8), `CAP_FLAGS` bit0 reads back `1`, and the host's
+probe map includes the events word automatically. Trigger on an error response:
 
 ```python
 cfg = mon.event_capture_config("any_err")   # value=mask=0x80 over the events byte
@@ -209,6 +221,12 @@ decoded onto the wrong addresses. See
 [`axi-decode`](10_cli_reference.md#axi-decode).
 
 ## From the web UI
+
+See [chapter 18](18_web_interface.md) for the web server itself, including
+what it refuses from a browser.  On `main` (unreleased) a web request that
+names a `probe_file` is refused, since it would make the server read a file:
+load a `.prob` in the browser and send its probe definitions inline as
+`probes`.  The monitor's own probe map needs no file at all.
 
 Just **Connect** — chains are invisible plumbing. The server autodetects
 which BSCAN chain hosts a debug core and scans the others, so `axi_mon_probe`
@@ -258,8 +276,11 @@ uses the lossless VCD/CSV paths (JSON download is disabled to avoid rounding).
 - **One core per device on ECP5, PolarFire and Gowin.** Their wrappers take the
   device's only TAP primitive, and the manager hubs have no AXI monitor slot
   yet, so the monitor cannot sit beside an ELA or EIO there.
-- **Bundled probe maps** ship for `ADDR_W=DATA_W=32` only; other geometries need
-  a matching `.prob` (the layout is in [What gets captured](#what-gets-captured)).
+- **Bundled probe-map files** ship for `ADDR_W=DATA_W=32` only. Other
+  geometries need no file at run time (`probe_map()` builds the map from the
+  monitor's geometry); to use a CLI `--probe-file` or a saved `.prob`, export
+  the matching map with `fcapz axi-mon --write-probe-file axi.prob` (the layout is in
+  [What gets captured](#what-gets-captured)).
 
 The design rationale, register-map plans, and phasing are in
 [`specs/axi_monitor.md`](specs/axi_monitor.md).

@@ -144,7 +144,8 @@ also disables capture-side actions that change ELA state.
 | `--allow-axi-write` | `fcapz_axi_write`, anywhere on the bus |
 | `--axi-write-range LO:HI` | `fcapz_axi_write`, but only inside this inclusive byte-address range (repeatable; implies `--allow-axi-write`) |
 | `--allow-uart-send` | `fcapz_uart_send` |
-| `--allow-program --bitfile-root DIR` | `fcapz_connect(program=...)` for `.bit` files under `DIR` |
+| `--allow-program` | `fcapz_connect(program=...)` on `hw_server` or `ftdi` with any existing `.bit` file, and a caller-supplied `quartus_stp` executable on `usb_blaster` |
+| `--bitfile-root DIR` | Optional, needs `--allow-program`: confines `program=` to `.bit` files under `DIR` (does not affect `quartus_stp`) |
 | `--probe-root DIR` | Capture config `probe_file` may read a probe map sitting directly in `DIR` |
 | `--allow-host HOST` | A backend may connect to `HOST` as well as loopback (repeatable) |
 
@@ -179,7 +180,11 @@ Two fields reach past the JTAG cable and are therefore confined by default:
 - **`host`** is handed to a network client (hw_server or OpenOCD), so without
   `--allow-host` only `127.0.0.1`, `localhost`, and `::1` are accepted —
   otherwise an agent could point the server at any such daemon on the
-  network.
+  network. Passing this allowlist is not the only check: the hw_server
+  transport itself takes only a host name or an IPv4 address (XSDB does not
+  parse IPv6 literals) and a whole port in 1..65535, so `::1` is usable with
+  OpenOCD but not with hw_server. In the current source (unreleased, on
+  `main`) that transport check refuses such a host up front.
 
 Both appear in `fcapz_status` under `capabilities` (`probe_root`,
 `allowed_hosts`) so an agent can see the policy rather than discover it by
@@ -232,10 +237,11 @@ The live RPC layer supports:
 
 `ir_table` names the JTAG IR-code preset: `"xilinx7"`, `"ultrascale"`,
 `"gowin"`, `"polarfire"`, `"efinix"` or `"ecp5"`. Omit it and the RPC layer
-infers one from `tap` (`gw*` is Gowin, `xcku*`/`xcvu*`/`xcau*` UltraScale,
+infers one from `tap` (`gw*` is Gowin, `mpf*` PolarFire,
+`xcku*`/`xcvu*`/`xcau*` UltraScale, `trion*`/`titanium*`/`efinix*` Efinix,
 `ecp5*`/`lfe5*` ECP5, anything else 7-series), or on `ftdi` from the device
-IDCODE; pass it when the tap name does
-not say which family the part is.
+IDCODE; `serial` has no IR table and `usb_blaster` needs none. Pass it when
+the tap name does not say which family the part is.
 
 `ftdi` drives an FTDI MPSSE adapter directly through the D2XX driver or
 libusb, with no daemon: the PolarFire kits' embedded FlashPro5, a Digilent
@@ -291,14 +297,20 @@ command in flight, rather than queued behind a capture that may run for
 minutes. `fcapz_status` reports `session_state` (`ready` / `busy` /
 `poisoned`) alongside `rpc_busy` and `active_rpc_cmd`.
 
-If the watchdog fires, what happens depends on the transport:
+If the watchdog fires, what happens depends on whether the RPC layer can
+cancel the call:
 
-- **No cancellation hook** (the usual case) — the call may simply be a slow
-  readback finishing late, so the grace window is allowed to elapse and a
-  completed result is returned rather than discarded. A slow-but-successful
-  capture is not thrown away.
-- **Cancellation hook present** — the transport is aborted and given the grace
-  window to unwind. The board session is torn down; reconnect before retrying.
+- **Cancellation hook present** (the normal case: the stock session runs an
+  `RpcServer`, whose `cancel_active()` is the hook) — if the call is still
+  pending, it is cancelled and given the grace window to unwind; the board
+  session is torn down and the tool fails with `watchdog_timeout`, so
+  reconnect before retrying. If the call is still running when the grace
+  window ends, it is abandoned as described below. A call that committed its
+  reply just as the watchdog fired returns that reply.
+- **No cancellation hook** (an RPC implementation without `cancel_active()`)
+  — the call may simply be a slow readback finishing late, so the grace
+  window is allowed to elapse and a completed result is returned rather than
+  discarded.
 
 A command still running after the grace window is **abandoned**, and the
 session becomes `poisoned`: further hardware commands are refused. This is not
@@ -357,7 +369,9 @@ and read out (`status_only=true` to peek without a readout) — so a single hard
 many short polls with no re-arm blind gaps. `fcapz_capture_wait` returns
 `{triggered: false, still_armed: true}` when its `timeout` expires before the
 trigger fires, so the poll loop treats "not yet" as data rather than an error;
-the core stays armed. `fcapz_disarm` stops an arm. A capture `timeout` may
+the core stays armed. A readout is cached exactly like a `fcapz_capture`
+result: it replaces `fcapz://last-capture` and feeds the sample-paging tools.
+`fcapz_disarm` stops an arm. A capture `timeout` may
 exceed `--rpc-timeout` (up to the 300 s cap); the MCP watchdog extends its
 deadline to outlast the caller's wait plus readback rather than orphaning the
 call.
@@ -366,9 +380,9 @@ call.
 always-true condition so the capture fires now — a snapshot of current state
 with no waiting.
 
-`fcapz_capture` takes `include_event_summary` to ask the RPC layer for decoded
-event metadata. The MCP name is deliberately more explicit than the RPC field
-name (`summarize`).
+`fcapz_capture` and `fcapz_capture_wait` take `include_event_summary` to ask
+the RPC layer for decoded event metadata. The MCP name is deliberately more
+explicit than the RPC field name (`summarize`).
 
 Both `fcapz_capture` and `fcapz_capture_wait` take `segments=true`, which
 reads back every segment of a segmented core rather than segment 0 alone
@@ -473,7 +487,7 @@ UTF-8 text. Passing both is rejected.
 | --- | --- | --- |
 | `fcapz://status` | session lifecycle; live snapshot on each fetch | Same information as `fcapz_status`. |
 | `fcapz://last-probe` | `fcapz_probe` | Last ELA probe result, or `{"available":false}`. |
-| `fcapz://last-capture` | `fcapz_capture` | Last full capture response, or `{"available":false}`. |
+| `fcapz://last-capture` | `fcapz_capture`, and a `fcapz_capture_wait` that reads a capture out | Last full capture response, or `{"available":false}`. |
 | `fcapz://last-eio-read` | `fcapz_eio_read` | Last EIO read response, or `{"available":false}`. |
 
 Resource JSON is compact. MCP clients that display resources can pretty-print it
@@ -803,11 +817,13 @@ fcapz_probe()
 fcapz_close()
 ```
 
-Configure now, arm later:
+Configure now, arm later (the windows in these examples assume a core with a
+1024-sample depth, or 256 where noted; `pretrigger + posttrigger + 1` must fit
+the core's depth, or its segment depth on a segmented core):
 
 ```text
 fcapz_connect(backend="openocd", port=6666, tap="xc7a100t.tap")
-fcapz_configure(config={"pretrigger": 128, "posttrigger": 1024})
+fcapz_configure(config={"pretrigger": 128, "posttrigger": 895})
 fcapz_arm()
 fcapz_close()
 ```
@@ -815,21 +831,28 @@ fcapz_close()
 Capture and then explicitly release the large payload:
 
 ```text
-fcapz_capture(config={"pretrigger": 64, "posttrigger": 4096}, timeout=10.0)
+fcapz_connect(backend="hw_server")
+fcapz_capture(config={"pretrigger": 64, "posttrigger": 959}, timeout=10.0)
 fcapz_get_capture_samples(start=0, count=128)
 repeat with next_start until null
 fcapz_drop_last_capture()
 fcapz_close()
 ```
 
-Debug a bus fault with the AXI monitor — anomalies first, then their context:
+Debug a bus fault with the AXI monitor — anomalies first, then their context.
+`probe_file` needs the server started with `--probe-root DIR`, where `DIR`
+holds the probe map directly; the package ships the AXI4-Lite maps
+(`axi4lite_32.prob`, and `axi4lite_32_decode.prob` for `DECODE_EN=1` builds)
+in its `fcapz/probes/` directory, which can serve as `DIR`. Without a probe
+root, pass the same fields inline as `probes`. The window below fits a
+256-deep monitor:
 
 ```text
 fcapz_connect(backend="hw_server")
 fcapz_list_cores()                       # find the AXI monitor's chain
 fcapz_connect(backend="hw_server", chain=<monitor chain>)
-fcapz_capture(config={"probe_file": "axi.prob", "pretrigger": 32,
-                      "posttrigger": 223}, timeout=10.0)
+fcapz_capture(config={"probe_file": "axi4lite_32_decode.prob",
+                      "pretrigger": 32, "posttrigger": 223}, timeout=10.0)
                                          # summary carries the AXI headline counts
 fcapz_axi_transactions(only_anomalies=True)
                                          # then widen around what it found
@@ -877,10 +900,10 @@ fcapz_close(core="uart")
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Tool says a write is disabled | Server was started without the matching safety flag. | Restart with the specific `--allow-*` flag, or keep read-only mode. |
-| `program=` is rejected | Programming is disabled, outside `--bitfile-root`, not a `.bit`, or neither `hw_server` nor `ftdi`. | Start with `--allow-program --bitfile-root DIR` and pass an allowed `.bit` file. |
-| Tool call raises `TimeoutError` | The RPC watchdog (`--rpc-timeout`, 30 s by default) fired before the backend returned. | The board session is torn down, or is being torn down if the call was abandoned. Poll `fcapz_status` until `session_state` is `ready`, then call `fcapz_connect` again. Restart `fcapz-mcp` only if it never returns to `ready`. |
+| `program=` is rejected | Programming is disabled, outside `--bitfile-root` (when set), not a `.bit`, or neither `hw_server` nor `ftdi`. | Start with `--allow-program` (add `--bitfile-root DIR` to confine the path) and pass an allowed `.bit` file. |
+| Tool call fails with `watchdog_timeout` | The RPC watchdog (`--rpc-timeout`, 30 s by default) fired before the backend returned. | The board session is torn down, or is being torn down if the call was abandoned. Poll `fcapz_status` until `session_state` is `ready`, then call `fcapz_connect` again. Restart `fcapz-mcp` only if it never returns to `ready`. |
 | A new tool call is refused while the session is recovering from an abandoned call (`session_recovering`) | A timed-out hardware call is still being torn down; `session_state` is `poisoned`. | Wait: once the abandoned call returns, the server closes the board session, clears its state and goes back to `ready`. Then reconnect. Restart only if recovery never completes. |
-| `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again. |
+| `fcapz://last-capture` is unavailable | No capture has completed, or the payload was dropped/closed. | Run `fcapz_capture` again (or read the next armed capture out with `fcapz_capture_wait`). |
 | USB-Blaster rejects `host` | That backend does not use host/port sockets. | Omit `host`, `port`, and `tap` entirely for `usb_blaster`. |
 | `serial_port ... is not a serial port on this machine` | The name is not one the OS lists, or the board is not in bridge mode yet. | Use a name from the error's `present:` list (or `fcapz list-ports`); program the FPGA first so the bridge enumerates. |
 | `ftdi` connect finds no adapter, or the wrong one | Another program (OpenOCD, a vendor tool) holds the channel, or several adapters are attached. | Close the other program; pass `hardware` with the adapter's description or serial (`usb:...` for a libusb channel). |

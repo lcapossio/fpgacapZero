@@ -21,7 +21,7 @@ back to individual chapters as you need them.
 
 | # | Chapter | When to read |
 |---|---------|--------------|
-| 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the four cores, the vendor matrix, and how the pieces fit together. |
+| 01 | [Overview](01_overview.md) | Start here. What fpgacapZero is, the five cores, the vendor matrix, and how the pieces fit together. |
 | 02 | [Installation](02_install.md) | Install the Python package, the optional GUI extras, and the JTAG transport prerequisites (OpenOCD, Vivado hw_server, or Quartus USB-Blaster). |
 | 03 | [First capture in 10 minutes](03_first_capture.md) | A guided end-to-end walkthrough on the Arty A7-100T reference design: build the bitstream, capture first from the web interface, then repeat/export from the CLI. |
 | 04 | [RTL integration](04_rtl_integration.md) | How to instantiate fcapz cores in your own design. The vendor wrappers, every parameter explained, and the role of `fcapz_version.vh`. |
@@ -38,7 +38,7 @@ back to individual chapters as you need them.
 | 15 | [Export formats](15_export_formats.md) | JSON, CSV, VCD; what each format contains; the auto-generated `.gtkw` waveform-viewer layout file; integration with GTKWave / Surfer / WaveTrace. |
 | 16 | [Versioning and release](16_versioning_and_release.md) | How the project version flows from the `VERSION` file through `tools/sync_version.py` into the RTL `fcapz_version.vh`, the per-core `core_id` magic registers, and the procedure for cutting a new release. |
 | 17 | [Troubleshooting](17_troubleshooting.md) | Common errors, what they mean, and how to fix them. |
-| 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API. |
+| 18 | [Web interface (`fcapz-web`)](18_web_interface.md) | The browser front-end: install and run, local vs. network access with a bearer token, the dockable panel layout, the embedded Surfer viewer, and the shared JSON-RPC API with its web-only limits (the web UI never programs the FPGA; on `main`, unreleased, the server also refuses the `program`, `quartus_stp` and `probe_file` fields). |
 | 19 | [AXI monitor](19_axi_monitor.md) | Capture and trigger on an AXI4-Lite interface over JTAG — a portable, vendor-agnostic AXI bus monitor. Passive tap over the ELA, named AXI fields, and a decode layer for triggering on transaction events (handshakes, error responses). |
 | 20 | [MCP server](20_mcp_server.md) | Agent-facing MCP server (`fcapz-mcp`) over stdio or bearer-token HTTP: the ELA/EIO/AXI/UART tools, capture paging and search, AXI transaction decode, resources, safety flags, backend fields, and large-capture handling. |
 | 21 | [Broker](21_broker.md) | Opt-in per-user broker (`fcapz --broker`, `FCAPZ_BROKER=1`) so several programs share one board: one job per core in arrival order, `CoreBusy` instead of interference, cancellation of a crashed client's jobs, reconnects as new image generations, and `fcapz broker status|stop`. |
@@ -80,9 +80,10 @@ and should be corrected.
 ## What's not in this manual
 
 - Hardware bring-up for vendor wrappers beyond the validated boards:
-  AMD/Xilinx 7-series (Arty A7), Zynq UltraScale+ MPSoC (Kria KV260),
-  Kintex UltraScale (KU035, on a proprietary board), Intel / Altera
-  (DE25-Nano), Gowin (BRS-100), PolarFire (Discovery Kit) and the
+  AMD/Xilinx 7-series (Arty A7, Arty S7-25), Zynq UltraScale+ MPSoC
+  (Kria KV260), Kintex UltraScale (KU035, on a proprietary board),
+  Intel / Altera (DE25-Nano, DE0-Nano), Gowin (BRS-100), PolarFire
+  (Discovery Kit) and the
   serial TAP bridge on an Efinix Trion (Forgix). The shared core RTL is
   covered by simulation, and the remaining vendor wrappers are
   lint-elaborated, but ECP5 and standalone UltraScale+ board-level smoke

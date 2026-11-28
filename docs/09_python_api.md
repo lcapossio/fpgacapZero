@@ -7,8 +7,10 @@
 > and reuse the same controllers that the CLI, RPC server, and GUI
 > are built on top of.
 >
-> **Reference**: every public name with its full signature and docstring
-> is in the generated [Python API reference](specs/python_api.md).
+> **Reference**: the names exported from the package root (plus
+> `QuartusStpTransport`), with full signatures and docstrings, are in the
+> generated [Python API reference](specs/python_api.md).  The broker client
+> `fcapz.broker.BrokerSession` is covered in [chapter 21](21_broker.md).
 
 ## Package layout
 
@@ -74,8 +76,8 @@ Constructor parameters:
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `host` | `"127.0.0.1"` | hw_server host |
-| `port` | `3121` | hw_server TCP port |
+| `host` | `"127.0.0.1"` | hw_server host: a host name or IPv4 address, no IPv6 literal (checked before it reaches XSDB on `main`, unreleased) |
+| `port` | `3121` | hw_server TCP port, a whole number in `1..65535` (checked on `main`, unreleased) |
 | `fpga_name` | `"xc7a100t"` | JTAG target name (XSDB filter pattern); validated against TCL-safe regex |
 | `xsdb_path` | `None` | full path to xsdb if not on PATH |
 | `bitfile` | `None` | if set, `connect()` runs `fpga -file <bitfile>` and waits for FPGA readiness; validated against TCL-safe regex |
@@ -153,9 +155,12 @@ So connect a shared transport once, through `t.connect()` or the first
 controller's `connect()`, and `attach()` the rest: a second `Analyzer` for
 another manager slot is `Analyzer(t, instance=1)` plus `attach()`.
 
-The controllers cooperate on chain selection via `Transport.select_chain()`.
-Each controller's methods automatically restore chain 1 (the
-default) on exit so the others stay reachable.
+The controllers cooperate on chain selection via `Transport.select_chain()`:
+each one selects the chain (and core-manager slot) it needs before it
+touches the core, so it does not depend on what another controller left
+selected.  Some methods also put chain 1 back afterwards (for example
+`EioController.attach()` and the bridges' `attach()`), but that is
+method-specific, not a guarantee.
 
 The desktop GUI ([chapter 12](12_gui.md)) uses exactly this pattern
 under the hood — one shared transport, four cooperating
@@ -169,9 +174,10 @@ controllers, no spawning a separate xsdb per panel.
 from fcapz import Analyzer, CaptureConfig, TriggerConfig, ProbeSpec
 
 a = Analyzer(transport)
-a.connect()                  # selects chain 1, validates ELA core_id
+a.connect()                  # opens the transport, selects chain 1 / its slot
+info = a.probe()             # reads and checks the ELA identity and geometry
 # ... do work ...
-a.close()                    # releases the transport
+a.close()                    # closes the transport
 ```
 
 `Analyzer(transport, chain=1, instance=None, manager=None)`: `instance`
@@ -275,12 +281,16 @@ importable from `fcapz.analyzer`) if the trigger never fires within
 A plain `TimeoutError` from the transport means something else stopped
 answering, and is not.
 
-When `TIMESTAMP_W > 0`, timestamps are read via
-`transport.read_timestamp_block()` if the transport implements that
-method (writes `BURST_PTR[31]=1` to switch burst readout to the timestamp
-BRAM).  If the method is absent, `Analyzer` falls back
-to `read_block()` over USER1, which is correct but slower.
-`XilinxHwServerTransport` always implements the fast path.
+When `TIMESTAMP_W > 0`, timestamps are read by burst (`BURST_PTR[31]=1`
+switches burst readout to the timestamp BRAM) only when the slot has a
+burst path and the transport can burst it: wide (`SAMPLE_W > 32`) cores
+and managed slots off the two-chain burst use the transport's single-chain
+helper, other cores use `transport.read_timestamp_block()` when the
+timestamp fits the transport's timestamp burst (32 bits on the JTAG
+transports).  Otherwise, `Analyzer` reads the timestamp words through the
+USER1 DATA window, which is correct but slower.  See
+"Per-sample timestamps" in [chapter 05](05_ela_core.md) for the
+per-path details.
 
 With `rle=True`, run counts are read the same way, through
 `transport.read_run_length_block()` (`BURST_PTR[31:30]=2'b11`) or, without a
@@ -316,10 +326,13 @@ completes, in order, releasing its segment as soon as it is read.
 that follows a wait (the host fell behind and every segment was
 full), and `result.lost` counts what the waits have cost since the arm
 (stored samples with `raw=True`, sample clocks otherwise).  With
-`raw=True` (needs `pretrigger=0`, `posttrigger >= 1`, and no trigger
-delay or holdoff) every stored sample is a trigger, so the windows are
-consecutive blocks.  Runs until *count* windows or
-until the generator is closed, then resets the core.  Raises
+`raw=True` (needs `pretrigger=0`, `posttrigger >= 1`, no trigger
+delay or holdoff, and no storage qualification) every stored sample is a
+trigger, so the windows are consecutive blocks.  No continuous capture
+supports run-length capture (`rle=True`); these are checked when the
+generator starts, after `configure()` has accepted the config.  Runs
+until *count* windows or until the generator is closed, then resets the
+core.  Raises
 `CaptureNotReady` when no window completes within *timeout*, and
 `CaptureChangedError` when another controller arms the core or takes
 the ring.  See [chapter 05](05_ela_core.md#continuous-capture).
@@ -553,15 +566,15 @@ at `pretrigger+1..pretrigger+posttrigger`.
 from fcapz import EioController
 
 eio = EioController(transport, chain=3)
-info = eio.connect()
-# also exposes eio.in_w, eio.out_w, eio.version_major, eio.version_minor, eio.core_id
+eio.connect()                       # returns None; checks identity, reads widths
+print(eio.in_w, eio.out_w, eio.version_major, eio.version_minor, eio.core_id)
 
 value = eio.read_inputs()           # int, IN_W bits
 bit5  = eio.get_bit(5)              # 0 or 1
 eio.write_outputs(0xA5)             # int, masked to OUT_W bits
 eio.set_bit(3, 1)                   # read-modify-write a single bit
 back = eio.read_outputs()           # read back the OUT_W register
-eio.close()
+eio.close()                         # closes the transport
 ```
 
 See [chapter 06](06_eio_core.md) for the full walkthrough.
@@ -585,6 +598,7 @@ info = bridge.connect()
 #   "data_w": 32,
 #   "fifo_depth": 16,
 #   "stream": False,
+#   "safe_writes": True,
 # }
 
 # Single transactions
@@ -612,6 +626,10 @@ exceeds `fifo_depth` or AXI4's max burst (256).
 `stream_read` raises `RuntimeError` on a bitstream without the
 streaming read and `AXIError` when the range's AXI response is not OKAY
 or every retry failed.
+`safe_writes` (also `bridge.has_safe_writes`) reports `FEATURES[25]`, the
+bus-safe write model; on such a bridge `bridge.axi_status()` reads
+`CFG_AXI_STATUS`, what the bridge still owes the slave (its `"idle"` key
+tells whether the bus is idle), and raises `RuntimeError` without it.
 Old EJTAG-AXI bitstreams that still report `"EJAX"` are accepted with a
 `RuntimeWarning`; their `connect()` info includes `legacy_id=True` and
 `legacy_raw_id=0x454A4158`. `bridge_id` and `core_id` stay normalized to
@@ -695,9 +713,12 @@ bursts = find_bursts(result)
 
 ### `frequency_estimate(result, bit, probe=None) -> Optional[float]`
 
-Estimates the toggle frequency of a bit, in Hz, using the
-sample_clock_hz from `result.config`.  Returns `None` if there are
-fewer than 2 rising edges.
+Estimates the toggle frequency of a bit, in Hz: `sample_clock_hz` from
+`result.config` divided by the average spacing of its rising edges, counted
+in captured **entries**.  The Hz figure is only right when each stored
+entry is one sample clock: it ignores decimation, storage qualification,
+timestamps and run lengths.  Returns `None` if there are fewer than 2
+rising edges.
 
 ### `summarize(result, probes=None) -> dict`
 

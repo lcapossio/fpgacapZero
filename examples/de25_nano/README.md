@@ -165,6 +165,18 @@ python examples/de25_nano/run_hw_tests.py \
 
 The runner programs the generated `.sof`, probes the ELA on instance 1,
 smoke-tests EIO on instance 3, and optionally captures a short waveform.
+The runner's `--capture` export does not pass the sample clock, so its
+`sample_clock_hz` reads the CLI's 100 MHz default even though the ELA samples
+the 50 MHz `CLOCK1_50`.  For a correctly timed capture, run the CLI yourself
+with `--sample-clock-hz`:
+
+```sh
+fcapz --backend usb_blaster --tap auto --hardware "DE25-Nano [USB-1]" --chain 1 \
+  capture --pretrigger 8 --posttrigger 16 \
+  --trigger-value 0 --trigger-mask 0xff \
+  --sample-clock-hz 50000000 \
+  --out de25_nano_capture.json --format json
+```
 
 To reuse an already-built and programmed bitstream:
 

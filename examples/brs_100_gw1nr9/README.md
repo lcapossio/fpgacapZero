@@ -92,7 +92,9 @@ python examples/brs_100_gw1nr9/build.py --gowin /path/to/gw_sh
 
 fcapz's FTDI backend loads the `.fs` into the FPGA's SRAM directly through
 the board's USB adapter (channel A, "USB Debugger A"), in about 2.5 s.  The
-flash is not touched, so a power cycle boots the flash image again:
+flash is not touched, so a power cycle boots the flash image again.  This
+needs fcapz from source on `main` (unreleased, not in 0.5.2), and the FPGA
+must be alone on the JTAG chain:
 
 ```sh
 fcapz --backend ftdi --hardware "USB Debugger A"   --program examples/brs_100_gw1nr9/out/fcapz_brs_100_gw1nr9.fs probe
@@ -126,6 +128,7 @@ fcapz --backend openocd --host 127.0.0.1 --port 6666 \
   --tap GW1NR-9C.tap \
   capture --channel 0 --pretrigger 8 --posttrigger 16 \
   --trigger-value 0 --trigger-mask 0xff \
+  --sample-clock-hz 60000000 \
   --out brs_counter.json --format json
 ```
 
@@ -136,8 +139,12 @@ fcapz --backend openocd --host 127.0.0.1 --port 6666 \
   --tap GW1NR-9C.tap \
   capture --channel 1 --pretrigger 8 --posttrigger 16 \
   --trigger-value 0 --trigger-mask 0xff \
+  --sample-clock-hz 60000000 \
   --out brs_buttons.json --format json
 ```
+
+Both channels sample at the design's 60 MHz system clock; without
+`--sample-clock-hz` the export assumes 100 MHz.
 
 For VCD output, change `--format json` to `--format vcd` and use a `.vcd`
 output path.

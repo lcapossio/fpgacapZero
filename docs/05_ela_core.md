@@ -125,9 +125,11 @@ the ELA core.  Anything more complex needs the **trigger sequencer**.
 ## Trigger sequencer (TRIG_STAGES > 1)
 
 When you build the ELA with `TRIG_STAGES=2..4`, the core gets a
-multi-stage state machine where each stage has **two comparators
-(A and B)** with a selectable compare mode each, and a combine rule
-between A and B.
+multi-stage state machine where each stage has a comparator A and,
+with `DUAL_COMPARE=1` (the default), a comparator B, each with a
+selectable compare mode, and a combine rule between A and B.  A
+`DUAL_COMPARE=0` build has comparator A only, so every stage must use
+combine 0 (A only).
 
 On such a core the hardware triggers only from the sequencer. A capture
 configured with a plain `trigger` and no sequence still works: the host
@@ -137,13 +139,19 @@ as CHANGED, `both` as EQ on A OR CHANGED on B, which needs `DUAL_COMPARE`).
 The sequencer is the most powerful trigger feature in fcapz.  It
 lets you say things like:
 
-> "Wait for `addr == 0x4000_0000` to happen, then 5 clock cycles
-> later, when `data > 0x80`, fire the trigger"
+> "Wait for `addr == 0x4000_0000` to happen, then, on a later
+> sample where `data > 0x80`, fire the trigger"
 
 or
 
-> "Trigger only after seeing `start` go HIGH AND `stall` go LOW,
-> followed by `error` going HIGH within the next 100 cycles"
+> "Wait until `start` has gone HIGH while `stall` is LOW, then fire
+> on the 5th sample where `error` goes HIGH"
+
+A stage counts **qualifying hits** (samples where its combined
+condition is true), not clock cycles: it has no timer, so it cannot
+express a fixed delay or a deadline such as "within 100 cycles".  For
+a fixed delay after the trigger, use the
+[trigger delay](#configurable-trigger-delay).
 
 ### Compare modes
 
@@ -447,16 +455,33 @@ two 32-bit words, with the upper word zero-extended in bits `[31:16]`.
 The same zero-extension rule applies to wide sample readback when the
 last 32-bit chunk is only partially used.
 
-**Timestamp readback uses the 256-bit burst path**, not the slow per-word
-USER1 register reads.  Default single-chain builds keep those burst scans
-on USER1; legacy two-chain builds use DATA_CHAIN. Writing `BURST_PTR`
-(0x002C) with `bit[31]=1` switches the burst staging mux from the sample
-BRAM to the timestamp BRAM; subsequent 256-bit DR scans return
-`256 / TIMESTAMP_W` packed timestamps per scan. The host calls
-`transport.read_timestamp_block()` which handles the BRAM-select bit
-and the no-priming-scan protocol automatically.  If the transport does
-not implement that method the host falls back to the USER1 path, which
-is correct but significantly slower.
+**Timestamp readback can use the 256-bit burst path** instead of the
+slow per-word USER1 register reads, when the core, the slot and the
+transport all allow it.  Default single-chain builds keep those burst
+scans on USER1; legacy two-chain builds use DATA_CHAIN. Writing
+`BURST_PTR` (0x002C) with `bit[31]=1` switches the burst staging mux
+from the sample BRAM to the timestamp BRAM; subsequent 256-bit DR scans
+return `256 / TIMESTAMP_W` packed timestamps per scan.  The first scan
+of a burst only primes the pipeline (on the single-chain pipe it can
+carry a core-manager header instead) and the transport discards it.
+
+The analyzer picks the readout path per capture:
+
+- A wide core (`SAMPLE_W > 32`) with a burst path, or a managed slot
+  that the two-chain burst cannot reach, uses the transport's
+  single-chain helper (`read_timestamp_block_single_chain()`) on the
+  control chain.
+- Otherwise, if the slot has a burst path, the transport bursts the
+  DATA window, and the timestamp is no wider than the transport's
+  timestamp burst (32 bits on the JTAG transports), it uses
+  `transport.read_timestamp_block()`.
+- Everything else (no burst path, `--no-burst`, a 48-bit timestamp on
+  a JTAG transport where the single-chain helper does not apply, a
+  transport without these methods, or a burst the transport reports
+  unavailable) reads the timestamp words through the
+  USER1 DATA window (in `DATA_OFFSET` pages past the end of the
+  16-bit window, on cores that have it).  That is correct but
+  significantly slower.
 
 <a id="run-length-capture"></a>
 ## Run-length capture (`RLE_W > 0`)
@@ -1184,16 +1209,18 @@ The full per-configuration table — Slice LUTs, FFs, BRAM, and the
 
 Against the AMD/Xilinx ILA at the same width, depth and trigger
 features (ILA counted with its `dbg_hub`), the smallest fcapz build
-takes 52-59% of the smallest ILA's LUTs.  Without the sequencer, fcapz
-takes 18-24% more LUTs than the ILA for a simpler trigger.  With the
-sequencer it takes 31% fewer LUTs at 8 bits and 9% more at 64 bits, and
-fewer FFs at both.
+takes 52-57% of the smallest ILA's LUTs.  Without the sequencer, fcapz
+takes 2-4% more LUTs than the ILA for a simpler trigger.  With the
+sequencer it takes 39% fewer LUTs at 8 bits and 24% fewer at 64 bits,
+and fewer FFs at both.
 See [the comparison](specs/architecture.md#against-the-amdxilinx-ila).
 
 The [Arty reference design](../examples/arty_a7/arty_a7_top.v) enables
 `DECIM_EN`, `EXT_TRIG_EN`, `TIMESTAMP_W=32`, and `NUM_SEGMENTS=4` together
-with EIO and EJTAG-AXI — **post-place** that top-level uses about **3.2k
-slice LUTs** and **1.5 BRAM tiles** after the EJTAG-AXI FIFO trim
+with EIO and EJTAG-AXI — **post-place** that top-level uses about **2.4k
+slice LUTs** (2,371) and **1.5 BRAM tiles** after the EJTAG-AXI FIFO trim
+with `DEBUG_EN=0`; the 3,244-LUT figure in the same table is the
+historical baseline from before bridge debug telemetry was made optional
 (see [`specs/architecture.md`](specs/architecture.md#resource-usage-xc7a100t)).
 Your tool and family will vary.
 

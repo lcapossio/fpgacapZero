@@ -35,10 +35,12 @@ fcapz-web --host 0.0.0.0 --port 7373    # --token defaults to $FCAPZ_WEB_TOKEN
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or the
 `FCAPZ_WEB_TOKEN` environment variable) whenever you do: it is then required as
-`Authorization: Bearer <token>` on every `/api` route and as `?token=` on the
-WebSocket. On a non-localhost bind the server prints the token at startup
-(to stderr), so you can copy it into the browser. It does so only when stderr
-is a terminal, so the token does not end up in a service log.
+`Authorization: Bearer <token>` on `POST /api/rpc` and `GET /api/logs`, and as
+`?token=` on the `/api/ws` WebSocket. A missing or wrong token gets HTTP 401
+(the WebSocket handshake is closed instead). `GET /api/version` stays public so
+the UI can show the version before connecting. On a non-localhost bind the
+server prints the token at startup (to stderr), so you can copy it into the
+browser. It does so only when stderr is a terminal, so the token does not end up in a service log.
 The UI hides the token field until a server asks for it: once a request is
 refused as unauthorized (typically your first **Connect**), the Connection panel
 shows an **API token** field; paste the same value there and press **Connect**
@@ -63,8 +65,9 @@ and `npm run dev` proxies `/api`), so a random website cannot drive the board;
 enable it only if you serve the frontend from a different origin, with
 `--cors-origin`. CORS does not apply to WebSockets, and it only hides the
 reply to a simple cross-site `POST`, so `/api/ws` and `/api/rpc` check the
-request's `Origin` themselves: it must be the server's own origin (scheme, host
-and port), a `--cors-origin`, or a loopback page connecting from loopback (the
+request's `Origin` themselves (the `/api/rpc` check is unreleased, on `main`;
+0.5.2 checks only the WebSocket): it must be the server's own origin (scheme,
+host and port), a `--cors-origin`, or a loopback page connecting from loopback (the
 dev proxy). A client that sends no `Origin` — a script rather than a browser —
 is governed by the token as before. When bound to a loopback address the server also rejects
 requests whose `Host` header is not a loopback name (anti-DNS-rebinding).
@@ -119,10 +122,10 @@ connected. The panels:
   `cancel` command), so a connect stuck on a hung probe no longer holds the
   server until it times out; Disconnect while a command runs interrupts it
   the same way. Pick the backend
-  (OpenOCD, AMD/Xilinx hw_server, Intel/Altera **USB-Blaster**, or a direct
-  **FTDI** cable), host and port. For `usb_blaster` the host/port fields are
-  replaced by a single optional **Quartus cable** field (e.g.
-  `DE25-Nano [USB-1]`; blank auto-selects the sole attached cable) — the
+  (OpenOCD, AMD/Xilinx hw_server, Intel/Altera **USB-Blaster**, a direct
+  **FTDI** cable, or **serial** for the byte-stream TAP bridge), host and
+  port. For `usb_blaster` the host/port fields are replaced by a single
+  optional **Quartus cable** field (e.g. `DE25-Nano [USB-1]`; blank auto-selects the sole attached cable) — the
   `quartus_stp` path lives on the server (auto-detected, or its
   `--quartus-stp` flag), never in the browser, and Connect goes straight to
   the local cable with no TCP scan. `ftdi` works the same way with an
@@ -135,7 +138,11 @@ connected. The panels:
   clock field, so `ftdi` runs at the server's default TCK of 6 MHz. The
   server holds the channel until Disconnect, so close `hw_server`, OpenOCD
   and vendor programmers first (see
-  [`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport)). For OpenOCD, Connect
+  [`FtdiMpsseTransport`](14_transports.md#ftdimpssetransport)). `serial`
+  replaces host, port and tap with a **Serial port** field, which offers the
+  ports the server lists (with a rescan button), and a **Baud** field
+  (default 1000000). The analyzer holds the port exclusively, so the **EIO**
+  and **AXI** tabs are unavailable on a serial session. For OpenOCD, Connect
   **discovers fpgacapZero-compatible boards** — it
   probes each tap for the ELA identity and sweeps a few TCL ports (one OpenOCD
   instance per board) — and fails only if none are found; one board connects
@@ -153,8 +160,11 @@ connected. The panels:
   hw_server itself. The BSCAN chain is **autodetected server-side** — the user
   never picks one.
 - **Cores** — stacked with Connection; the dock **jumps to it once a connect
-  lands**. Lists every core discovered on the target (the ELA, any EIO, and
-  cores on other chains such as an AXI monitor) with their parameters; the
+  lands**. Lists the cores the RPC `list_cores` command finds, with their
+  parameters: the connected ELA (plus the other slots of a core manager on
+  its chain), the session's EIO (else the first found on USER1/2), and plain
+  ELAs or AXI monitors on chains 1, 2 and 5. Bridges are not listed (the RPC
+  `discover` command sweeps the backend's discovery chains, bridges included). The
   core the session is bound to is marked **in use**, and any other capture
   core gets a **Use this core** button that switches to it in one click. EIO
   is also auto-discovered into its own panel on connect.
@@ -188,12 +198,15 @@ connected. The panels:
   so every field is listed and triggerable; `!=`/second-comparator combinations
   on fields above bit 32 still zero-extend and are refused with a clear message.
   A **Trigger condition** dropdown picks **Global AND / Global OR**,
-  exactly like ILA. The table compiles onto the hardware (all `==` rows
-  merge into one comparator pattern under AND; a second pattern, a `!=`, or
-  an edge uses the sequencer stage's dual compare — `TRIG_STAGES ≥ 2`), and
-  combinations the comparators can't express are refused with a message
-  saying why. The raw trigger fields (mode/value/mask, external trigger,
-  sequencer JSON) stay editable under **Advanced**.
+  exactly like ILA. The table compiles onto the hardware: all `==` rows
+  merge into one comparator pattern under AND, and a lone `==` pattern or a
+  lone any-change condition (**B** edges) fits the simple trigger on every
+  build. Anything else (a second pattern, a `!=`, a rising or falling edge)
+  runs on a sequencer stage and needs a `TRIG_STAGES ≥ 2` build; using both
+  of the stage's comparators also needs `DUAL_COMPARE=1`, and each compare
+  mode must be one the core advertises. Combinations the hardware can't
+  express are refused with a message saying why. The raw trigger fields
+  (mode/value/mask, external trigger, sequencer JSON) stay editable under **Advanced**.
 - **Run** — a fixed one-row toolbar strip sitting between the config tabs
   and the waveform viewer (a headerless, fixed-height dock group — no tab,
   can't be resized or covered): **Arm** (trigger-gated capture), **Trigger
@@ -217,7 +230,8 @@ connected. The panels:
 - **AXI** — attach the JTAG-to-AXI4 bridge on a chain, then single 32-bit
   read/write (with `WSTRB`) and block dump, with an operation log.
 - **AXI Mon** — when the target has an [AXI monitor](19_axi_monitor.md)
-  anywhere, this tab shows its geometry and builds AXI-aware triggers:
+  on the connected chain or one of the scanned chains (1, 2 and 5), this tab
+  shows its geometry and builds AXI-aware triggers:
   transaction-event checkboxes on decode builds (`any_err`, handshakes, …) or
   a write-address match otherwise. Applying a trigger or the probe map
   automatically re-binds the session to the monitor if it wasn't the active
@@ -235,25 +249,34 @@ expose the **same** command set:
 
 Every command and field is exactly the contract in
 [chapter 11](11_rpc_server.md): `connect`, `probe`, `capture`, `eio_*`,
-`axi_*`, `uart_*`, with these exceptions, which hold for every client:
+`axi_*`, `uart_*`, with these exceptions, which hold for every client. The
+first four are unreleased (on `main`); 0.5.2 accepts these fields and opens
+any serial port name:
 
-- A request carrying `program` is refused, since it would make the server
-  open that path and reprogram the FPGA.  Program with the CLI
-  (`--program`), the desktop GUI or the stdio RPC server, then connect from
-  the browser.
-- A request carrying `quartus_stp` is refused: the server runs only the
-  `quartus_stp` it was started with (`--quartus-stp`, else the one found on
-  the machine).
-- A request carrying `probe_file` is refused: send the probe definitions
-  inline as `probes`.
+- A request with a non-null `program` (even an empty string) is refused,
+  since it would make the server open that path and reprogram the FPGA.
+  Program with the CLI (`--program`), the desktop GUI or the stdio RPC
+  server, then connect from the browser.
+- A request with a non-null `quartus_stp` is refused: the server runs only
+  the `quartus_stp` it was started with (`--quartus-stp`, else the one found
+  on the machine).
+- A request with a non-null `probe_file` is refused: send the probe
+  definitions inline as `probes`.
 - A serial `connect` opens only a port that `list_serial_ports` lists
   (case-insensitive on Windows), never another path.
+- `openocd_*` commands are answered only for loopback clients, and serial
+  access has its own rule for remote clients (both described
+  [above](#reaching-it-from-another-machine)).
 
-A hw_server `host` must be a host name or an IPv4 address, on every front end
-(XSDB does not parse IPv6 literals in its URL).
+Also unreleased, on every front end: a hw_server `host` must be a host name or
+an IPv4 address (XSDB does not parse IPv6 literals in its URL) and its `port` a
+whole number in 1..65535, and a hw_server `scan_targets` whose connection fails
+reports an error instead of an empty target list.
 
-**Errors are in-band** (`{"ok": false, "error": ...}`), so a
-bad command still returns HTTP 200 — matching the line-protocol semantics. You
+**Command errors are in-band** (`{"ok": false, "error": ...}`), so a
+bad command still returns HTTP 200 — matching the line-protocol semantics.
+A missing or wrong token is an HTTP 401, checked before the command runs (a
+body that is not valid JSON is refused even earlier, with HTTP 422). You
 can drive the server with `curl` exactly as you would pipe JSON to
 `python -m fcapz.rpc`:
 

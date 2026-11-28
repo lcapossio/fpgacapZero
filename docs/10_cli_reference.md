@@ -52,6 +52,17 @@ subcommand follows:
 
 <!-- END GENERATED cli:global -->
 
+Notes on the table above:
+
+- **`--host` with `hw_server`** must be a host name or an IPv4 address
+  (XSDB takes no IPv6 literal), and the port a whole number in
+  `1..65535`; anything else is refused before XSDB runs (on `main`,
+  unreleased).
+- **Gowin `.fs` programming with `--backend ftdi`** is on `main`,
+  unreleased (not in 0.5.2).  It loads a GW1NR-9C's SRAM (the flash is
+  never written), and the FPGA must be the only device on the JTAG
+  chain.
+
 Examples:
 
 ```bash
@@ -443,8 +454,9 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --out sparse.json
 
 # Multi-stage trigger sequencer (inline JSON).
-# Needs a build with TRIG_STAGES >= the number of stages (2 here); the
-# reference Arty bitstream is TRIG_STAGES=1 and fails with
+# Needs a build with TRIG_STAGES >= the number of stages (2 here) and,
+# because stage 1 uses cmp_a 3 (GT), REL_COMPARE=1. The reference Arty
+# bitstream is TRIG_STAGES=1 and fails with
 # "sequence has 2 stages but hw supports only 1".
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
@@ -456,7 +468,7 @@ fcapz --backend hw_server --port 3121 --tap xc7a100t \
         --probes counter:8:0 \
         --out sequenced.json
 
-# Same, but loaded from a JSON file (same TRIG_STAGES requirement)
+# Same, but loaded from a JSON file (same TRIG_STAGES / REL_COMPARE needs)
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       capture \
         --trigger-sequence my_sequence.json \
@@ -534,18 +546,18 @@ CLI `--sample-width` or `--sample-clock-hz` values still override them.
 
 ### The `--trigger-sequence` JSON schema
 
-Each stage is a JSON object with these fields (all optional except
-`value_a`):
+Each stage is a JSON object with these fields, all optional (an
+omitted `value_a` / `value_b` is 0):
 
 ```json
 {
   "cmp_a":      0,           // 0..8 — compare mode A (default 0 = EQ)
-  "cmp_b":      0,           // 0..8 — compare mode B
-  "combine":    0,           // 0=A, 1=B, 2=A&B, 3=A|B (default 0)
+  "cmp_b":      0,           // 0..8 — compare mode B (used when combine selects B)
+  "combine":    0,           // 0=A, 1=B, 2=A&B, 3=A|B (default 0; nonzero needs DUAL_COMPARE=1)
   "next_state": 0,           // which stage to advance to (default 0)
   "is_final":   false,       // true on the final stage that fires the trigger
   "count":      1,           // advance after this many matches (default 1)
-  "value_a":    "0x42",      // hex string or int
+  "value_a":    "0x42",      // hex string or int (default 0)
   "mask_a":     "0xFFFFFFFF",
   "value_b":    "0",
   "mask_b":     "0xFFFFFFFF"
@@ -578,6 +590,17 @@ Options `stream` has in addition to those of `configure`:
 | `--out FILE` | required | JSON Lines output, one capture export per window ('-' = stdout) |
 
 <!-- END GENERATED cli:stream/configure -->
+
+Some combinations pass the option parser and are refused when the stream
+starts (`error: ...`, exit code 1):
+
+- run-length capture (`--rle`) is not supported by any continuous capture;
+- with `--raw`: `--pretrigger 0`, `--posttrigger` at least 1, no
+  `--trigger-delay` or `--trigger-holdoff`, and no storage qualification
+  (`--stor-qual-mode`).
+
+Setting `--posttrigger` to the segment depth - 1 is not required; it gives
+the largest, and so the fewest, windows.
 
 ```bash
 # Triggered windows, one per trigger, for as long as it runs
@@ -930,8 +953,10 @@ Exactly one of `--data`, `--file`, `--hex` is required.
 Send a string, hex bytes, or a file:
 
 ```bash
+# Bash: $'...' turns \n into a newline; inside "..." it stays a
+# backslash and an n (two bytes)
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
-      uart-send --data "Hello, world!\n"
+      uart-send --data $'Hello, world!\n'
 
 fcapz --backend hw_server --port 3121 --tap xc7a100t \
       uart-send --hex 48656C6C6F0A
@@ -962,8 +987,9 @@ fcapz uart-recv --count 64 --timeout 2.0
 # Get one line (stops at \n)
 fcapz uart-recv --line
 
-# Get whatever is currently in the FIFO and exit
-fcapz uart-recv --count 0 --timeout 0.1
+# Get whatever is currently in the FIFO and exit (--count 0 returns as
+# soon as a pop finds the FIFO empty; it does not wait for --timeout)
+fcapz uart-recv --count 0
 ```
 
 ### `uart-monitor`
@@ -1049,20 +1075,38 @@ fcapz broker stop
 
 ## Argument validation
 
-All numeric arguments are validated at parse time:
+Arguments are checked in three places, with different results.
+
+**At parse time** (argparse prints its usage and an `error: ...` line, exit
+code 2):
 
 - `--port`: must be 1..65535
 - `--timeout`: must be > 0
 - `--count` (axi-dump, axi-fill): must be > 0
-- `--count` (uart-recv): must be >= 0
+- `--count` (uart-recv, stream): must be >= 0
 - `--trigger-delay`: must be 0..65535
-- `--probes`: width > 0, lsb >= 0, no overlap
-- `--trigger-sequence`: malformed JSON / missing file → `ArgumentTypeError`
-- `--tap` and `--program`: validated against the TCL-safe regex
-  inside the transport (rejects quotes, brackets, semicolons)
 
-If validation fails you get an `argparse: error: ...` message and
-exit code 2 — no surprises.
+**When the capture configuration is built and applied** (`configure`,
+`capture`, `stream`; `error: ...` on stderr, exit code 1):
+
+- `--probes`: each entry must be `name:width:lsb`; the geometry (width > 0,
+  lsb >= 0, lsb + width <= sample width, no overlap) is checked by
+  `Analyzer.configure()`
+- `--trigger-sequence`: malformed JSON, an unreadable file or a value that
+  is not a JSON array
+- features the bitstream lacks: more stages than `TRIG_STAGES`, a
+  relational compare without `REL_COMPARE=1`, a nonzero `combine` without
+  `DUAL_COMPARE=1`, storage qualification or run-length capture the core
+  was built without, a trigger above 32 bits without `WIDE_TRIG`.
+  Decimation and the external-trigger mode are not checked; a core built
+  without them ignores the writes
+
+**By the transport**, with rules that depend on the backend: for example
+`--tap`, `--program` and `--host` are checked before they reach an XSDB or
+OpenOCD command.  A check made while the transport is constructed runs
+before the commands' own error handling, so it can end in a Python
+traceback rather than a one-line `error:` message; a failure while
+connecting is reported as `error: ...` with exit code 1.
 
 ## Exit codes
 
@@ -1071,7 +1115,13 @@ exit code 2 — no surprises.
 | `0` | Success |
 | `1` | Runtime error (TimeoutError, RuntimeError, etc.) — message on stderr |
 | `2` | Argument parse error, or a command that does not run through the broker |
-| `130` | Interrupted (Ctrl+C) |
+| `130` | A `--broker` job interrupted with Ctrl+C (the job is cancelled) |
+
+Ctrl+C is handled per command: `uart-monitor` prints `monitor stopped`,
+`stream` resets the core and prints its summary, and `openocd-bridge`
+prints `stopped`; all three then exit 0.  Other commands do not catch it,
+so Python's default applies (a traceback; on Linux and macOS the shell
+reports 130).
 
 ## What's next
 

@@ -51,6 +51,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **FTDI waits at a slow TCK with a short USB timeout.**  Idle clocking and
   bitstream writes are paced in pieces that fit the channel's USB timeout,
   not a fixed quarter second, so they no longer time out there.
+- **Vivado insertion script: cross-clock probes and unsafe edits.**
+  `fcapz_insert_vivado.tcl` classifies probes on the wired netlist and puts
+  a false path (with a warning) only on probes launched by a clock the ELA
+  does not sample on, so same-clock and clock-muxed paths stay timed.  It
+  refuses, before editing, output nets named twice, constant-driven or
+  driverless nets, ELAs wider than 256 bits, a bad `-chain` or `-tck_mhz`
+  (NaN and Inf included) and projects open on disk, and stops before
+  writing the output checkpoint when a one-sided clock group covers the
+  TCK crossings.
+- **CI workflow tokens are read-only by default.**  Both workflows set
+  `permissions: contents: read`; only the publishing jobs add
+  `id-token: write`.
+- **Documentation brought up to date.**  Release labels (libusb and
+  multi-device FTDI chains shipped in 0.5.2; the web hardening and Gowin
+  programming above are unreleased), copyable commands that no longer
+  parsed, the waveform, register-map and transport specs, troubleshooting
+  advice and the RPC, web, MCP and GUI references now match the code.
 
 ## [0.5.2] — 2026-11-24
 
@@ -2957,7 +2974,7 @@ version constants a bump regenerates.
 
 ---
 
-## [v0.3.0]
+## [0.3.0] — 2026-04-08
 
 ### ⚠ Breaking changes
 
@@ -3326,7 +3343,7 @@ upgrading the host.
 
 ---
 
-## [0.1.0] — 2026-03-16
+## [0.1.0] — 2026-04-01
 
 ### Added
 

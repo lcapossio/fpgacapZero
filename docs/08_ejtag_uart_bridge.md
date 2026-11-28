@@ -11,9 +11,13 @@
 The EJTAG-UART bridge gives the host PC a **bidirectional UART**
 to your design over JTAG, with TX and RX async FIFOs, **without
 burning a physical UART pin** on your FPGA package and **without
-wiring up a USB-serial adapter**.  The bridge lives on JTAG USER4
-(CHAIN=4), the same chain as the EJTAG-AXI bridge — they're
-mutually exclusive in any one bitstream.
+wiring up a USB-serial adapter**.  On AMD/Xilinx the bridge defaults
+to JTAG USER4 (`JTAG_CHAIN=4`), the same default as the EJTAG-AXI
+bridge, so the two conflict only when both are left on (or assigned
+to) the same chain.  Move one of them and a single bitstream carries
+both: the Kria KV260 reference puts the AXI bridge on USER4 and the
+UART bridge on USER3.  The Intel wrapper takes a virtual-JTAG
+instance (`CHAIN`, default 5).
 
 Use cases that just work:
 
@@ -22,8 +26,8 @@ Use cases that just work:
   output with `fcapz uart-recv`.
 - The host uploads a small firmware image into BRAM via the AXI
   bridge, then resets the CPU and watches the boot output stream
-  back via the UART bridge (in two separate bitstreams, since
-  they share USER4).
+  back via the UART bridge (put the two bridges on different USER
+  chains).
 - Debug `printf` over JTAG without ever wiring a UART pin.
 - Two FPGAs talk over JTAG via two separate `fcapz uart-*` host
   sessions.
@@ -207,8 +211,9 @@ reset counter time to clock down, then closes the transport.  The
 For interactive debug:
 
 ```bash
-# Send a string (UTF-8 encoded)
-$ fcapz uart-send --data "Hello, world!\n"
+# Send a string (UTF-8 encoded, as the shell passes it: in Bash,
+# "...\n" sends a backslash and an n, so use $'...' for a newline)
+$ fcapz uart-send --data $'Hello, world!\n'
 sent 14 bytes
 
 # Send hex bytes
@@ -281,9 +286,10 @@ Anything the softcore prints lands in your terminal window.  No
 USB-serial cable, no `dmesg | grep ttyUSB`, no figuring out which
 COM port shows up after re-plugging.
 
-For a real working example, see the UART-loopback variant of the
-Arty A7 reference design (it's a separate bitstream from the main
-one because USER4 is exclusive between EJTAG-AXI and EJTAG-UART).
+For a real working example of the wiring, see the Kria KV260
+reference design ([`examples/kv260`](../examples/kv260/)): it carries
+the bridge on USER3 with TX looped back to RX, next to the EJTAG-AXI
+bridge on USER4.
 
 ## Worked example: byte-level full duplex
 
@@ -364,10 +370,11 @@ without thinking about resource budget.
 
 ## Testing
 
-The hardware integration tests for the UART bridge are gated
+The Arty A7 hardware integration tests for the UART bridge are gated
 behind the `FPGACAP_UART_HW=1` environment variable because they
-need a separate bitstream from the main Arty A7 reference design
-(the main one uses USER4 for the AXI bridge):
+need a UART loopback bitstream (bridge on USER3, TX wired to RX) that
+you supply separately; the main Arty A7 reference design has no UART
+bridge:
 
 ```bash
 # Build a UART loopback bitstream first (separate from the main design;

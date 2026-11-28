@@ -30,10 +30,11 @@ fcapz-web --host 0.0.0.0 --port 7373 --token "$(openssl rand -hex 16)"
 
 `--host 0.0.0.0` exposes it on the network. **Set `--token`** (or
 `FCAPZ_WEB_TOKEN`) when you do — it's required as `Authorization: Bearer <token>`
-on every `/api` route and as `?token=` on the WebSocket. There is no TLS; put it
+on `POST /api/rpc` and `GET /api/logs` (HTTP 401 without it) and as `?token=` on
+the `/api/ws` WebSocket. `GET /api/version` stays public. There is no TLS; put it
 behind a reverse proxy / SSH tunnel if it leaves a trusted network.
 
-## API (v1 — core debug loop)
+## API (RPC schema 1.2 — core debug loop)
 
 The web server speaks the **same JSON-RPC `cmd` protocol** as
 `python -m fcapz.rpc` (stdin/stdout) — one unified API, two browser transports:
@@ -43,12 +44,19 @@ The web server speaks the **same JSON-RPC `cmd` protocol** as
 | HTTP | `POST /api/rpc` | body is one request `{"cmd": ...}`; returns the response envelope |
 | WebSocket | `/api/ws` | send request objects, receive response objects (lower latency; suited to scripted live polling — the bundled UI uses `POST /api/rpc`) |
 
-Every command, request field, and response field is exactly the JSON-RPC
-contract documented in [chapter 11](../../../docs/11_rpc_server.md): `connect`,
-`probe`, `configure`, `arm`, `capture`, `eio_connect` / `eio_read` /
-`eio_write`, `axi_*`, `uart_*`. **Errors are in-band** (`{"ok": false, "error":
-..., "type": ...}`), so a bad command still returns HTTP 200 — matching the
-line-protocol semantics.
+Commands, request fields, and response fields follow the JSON-RPC contract
+documented in [chapter 11](../../../docs/11_rpc_server.md) (envelope
+`schema_version` `1.2`; the FastAPI app's own metadata version `1` is a
+separate number): `connect`, `probe`, `configure`, `arm`, `capture`,
+`eio_connect` / `eio_read` / `eio_write`, `axi_*`, `uart_*`. The web
+endpoints differ from stdio RPC in a few ways, listed in the manual's
+[web API policy](../../../docs/18_web_interface.md#the-api-behind-it):
+`openocd_*` commands are answered only for loopback clients, and (unreleased,
+on `main`) a non-null `program`, `quartus_stp` or `probe_file` is refused, even
+an empty string, and a serial `connect` opens only a port the OS lists.
+**Command errors are in-band** (`{"ok": false, "error": ..., "type": ...}`), so
+a bad command still returns HTTP 200 — matching the line-protocol semantics;
+an authentication failure is an HTTP 401 instead.
 
 ```bash
 # probe over HTTP (same JSON you'd pipe to `python -m fcapz.rpc`)

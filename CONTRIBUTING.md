@@ -39,7 +39,8 @@ cd fpgacapZero
 pip install -e ".[dev]"
 ```
 
-Python 3.10 or later is required. No other mandatory dependencies — OpenOCD and
+Python 3.10 or later is required. pip installs the only runtime
+dependencies, `tomli-w` and (on Python 3.10) `tomli`. OpenOCD and
 Vivado/XSDB are optional and only needed for hardware tests.
 
 ---
@@ -62,12 +63,18 @@ Vivado/XSDB are optional and only needed for hardware tests.
   `python tools/gen_docs.py`; CI fails if they are out of date. Only
   Markdown that GitHub renders belongs in `docs/`: `mkdocs build --strict`
   (see `mkdocs.yml`) rejects site-only syntax and broken links.
-- `tests/test_docs_sync.py` checks the hand-written examples: Verilog
-  snippets must only use parameters and ports the `rtl/` module has, every
-  `fcapz ...` command in a shell block must parse, and version strings must
-  match `VERSION`. Mark an example that is deliberately not current (a past
-  measurement, an illustration) with `<!-- docs-sync: skip (why) -->` on the
-  line before it.
+- `tests/test_docs_sync.py` checks the hand-written examples in the
+  top-level manual pages (`docs/*.md`) and the root `README.md`: Verilog
+  snippets must only use parameters and ports the `rtl/` module has,
+  `fcapz ...` commands in shell blocks must parse (lines with placeholder
+  syntax such as `<file>` or `...` are skipped), and version-register
+  values, `version_major`/`version_minor`/`version_patch` fields and
+  `FCAPZ_VERSION_*` excerpts must match `VERSION`. It does not read
+  `CONTRIBUTING.md`, `docs/specs/` or the example READMEs, and a bare
+  version string such as `0.5.2` is not checked, so update those by hand.
+  Mark an example that is deliberately not current (a past measurement, an
+  illustration) with `<!-- docs-sync: skip (why) -->` on the line before
+  it.
 
 ---
 
@@ -134,7 +141,7 @@ without boards green. To collect `hw`-marked tests as well, override the option
 module still **skips at runtime** unless you set `FPGACAP_GUI_HW=1`; see
 [GUI + hardware (opt-in)](#gui--hardware-opt-in).
 
-Install **GUI test dependencies** for the full suite (CI uses `pip install -e ".[dev,gui]"`):
+Install **GUI test dependencies** for the full suite (CI uses `pip install -e ".[dev,gui,mcp]"`):
 
 ```bash
 pip install -e ".[dev,gui]"
@@ -174,10 +181,21 @@ Set `FPGACAP_SKIP_HW=1` in CI or when no board is available; the suite will
 skip gracefully.
 
 The Kria KV260 (Zynq UltraScale+ MPSoC) suite runs the same way over its
-on-board USB-JTAG. It programs the board once, through RPC `connect`:
+on-board USB-JTAG. Over `hw_server` it programs the board once, through RPC
+`connect`:
 
 ```bash
 pytest examples/kv260/test_hw_integration.py -v
+```
+
+It also runs over the carrier card's FTDI channel directly, through D2XX
+(`FPGACAP_FTDI_DEVICE` defaults to `ML Carrier Card A`,
+`FPGACAP_FTDI_TCK_MHZ` to 15). FTDI does not program a Zynq UltraScale+, so
+load the bitstream first (a `hw_server` run of the suite does), then stop
+`hw_server`:
+
+```bash
+FPGACAP_BACKEND=ftdi pytest examples/kv260/test_hw_integration.py -v
 ```
 
 ### GUI + hardware (opt-in)
@@ -240,21 +258,24 @@ vid_pid`, `ftdi channel`, and the IDCODE to match your device.
 ```bash
 # In a second terminal (OpenOCD must already be running):
 fcapz --backend openocd --port 6666 probe
-fcapz --backend openocd --port 6666 capture --samples 64 --export /tmp/out.json
+fcapz --backend openocd --port 6666 capture --pretrigger 0 --posttrigger 63 --trigger-mask 0 --sample-clock-hz 150000000 --out /tmp/out.json
 ```
 
 **Running the hardware suite against the OpenOCD backend**
 
-The integration test file accepts a `FPGACAP_BACKEND` environment variable:
+The integration test file selects its transport from the `FPGACAP_BACKEND`
+environment variable. OpenOCD does not program the FPGA, so load the Arty
+reference bitstream first (for example with Vivado's Hardware Manager, or a
+`hw_server` run of the suite), then start OpenOCD and run:
 
 ```bash
 FPGACAP_BACKEND=openocd FPGACAP_OPENOCD_PORT=6666 \
     pytest examples/arty_a7/test_hw_integration.py -v
 ```
 
-> If `FPGACAP_BACKEND` is not yet wired into `test_hw_integration.py`, that
-> is itself a good first contribution — see
-> [Where OpenOCD coverage is most needed](#where-openocd-coverage-is-most-needed).
+`FPGACAP_OPENOCD_TAP` overrides the TAP name (default `xc7a100t.tap`). The
+test that needs programming on connect (`TestStartupArmGsr`) skips over
+OpenOCD, and the UART tests need their separate loopback bitstream.
 
 **Reporting an OpenOCD result**
 
@@ -273,17 +294,18 @@ or PR with:
 
 ### Where OpenOCD coverage is most needed
 
-The following areas currently have no or minimal OpenOCD-specific test
-coverage. Patches in any of these are warmly welcomed:
+The Arty suite already runs its probe, register, capture, EIO, EJTAG-AXI
+and AXI-monitor tests over OpenOCD with `FPGACAP_BACKEND=openocd` (see
+above); what is scarce is reported runs on real boards. OpenOCD is
+hardware-validated on the Gowin BRS-100 and the PolarFire SoC Discovery Kit,
+and the AMD/Xilinx path is less exercised than `hw_server`. Contributions
+in any of these areas are warmly welcomed:
 
 | Area | File to look at | What to add |
 |------|-----------------|-------------|
-| `probe` / identity registers | `examples/arty_a7/test_hw_integration.py` | Parametrize existing `TestProbe` to run with `OpenOcdTransport` |
-| Register round-trip | same | Same parametrization for `TestRegisterRoundTrip` |
-| Capture end-to-end | same | Arm + trigger + readback through OpenOCD |
-| EIO read/write | `tests/test_host_stack.py` → extend to hw | `EioController` over `OpenOcdTransport` |
-| EJTAG-AXI single + burst | `tests/test_ejtagaxi.py` → extend to hw | `EjtagAxiController` over `OpenOcdTransport` |
-| EJTAG-UART TX/RX | `tests/test_ejtaguart.py` → extend to hw | `EjtagUartController` over `OpenOcdTransport` |
+| Arty A7 over OpenOCD | `examples/arty_a7/test_hw_integration.py` | A full run with `FPGACAP_BACKEND=openocd`, reported as below |
+| EJTAG-UART TX/RX | same (`TestEjtagUartLoopback`, `FPGACAP_UART_HW=1`) | A run over OpenOCD with the UART loopback bitstream |
+| Other boards | the board's `examples/<board>/test_hw_integration.py` | Runs over OpenOCD on boards not yet reported |
 | Non-Xilinx adapters | new file | A `.cfg` + test for any supported adapter |
 
 When adding hardware tests that can work with either backend, parametrize on
@@ -425,8 +447,11 @@ jtag newtap $_CHIPNAME tap -irlen 10 -expected-id $_IDCODE
 init
 ```
 
-Boards known to work: **DE10-Nano** (Cyclone V), **DE0-Nano** (Cyclone IV),
-**Terasic DE1-SoC**, **Arrow Deca** (MAX 10). Quartus Prime (free Lite edition)
+Candidate boards for the OpenOCD path, not yet validated there:
+**DE10-Nano** (Cyclone V), **DE0-Nano** (Cyclone IV), **Terasic DE1-SoC**,
+**Arrow Deca** (MAX 10). The DE0-Nano is hardware-validated over the
+`quartus_stp` (USB-Blaster) backend with Quartus II 13.1
+(`examples/de0_nano/`), not over OpenOCD. Quartus Prime (free Lite edition)
 can be used to build Cyclone IV/V and MAX 10 designs.
 
 > Intel does not officially support OpenOCD for Quartus-based JTAG, so the
@@ -438,7 +463,7 @@ can be used to build Cyclone IV/V and MAX 10 designs.
 Relevant RTL files: `rtl/fcapz_ela_gowin.v`, `rtl/jtag_tap/jtag_tap_gowin.v`,
 `rtl/vhdl/fcapz_ela_gowin.vhd`.
 
-The Gowin JTAG primitive is `JTAGG` (same name as ECP5 but different interface).
+The Gowin JTAG primitive is `GW_JTAG` (`rtl/jtag_tap/jtag_tap_gowin.v`).
 OpenOCD supports Gowin devices via the `ftdi` driver or the Gowin USB cable.
 
 Boards known to carry Gowin FPGAs: **Tang Nano 9K / 20K**, **Tang Primer 25K**.

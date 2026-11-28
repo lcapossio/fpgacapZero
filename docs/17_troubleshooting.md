@@ -46,15 +46,21 @@ FPGA.  Same fixes.
 
 ### `ConnectionError: FPGA did not become ready within 2.0s after program()`
 
-**Cause**: bitstream loaded but the readiness probe register reads
-zero.  Either the bitstream silently failed, the wrong target was
-bound, or your design doesn't have an ELA at `ready_probe_addr=0x0000`.
+**Cause**: this wait runs only when `connect()` programs the FPGA
+(`bitfile=` / `--program`) and `ready_probe_addr` is set (default
+`0x0000`).  After `fpga -file` the transport polls that register on the
+active chain (USER1 by default) and accepts any nonzero value; it timed
+out reading zero.  Either the bitstream silently failed to start, or
+your design has nothing on that chain that reads nonzero at that
+address.  (The wait checks no core identity; `Analyzer.probe()` does
+that separately.  An attach-only connect without a bitfile never runs
+it, and fails instead at target selection or at the identity check.)
 
 **Fix**:
-- Re-check `fpga_name` — Vivado may have bound a different device
-  on the chain.
-- If your design genuinely has no ELA, pass `ready_probe_addr=None`
-  to disable the wait.
+- Check that the bitstream is the one you meant and that it loads
+  (DONE goes high in Vivado's Hardware Manager).
+- If your design has no register that reads nonzero at that address on
+  that chain, pass `ready_probe_addr=None` to disable the wait.
 - Bump `ready_probe_timeout` if you're on a slow USB hub.
 
 ### `ConnectionError: no configuration target for 'xck26' -- nothing would be programmed`
@@ -85,13 +91,24 @@ actually uses.
 
 ### `ValueError: bitfile path contains unsafe characters for TCL`
 
-**Cause**: TCL injection guard tripped.  Your `bitfile=` or
-`fpga_name=` contains `"`, `;`, `{`, `}`, `[`, `]`, or another
-metacharacter.
+**Cause**: TCL injection guard tripped.  Each input the hw_server
+transport puts into an xsdb script has its own check and its own
+error, so the message tells you which one to fix:
 
-**Fix**: rename the file/path.  Don't disable the regex — it
-exists because xsdb will happily execute arbitrary TCL otherwise.
-See [chapter 14](14_transports.md) "TCL injection prevention".
+- `bitfile path contains unsafe characters for TCL` — the `bitfile=` /
+  `--program` path contains `"`, `;`, `{`, `}`, `[`, `]`, or another
+  metacharacter.
+- `fpga_name contains unsafe characters for TCL` — the `fpga_name=` /
+  `--tap` target filter does.
+- `hw_server host is not a host name or IPv4 address` or
+  `hw_server port must be ...` (on `main`, unreleased) — the `host` /
+  `--host` must be a host name or IPv4 address (no IPv6 literal) and the
+  port a whole number in 1..65535.
+
+**Fix**: rename the file/path, or correct the target name or host.
+Don't disable the checks — they exist because xsdb will happily
+execute arbitrary TCL otherwise.  See [chapter 14](14_transports.md)
+"TCL injection prevention".
 
 ### xsdb error: `no bit string in output` / empty stdout
 
@@ -130,16 +147,19 @@ address counter wraps with a mask.  You passed `DEPTH=1000`.
 Vivado children orphaned.
 
 **Fix**: kill them by name (`taskkill /im xelab.exe /f` on Windows,
-`pkill -f xelab` on Linux), then re-run `build.py`.  The build
-launcher waits for `hw_server` reachability before declaring the
-FPGA ready, so orphans can't poison the next run once cleared.
+`pkill -f xelab` on Linux), then re-run `build.py`.  On Windows the
+build launcher also kills orphaned Vivado helpers itself before it
+starts (only those whose parent process is gone; `hw_server` is never
+touched).
 
 ### `python tools/sync_version.py --check` fails in CI
 
-**Cause**: you bumped `VERSION` but didn't regenerate the header.
+**Cause**: you bumped `VERSION` but didn't regenerate the HDL
+version constants.
 
 **Fix**: `python tools/sync_version.py` (no `--check`), commit
-the regenerated `rtl/fcapz_version.vh`.  See
+both regenerated files, `rtl/fcapz_version.vh` and
+`rtl/vhdl/pkg/fcapz_pkg.vhd`.  See
 [chapter 16](16_versioning_and_release.md).
 
 ## EJTAG-AXI bridge
@@ -174,15 +194,19 @@ never cross a 4 KB boundary; `burst_read()` and `burst_write()` are
 single AXI bursts and do not chunk.  The CLI and RPC burst commands
 already split.  Or re-synthesize the bridge with a deeper FIFO.  See [chapter 07](07_ejtag_axi_bridge.md).
 
-### AXI reads return `0xDEADBEEF` or all-ones
+### AXI access raises `AXIError` (`SLVERR` / `DECERR`)
 
 **Cause**: the AXI slave returned an error response (`SLVERR` /
-`DECERR`).  The bridge surfaces this in the status bits of the
-72-bit DR; the controller raises it as a `RuntimeError` with the
-response code.
+`DECERR`), or the bridge timed out waiting for the slave and answered
+`SLVERR` itself.  The bridge returns the response code with each
+transaction; the controller raises `fcapz.AXIError` (a plain
+`Exception` subclass, not `RuntimeError`) with that code.  Judge
+failures by the response, not by the data: `0xDEADBEEF` or all-ones
+can be perfectly valid read data.
 
 **Fix**: check your address is mapped, the slave is out of reset,
-and the burst doesn't cross a 4 KB boundary.
+and the burst doesn't cross a 4 KB boundary.  In Python, catch
+`AXIError`.
 
 ## EJTAG-UART bridge
 
@@ -240,8 +264,9 @@ already excluded from it.
 unconnected probe input, or the source signal is genuinely zero.
 
 **Fix**:
-- Verify `channel=` in `CaptureConfig` matches a connected
-  `probe_in_*` port on the wrapper.
+- Verify `channel=` in `CaptureConfig` selects a connected slice of
+  the wrapper's packed `probe_in` bus (channel N is
+  `probe_in[N*SAMPLE_W +: SAMPLE_W]`).
 - Free-run with `mask=0` and look at the values — if still zero,
   the RTL upstream is the problem, not fcapz.
 

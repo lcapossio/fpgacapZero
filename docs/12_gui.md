@@ -93,8 +93,8 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 | **Quartus hardware** / **FTDI adapter** | Optional Quartus hardware name for USB-Blaster (e.g. `DE25-Nano [USB-1]`), or FTDI channel description or serial (e.g. `Embedded FlashPro5 A`, or `usb:...` for a libusb channel); leave empty to auto-select: a USB-Blaster when exactly one is present, an FTDI channel A when exactly one recognised adapter (FlashPro, Digilent, KV260) is; name generic FTDI adapters |
 | **quartus_stp** | Optional path to `quartus_stp` / `quartus_stp.exe` for USB-Blaster when Quartus is not on `PATH` |
 | **[Scan]** | hw_server: lists XSDB JTAG targets. OpenOCD: lists tap names via `jtag names`. Click to fill the **TAP** field instead of typing it |
-| **Bitfile** | Optional path to a `.bit` file, used when **Program on connect** is checked: hw_server runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected"; FTDI configures an AMD/Xilinx 7-series FPGA over JTAG (a `.bit` or `.bin`), or loads a Gowin GW1NR-9C's SRAM from a `.fs` (the flash is not touched) |
-| **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `UltraScale+`, `Gowin`, `Microchip PolarFire`, or `Auto from IDCODE (FTDI)`, which the FTDI backend selects by itself.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
+| **Bitfile** | Optional path to a `.bit` file, used when **Program on connect** is checked: hw_server runs `fpga -file <bitfile>` and waits for the readiness probe before declaring "connected"; FTDI configures an AMD/Xilinx 7-series FPGA over JTAG (a `.bit` or `.bin`), or, on `main` (unreleased, not in 0.5.2), loads a Gowin GW1NR-9C's SRAM from a `.fs` (the flash is not touched; the FPGA must be alone on the JTAG chain) |
+| **IR table** | Dropdown: `AMD/Xilinx 7-series` (default), `UltraScale+`, `Gowin`, `Microchip PolarFire`, `Lattice ECP5`, or `Auto from IDCODE (FTDI)`, which the FTDI backend selects by itself.  Maps to the `IR_TABLE_*` presets in [chapter 14](14_transports.md) |
 | **Burst readout** | The bitstream's burst path: single chain (default), two chain (legacy USER2) or none (register window).  OpenOCD reads by burst for the PolarFire preset only; FTDI follows the detected family |
 | **[Connect] / [Disconnect]** | Open or close the underlying transport |
 
@@ -103,7 +103,11 @@ The leftmost (or topmost, depending on layout) panel.  Holds:
 > driven by an already-running `openocd`): set Backend = `openocd`, Port `6666`,
 > TAP = your tap name or `auto`, IR table = **Gowin**. The ELA tab
 > works immediately, and **EIO is auto-discovered and attached** on connect (see
-> the EIO panel below) — no USER chain or mux offset to enter.
+> the EIO panel below) — no USER chain or mux offset to enter. OpenOCD only
+> attaches to an already loaded image. On `main` (unreleased), a GW1NR-9C can
+> also be programmed directly: Backend = FTDI, a `.fs` as **Bitfile**, and
+> **Program on connect** checked loads its SRAM (the FPGA must be alone on the
+> JTAG chain; see [chapter 14](14_transports.md#ftdimpssetransport)).
 
 When you click **Connect**:
 
@@ -112,8 +116,9 @@ When you click **Connect**:
 2. Calls `transport.connect()`, which spawns `xsdb`, talks to
    OpenOCD, starts `quartus_stp` or opens the FTDI channel.  The GUI
    programs the FPGA only for the `hw_server` and FTDI backends (FTDI:
-   AMD/Xilinx 7-series), when **Program on connect** is checked and a
-   bitfile is set.
+   AMD/Xilinx 7-series, and on `main`, unreleased, Gowin GW1NR-9C SRAM
+   from a `.fs`), when **Program on connect** is checked and a bitfile
+   is set.
 3. Reads the USER1 register window with `Analyzer.probe_optional()`.
    If VERSION reports the fcapz ELA core id (`'LA'`), **ELA capture**
    and the probe summary are enabled.  If not (EIO-only / AXI-only
@@ -177,7 +182,6 @@ Top section — **trigger**:
 | **Trigger mode** dropdown | `trigger.mode` (`value_match` / `edge_detect` / `both`) |
 | **Trigger value** + radix (default **Hex**; also Dec / Oct / Bin) | `trigger.value` (parsed in the selected base) |
 | **Trigger mask** hex input | `trigger.mask` |
-| **Startup arm** checkbox | `startup_arm` |
 | **Trigger holdoff** spinner (0..65535) | `trigger_holdoff` |
 | **Trigger delay** spinner (0..65535) | `trigger_delay` |
 | **Decimation** spinner | `decimation` |
@@ -262,16 +266,17 @@ and **probe mux sel** when the mux is only one slice wide.  Tooltips
 on disabled widgets explain why.  The **ELA identity** dock shows
 the same capability flags in prose.
 
-**First-connect pre/post defaults**: on the very first hardware connection
-in a session, if the pretrigger and posttrigger spinners are still at
-zero (never edited), the GUI automatically sets sensible defaults:
+**First-connect pre/post defaults**: the first time the panel reads
+hardware geometry in a session (the first successful connect with an
+ELA), the GUI sets
 `pretrigger = min(8, segment_depth - 1)` and
-`posttrigger = segment_depth - 1 - pretrigger`.  This gives a usable
-capture window immediately without the user having to think about
-buffer sizing.  The defaults are applied once per connection using a
+`posttrigger = segment_depth - 1 - pretrigger`, replacing whatever
+the spinners held, including values typed before connecting.  This
+gives a usable capture window immediately without the user having to
+think about buffer sizing.  The values are set under a
 `QSignalBlocker` so the panel does not emit spurious change signals.
-Subsequent connects (after Disconnect and re-Connect) leave the
-user's values intact.
+Later connects in the same session (after Disconnect and re-Connect)
+leave the user's values intact.
 
 ### Capture history panel
 
@@ -306,11 +311,9 @@ Below the History table is an **embedded waveform preview**
 rendered with `pyqtgraph`.  It's a small widget that shows the
 captured `result.samples` directly, one row per `ProbeSpec`, with:
 
-- Shared X axis (sample index by default; switches to timestamp
-  units when `TIMESTAMP_W > 0`)
-- Mouse wheel to zoom horizontally, drag to pan
-- Click a sample to see its value in a tooltip
-- Trigger position highlighted with a vertical line
+- Shared X axis (sample index by default; switches to time in
+  seconds when the capture has timestamps or run lengths)
+- Mouse wheel to zoom, drag a rectangle to zoom into it
 
 This is **not** a full waveform viewer — it's a sanity-check pane.
 It exists so you can verify "did the trigger fire on the right
@@ -541,9 +544,13 @@ arrangement.
 ## Worked example: a debug session
 
 1. Launch `fcapz-gui` from a terminal.
-2. In the **Connection** panel, set backend = `hw_server`, port =
-   `3121`, target = `xc7a100t`, bitfile =
-   `examples/arty_a7/arty_a7_vex_top.bit`, click **Connect**.
+2. Build the Arty reference image first (`python examples/arty_a7/build.py`,
+   see [the Arty A7 example](../examples/arty_a7/README.md)); the `.bit`
+   is a build output, not checked in.  In the **Connection** panel, set
+   backend = `hw_server`, port = `3121`, target = `xc7a100t`, bitfile =
+   `examples/arty_a7/arty_a7_vex_top.bit`, check **Program on connect**
+   (off by default; without it the GUI attaches to whatever image is
+   already loaded), then click **Connect**.
    For Intel/Altera, set backend = `usb_blaster`, target = `auto`,
    set **Quartus hardware** if more than one cable is connected, and
    set **quartus_stp** if Quartus is not on PATH.

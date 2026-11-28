@@ -42,9 +42,17 @@ open (`ftdi`, `usb_blaster`, `serial`), stop the broker first
 
 The global transport options (`--backend`, `--host`, `--port`, `--tap`,
 `--hardware`, ...) choose the board as usual; the broker opens that board's
-cable on first use.  Commands that name the same board share one
-connection, however they spell it (`localhost` and `127.0.0.1` are the same
-host; hw_server's default port 6666 is its port 3121).  A command that names
+cable on first use.  Commands that name the same board the same way share
+one connection.  A few spellings are folded together: host names are
+compared without case, and `localhost`, `::1`, `[::1]` and an empty host
+count as `127.0.0.1` (only for this comparison: the cable opens with the host
+as given, and hw_server takes `localhost` or `127.0.0.1`, not `::1`); hw_server's default port 6666 is its port 3121, and its
+`--tap` matches with or without `.tap`; for `usb_blaster`, `auto`, an empty
+tap and the default `xc7a100t.tap` are one.  Nothing
+else is resolved: the `ftdi` and `usb_blaster` adapters are keyed by the
+`--hardware` text as given, so a channel description, its serial and its
+`usb:` name are three different boards to the broker.  Programs that share
+an adapter should name it with the same `--hardware` value.  A command that names
 the same board with different cable settings (another `--tck-mhz`,
 `--no-burst`, ...) is refused, since the cable is already open with the
 first settings.  With the `ftdi` and `usb_blaster` backends, one program that
@@ -107,9 +115,12 @@ running, and says so when one is still shutting down (closing its cables).
 `stop` is refused while jobs run or while another program is connected: a
 program between two jobs (a `capture` reads the core's size, then captures)
 would lose its broker.  `--force` cancels the jobs and drops those programs,
-which then fail with `BrokerConnectionLost`.  `stop` returns when the broker
-process has exited and its cables are closed, also when it finds a broker
-that was already shutting down.  See the
+which then fail with `BrokerConnectionLost`.  `stop` waits up to 20 seconds
+for the broker process to exit and close its cables, also when it finds a
+broker that was already shutting down, and returns 0 once it has.  If the
+broker is still shutting down after that, `stop` exits with 1 and the
+shutdown carries on in the background; run `fcapz broker status` to see when
+it has finished.  See the
 [CLI reference](10_cli_reference.md#broker).
 
 ## From Python
