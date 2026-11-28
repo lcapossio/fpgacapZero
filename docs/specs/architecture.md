@@ -1,11 +1,11 @@
-# Architecture — v0.4.0
+# Architecture
 
 ## Goal
 Vendor-agnostic JTAG logic analyzer core with configurable features,
 designed to fit on any FPGA with minimal resource usage.
 
 ## Core Blocks
-- **Probe Input**: User-defined probe buses flattened into `SAMPLE_W` bits (1-256+).
+- **Probe Input**: User-defined probe buses flattened into `SAMPLE_W` bits (1-256).
 - **Trigger Block** (`trig_compare.v` × 2 per stage): Dual comparators (A and B)
   with lightweight default compare modes (==, !=, rising, falling, changed),
   optional relational modes (<, >, <=, >=), and boolean combine
@@ -20,7 +20,7 @@ designed to fit on any FPGA with minimal resource usage.
   as full builds.
 - **Storage Qualification**: Optional condition that filters which samples
   are stored, effectively multiplying buffer depth. `STOR_QUAL` parameter
-  (0 = off, 1 = on, +21 LUTs).
+  (0 = off, 1 = on; see the resource table below for its cost).
 - **Sample Buffer**: Dual-port BRAM (`dpram.v`) for pre-trigger history plus
   post-trigger capture. Port A on sample_clk, port B on jtag_clk.
 - **Capture Controller**: Arm, trigger detect, post-trigger countdown, done.
@@ -40,7 +40,7 @@ designed to fit on any FPGA with minimal resource usage.
 ## Parameters
 | Parameter | Default | Description |
 |-----------|--------:|-------------|
-| `SAMPLE_W` | 32 | Probe width in bits (1-256+) |
+| `SAMPLE_W` | 32 | Probe width in bits (1-256; wider fails elaboration) |
 | `DEPTH` | 1024 | Sample buffer depth (power of 2) |
 | `TRIG_STAGES` | 1 | Trigger sequencer stages (1 = simple, 2-4 = sequencer) |
 | `STOR_QUAL` | 0 | Storage qualification (0 = off, 1 = on) |
@@ -51,10 +51,24 @@ designed to fit on any FPGA with minimal resource usage.
 | `TIMESTAMP_W` | 0 | Per-sample timestamp RAM (`0` = off, 32 or 48) |
 | `NUM_SEGMENTS` | 1 | Segmented capture (`>1` adds segment RAM/control) |
 | `PROBE_MUX_W` | 0 | Packed probe mux width (`0` = off; else runtime slice select) |
+| `STARTUP_ARM` | 0 | Power-up value of the `STARTUP_ARM` register (1 = arm automatically after reset/programming) |
+| `DEFAULT_TRIG_EXT` | 0 | Reset value of the external trigger mode (0-3) |
+| `REL_COMPARE` | 0 | Relational compare modes (`<`, `>`, `<=`, `>=`) |
+| `DUAL_COMPARE` | 1 | Comparator B and the combine modes (`0` = comparator A only) |
+| `USER1_DATA_EN` | 1 | USER1 DATA window readback and `DATA_OFFSET` (`0` = burst-only readout) |
+| `RLE_W` | 0 | Run-length capture count width (`0` = off, 1-16) |
+| `WIDE_TRIG` | 0 | Comparator A programmable across the full `SAMPLE_W` through `WIDE_SEL`/`WIDE_DATA` (only above 32 bits) |
+| `READBACK_RAM` | 1 | Keep the readback-only upper bits of value/mask registers (`SAMPLE_W < 32`) in a small inferred RAM; `0` = flops, for families without async-read LUT RAM (iCE40, Efinix) |
+
+Continuous (segment-ring) capture has no parameter of its own: it is built
+whenever `NUM_SEGMENTS > 1` and advertised by `COMPARE_CAPS` bit 23.
+Wrappers add their own parameters (for example `SINGLE_CHAIN_BURST` on the
+AMD/Xilinx wrappers); see [chapter 04](../04_rtl_integration.md).
 
 When `TRIG_STAGES=1`, `STOR_QUAL=0`, `DECIM_EN=0`, `EXT_TRIG_EN=0`,
-`TIMESTAMP_W=0`, `NUM_SEGMENTS=1`, `NUM_CHANNELS=1`, `INPUT_PIPE=0`, and
-`PROBE_MUX_W=0`, extra logic optimises away in synthesis.
+`TIMESTAMP_W=0`, `NUM_SEGMENTS=1`, `NUM_CHANNELS=1`, `INPUT_PIPE=0`,
+`PROBE_MUX_W=0` and `RLE_W=0`, extra logic optimises away in synthesis
+(`DUAL_COMPARE=0` and `USER1_DATA_EN=0` trim further).
 
 EIO core parameters (separate module, `fcapz_eio.v`):
 
@@ -137,7 +151,8 @@ What it shows:
 - fcapz grows faster with sample width: each comparator keeps its
   value and mask in flip-flops and compares in LUTs, where the ILA loads
   SRL-based match units.  Its stage comparators match only the low 32
-  bits of the sample, though, where the ILA's match all 64.
+  bits of the sample, though, where the ILA's match all 64 (`WIDE_TRIG=1`
+  widens comparator A of the simple trigger; these builds leave it off).
 - `dbg_hub` is paid once per design and shared by every ILA and VIO.
   The fcapz equivalent is inside each wrapper, or shared by every core
   behind one core manager (`fcapz_debug_multi`).
@@ -165,36 +180,73 @@ sizes or a subset of the cases.
 - Samples stored as packed `SAMPLE_W` vectors in BRAM.
 - Wide samples (> 32 bits) read as multiple 32-bit chunks via USER1,
   or natively via the 256-bit burst DR.
-- Timestamps are implicit by sample index.
+- Timestamps: with `TIMESTAMP_W > 0` (32 or 48) a parallel timestamp RAM
+  stores the sample-clock counter of each stored sample, read through the
+  timestamp window after the DATA words or a timestamp burst. Without it,
+  time is implicit in the sample index (scaled by decimation, and not
+  recoverable under storage qualification).
+- Run-length capture (`RLE_W > 0`, enabled per capture by `RLE_CTRL`): each
+  entry stores a sample and how many sample clocks it held, in a parallel
+  count RAM read on the timestamp lane; see
+  [`rle_capture.md`](rle_capture.md).
+- Segmented capture (`NUM_SEGMENTS > 1`) splits the buffer into equal
+  windows, one per trigger. The same builds support continuous capture:
+  the segments run as a ring that the host drains and releases
+  (`STREAM_*` registers); see
+  [Continuous capture](../05_ela_core.md#continuous-capture).
 
 ## JTAG-to-AXI4 Bridge (`fcapz_ejtagaxi.v`)
 
 The bridge provides AXI4 master access from the JTAG port using a 72-bit
-pipelined DR on USER4 (CHAIN=4). The pipeline is: **72-bit DR → shadow
-registers → CDC → AXI4 master FSM → AXI bus**.
+DR on USER4 (CHAIN=4). The pipeline is: **72-bit DR → command FIFO (CDC) →
+AXI4 master FSM and write engine → AXI bus → response FIFO (CDC) → DR
+capture**. (The original bridge crossed single requests with a toggle
+handshake and acknowledged burst-write beats one at a time; the command and
+response queues replaced that, and 0.5.2 added whole-burst write buffering,
+the write engine and burst-read admission.)
 
-**Data path:** On DR update, the parsed command and address/data are latched
-into shadow registers in the TCK domain. A toggle-handshake CDC transfers
-the request to the `axi_clk` domain, where a 10-state FSM drives the AXI4
-channels. The response is latched back and presented on the next DR capture.
+**Data path:** On DR update, the TCK side decodes the command and pushes
+AXI work (reads, writes, burst beats, burst-read and stream starts) into an
+asynchronous command FIFO. In the `axi_clk` domain an FSM fetches each
+command and dispatches it; a separate write engine owns AW, W and B. Every
+queued command produces exactly one response (data + `resp`), pushed into an
+asynchronous response FIFO. A DR capture shows the oldest queued response
+with `prev_valid`, or no result (`prev_valid=0`, `busy`) while responses are
+still owed, so the host drains completions with wait scans. `SET_ADDR`,
+`BURST_SETUP`, `CONFIG` and `RESET` are handled on the TCK side; a `CONFIG`
+result appears on the next scan and leaves queued responses in place.
 
-**CDC strategy:** Single-word transactions use a toggle-handshake between
-TCK and `axi_clk`. Burst reads use an asynchronous FIFO (Gray-coded
-pointers, configurable `FIFO_DEPTH`) so the AXI side can fill data while
-the host scans out words one per DR shift. Burst writes use per-beat
-toggle handshake: the AXI FSM acks each beat (except the last) so the
-host can queue the next.
+**CDC strategy:** All TCK ↔ `axi_clk` traffic goes through asynchronous
+FIFOs (Gray-coded pointers, or AMD/Xilinx XPM FIFOs when
+`ASYNC_FIFO_IMPL=1`): the command FIFO (`CMD_FIFO_DEPTH`, default
+`2*FIFO_DEPTH`), the response FIFO (`RESP_FIFO_DEPTH`, default
+`2*FIFO_DEPTH`) and the burst-read data FIFO (`FIFO_DEPTH`). `RESET` crosses
+as a toggle with an acknowledgment; new AXI commands are refused until it
+completes. The `CFG_AXI_STATUS` flags cross through per-bit 2-FF
+synchronisers.
 
-**Burst timing:** The AXI-side timeout (`TIMEOUT` parameter) applies only
-to AXI handshake waits (wready, bvalid, arready, rvalid). It does NOT
-apply between burst write beats in `ST_BURST_W`, because inter-beat pacing
-is host-controlled via JTAG scans — far longer than
-any AXI-side timeout.
+**Burst admission:** A burst write is collected whole in the write buffer
+(each beat answered OKAY when stored) and only then raises AW; the last
+beat's response carries the B. Illegal bursts (4 KB crossing, bad
+FIXED/WRAP, size, type, longer than `FIFO_DEPTH`) are refused with SLVERR
+before the bus. A burst read raises AR only when all its beats fit in the
+burst FIFO, so the R channel never waits on the host.
+
+**Burst timing:** The AXI-side timeout (`TIMEOUT` parameter) is a
+no-progress timeout on the bus: the write wait restarts on every AW, W or B
+handshake (so it can expire between W beats), and a burst read restarts on
+every accepted R beat. Collecting burst-write beats from JTAG is host-paced
+and has no timeout. On a timeout the bridge answers SLVERR but still
+finishes what it owes the slave: a write runs to its B, an AR stays up until
+accepted, and late read beats are drained (`CFG_AXI_STATUS`).
 
 **Burst read pipeline:** The FIFO read has a 1-scan pipeline delay: the
 first `BURST_RDATA` scan sets `last_cmd` but does not capture FIFO data
 (because `last_cmd` was still `BURST_RSTART` at CAPTURE time). The host
-sends a priming `BURST_RDATA`, then N data scans for N words.
+sends a priming `BURST_RDATA`, then N data scans for N words. A scan that
+shows a burst word pops it at Update-DR, whatever command that scan shifts
+in. The burst's own response (its `resp`) is queued like any other and can
+arrive after the last data word.
 
 **Host pacing:** Single-word paths issue roughly one JTAG round trip per
 `raw_dr_scan`; auto-increment blocks and batched APIs amortise tool
@@ -205,7 +257,10 @@ a raw TCF transport (bypassing XSDB) change how much of the cable's
 bandwidth you actually see.
 
 Parameters: `ADDR_W` (default 32), `DATA_W` (default 32), `FIFO_DEPTH`
-(default 16), `TIMEOUT` (default 4096 axi_clk cycles).
+(default 16), `CMD_FIFO_DEPTH` and `RESP_FIFO_DEPTH` (default
+`2*FIFO_DEPTH`), `TIMEOUT` (default 4096 axi_clk cycles), `STREAM_EN`
+(default 0), `DEBUG_EN` (default 0), `ASYNC_FIFO_IMPL` (core default 0,
+portable FIFO; the AMD/Xilinx wrappers default to 1, XPM).
 
 **Verified AMD/Xilinx 7-series IR codes** (xc7a100t):
 USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
@@ -218,3 +273,4 @@ USER1=0x02, USER2=0x03, USER3=0x22, USER4=0x23.
 | RTL lint | `python sim/run_sim.py --lint-only` | Shared `iverilog -Wall` elaboration target list used by CI |
 | Simulation | `python sim/run_sim.py` | Runs RTL lint first, then ELA behavior, ELA focused regressions, ELA configuration matrix, burst readout, single-chain pipe readout, EIO, core-manager, and channel-mux testbenches |
 | Hardware | `pytest examples/arty_a7/test_hw_integration.py` | Arty A7-100T hardware regression for the reference bitstream |
+| Hardware (other boards) | `pytest examples/<board>/test_hw_integration.py` | Per-board suites (see each example README), including the Arty S7-25 and DE0-Nano ELA + EIO examples (on `main`, unreleased; the contributor reported 3 passing tests on each board for PR #85) |

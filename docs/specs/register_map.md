@@ -1,4 +1,4 @@
-# JTAG Register Map — v0.4.0
+# JTAG Register Map
 
 <a id="regmap-top"></a>
 
@@ -10,14 +10,14 @@
   - [Managers (multi-ELA and mixed active-slot)](#regmap-ela-manager)
   - [SEQ_STAGE_N_CFG encoding](#regmap-seq-cfg)
   - [Compare modes](#regmap-compare-modes)
-  - [Bitfields](#regmap-bitfields)
+  - [Bitfields](#regmap-bitfields) — [FEATURES](#regmap-features), [TRIG_MODE](#regmap-trig-mode)
   - [DATA window readout (USER1)](#regmap-data-user1)
   - [Burst readout (USER2)](#regmap-burst-user2)
 - **EIO** (USER3 standalone, or a managed USER1 slot)
   - [Core register map](#regmap-eio) — [address table](#regmap-eio-addr), [clock domains](#regmap-eio-clk), [reset behaviour](#regmap-eio-rst)
-- **EJTAG-AXI** (USER4)
+- **EJTAG-AXI** (default USER4)
   - [Bridge DR format](#regmap-ejtag-axi) — [shift-in](#regmap-ejtag-axi-in), [shift-out](#regmap-ejtag-axi-out), [command table](#regmap-ejtag-axi-cmd), [status bits](#regmap-ejtag-axi-status), [stream mode](#regmap-ejtag-axi-stream), [config registers (CMD_CONFIG)](#regmap-ejtag-axi-config)
-- **EJTAG-UART** (USER4, mutually exclusive with AXI)
+- **EJTAG-UART** (its own USER chain; conflicts with AXI only when both are assigned the same chain)
   - [32-bit DR format](#regmap-ejtag-uart) — [commands](#regmap-ejtag-uart-cmd), [CONFIG byte map](#regmap-ejtag-uart-config), [shift-out status](#regmap-ejtag-uart-status)
 
 ---
@@ -41,7 +41,7 @@ in that bridge’s section.
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | VERSION | RO | Core identity and version: `[31:24]` major, `[23:16]` minor, `[15:0]` ASCII core ID `"LA"` (`0x4C41`). Hosts verify `VERSION[15:0]` before trusting any other ELA register. Current v0.4 value: `0x0004_4C41`. |
+| `0x0000` | VERSION | RO | Core identity and version: `[31:24]` major, `[23:16]` minor, `[15:0]` ASCII core ID `"LA"` (`0x4C41`). Hosts verify `VERSION[15:0]` before trusting any other ELA register. The 0.5.x releases report `0x0005_4C41` (the word carries major and minor only, not the patch level). |
 | `0x0004` | CTRL | RW | Control register; see [CTRL](#regmap-ctrl). |
 | `0x0008` | STATUS | RO | Capture status; see [STATUS](#regmap-status). |
 | `0x000C` | SAMPLE_W | RO | Sample width in bits. |
@@ -56,7 +56,7 @@ in that bridge’s section.
 | `0x0030` | SQ_MODE | RW | Storage qualification mode, bits [3:0]. 0 = off; 1..9 select compare mode 0..8 (1 = EQ, 2 = NEQ, ... 9 = CHANGED); 10..15 = off. Active only when `STOR_QUAL=1`. Cores without `COMPARE_CAPS` bit 22 take the raw compare mode instead (1 = NEQ), so EQ is out of reach on them. |
 | `0x0034` | SQ_VALUE | RW | Storage qualification match value. |
 | `0x0038` | SQ_MASK | RW | Storage qualification match mask. |
-| `0x003C` | FEATURES | RO | Feature flags: `[3:0]` = `TRIG_STAGES`, `[4]` = `STOR_QUAL`, other bits report optional build features. |
+| `0x003C` | FEATURES | RO | Build parameters: `[3:0]` = `TRIG_STAGES`, `[4]` = `STOR_QUAL`, `[5]` = `DECIM_EN`, `[6]` = `EXT_TRIG_EN`, `[7]` = timestamps present, `[15:8]` = `NUM_CHANNELS`, `[23:16]` = `NUM_SEGMENTS`, `[31:24]` = `TIMESTAMP_W`; see [FEATURES](#regmap-features). |
 | `0x0040 + N*20 + 0` | SEQ_STAGE_N_CFG | RW | Sequencer stage N configuration; see [SEQ_STAGE_N_CFG encoding](#regmap-seq-cfg). |
 | `0x0040 + N*20 + 4` | SEQ_STAGE_N_VALUE_A | RW | Sequencer stage N comparator A match value. |
 | `0x0040 + N*20 + 8` | SEQ_STAGE_N_MASK_A | RW | Sequencer stage N comparator A mask. |
@@ -66,12 +66,23 @@ in that bridge’s section.
 | `0x0094` | STREAM_CTRL | RW | `COMPARE_CAPS` bit 23 only. Bit 0 = ring: the segmented capture wraps to segment 0 after the last one instead of ending, writing only segments the host has released. Bit 1 = raw blocks (with bit 0): every stored sample is a trigger, so with `PRETRIG_LEN = 0`, `POSTTRIG_LEN >= 1`, `TRIG_DELAY = 0` and `TRIG_HOLDOFF = 0` the windows hold consecutive stored samples (a delay or holdoff skips samples between windows, unmarked; a one-sample window skips every other sample). Bits 0-1 are taken on arm; the core ignores the ring while run-length capture is on. Bits `[5:4]` select the `STREAM_DATA` field. Resets to 0. See [Continuous capture](../05_ela_core.md#continuous-capture). |
 | `0x0098` | STREAM_RELEASE | RW | `COMPARE_CAPS` bit 23 only. Write `{session[7:0], seq[23:0]}` to release every window before `seq`; reads back the last write. Taken only while the ring runs, for the current session, and for `seq` from the released count up to the completed count; otherwise refused (`STREAM_STATUS[4]`). A write while `STREAM_STATUS[0]` is set is dropped. |
 | `0x009C` | STREAM_DATA | RO | `COMPARE_CAPS` bit 23 only. Field `STREAM_CTRL[5:4]`: 0 = `{session[7:0], completed[23:0]}`, the windows completed since the arm (modulo 2^24); 1 = `[23:0]` the windows released; 2 = what waiting for a free segment has lost since the arm: stored samples in raw mode, sample clocks otherwise, saturating at 2^32 - 1; 3 = 0. Window `n` is in segment `n mod NUM_SEGMENTS`. A window counted here is complete in the buffer, and its `SEG_START` is published with it. |
+| `0x00A0` | CHAN_SEL | RW | `NUM_CHANNELS > 1` only. `[7:0]` = probe channel to capture, taken on arm; a channel at or past `NUM_CHANNELS` captures channel 0. Reads 0 and ignores writes on single-channel cores. |
+| `0x00A4` | NUM_CHAN | RO | `NUM_CHANNELS` parameter (1 on single-channel cores). |
 | `0x00A8` | RLE_CTRL | RW | `RLE_W` cores only. Bit 0 = run-length capture enable, taken on arm (resets to 0). Bit 1 = the timestamp DATA window returns run counts instead of timestamps; arm and soft reset clear it. The core ignores bit 0 while decimation or storage qualification is on. See [Run-length capture](../05_ela_core.md#run-length-capture). |
+| `0x00AC` | PROBE_SEL | RW | `PROBE_MUX_W > 0` only. `[7:0]` = probe-mux slice index (slice `i` is bits `[(i+1)*SAMPLE_W-1 : i*SAMPLE_W]` of the packed `probe_in`), taken on arm; a slice at or past `PROBE_MUX_W / SAMPLE_W` captures slice 0. Reads 0 and ignores writes otherwise. |
+| `0x00B0` | DECIM | RW | `DECIM_EN=1` only. `[23:0]` = decimation ratio N: store one sample every N+1 sample clocks (0 = every clock), taken on arm. The trigger still runs every clock. Reads 0 and ignores writes otherwise. |
+| `0x00B4` | TRIG_EXT | RW | `EXT_TRIG_EN=1` only. `[1:0]` = external trigger mode, taken on arm: 0 = disabled (internal trigger only), 1 = internal OR `trigger_in`, 2 = internal AND `trigger_in`, 3 = disabled. Resets to the `DEFAULT_TRIG_EXT` parameter. Reads 0 and ignores writes otherwise. |
+| `0x00B8` | NUM_SEGMENTS | RO | `NUM_SEGMENTS` parameter (1 = unsegmented). |
+| `0x00BC` | SEG_STATUS | RO | `[31]` = every segment of the capture is done; low `clog2(NUM_SEGMENTS)` bits = segments completed (wraps to 0 when the last one completes). Unsegmented cores read `0x8000_0000`. |
+| `0x00C0` | SEG_SEL | RW | `NUM_SEGMENTS > 1` only. Segment selected for readout: `SEG_START`, the DATA and timestamp windows, `CAPTURE_LEN` (for clock-limited RLE captures), `STREAM_STATUS[5]` and the next `BURST_PTR` write all follow it. Reads 0 and ignores writes otherwise. |
+| `0x00C4` | TIMESTAMP_W | RO | `TIMESTAMP_W` parameter (0 = no timestamps). |
+| `0x00C8` | SEG_START | RO | Buffer start pointer of the completed window: of the `SEG_SEL` segment on segmented cores, of the capture otherwise. `BURST_PTR` latches this value as the burst start. |
 | `0x00CC` | RLE_W | RO | Run-count width (`RLE_W` parameter). 0 = no run-length capture; this is also the capability bit. |
+| `0x00D0` | PROBE_MUX_W | RO | `PROBE_MUX_W` parameter (0 = no probe mux). |
 | `0x00D4` | TRIG_DELAY | RW | Post-trigger delay in sample-clock cycles (0..65535). When non-zero, the committed trigger sample shifts N cycles after the trigger event. |
 | `0x00D8` | STARTUP_ARM | RW | Bit 0. When set, RESET leaves the core armed instead of idle. `STARTUP_ARM=1` in RTL changes this register's power-up default. |
 | `0x00DC` | TRIG_HOLDOFF | RW | Trigger holdoff in sample-clock cycles (0..65535). Trigger hits are ignored for N cycles after ARM and after segmented auto-rearm. |
-| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` (set when `USER1_DATA_EN=1`). Bit 21 reports `CAPTURE_GEN`; a core with bit 21 always reports bit 20, so bit 21 without bit 20 means the core has no DATA window and hosts refuse window reads of it. Bit 22 is always set: `SQ_MODE` holds the compare mode plus one. Bit 23 reports continuous capture (the `STREAM_*` registers; set when `NUM_SEGMENTS > 1`). |
+| `0x00E0` | COMPARE_CAPS | RO | Compare capability bitmask. Bits 0-8 report compare modes. Bit 16 reports comparator B / dual-combine support when bit 17 is set. Bit 17 marks the extended capability schema; older bitstreams omit bit 17 and should be treated as dual-compare capable. Bit 18 reports full-width comparator A (`WIDE_TRIG`, the `WIDE_SEL`/`WIDE_DATA` window). Bit 19 is always set: the timestamp window base is decoded at full width. Cores without it decode a base at or past `0x10000` at its low 16 bits, so hosts stop DATA window reads at that alias on them. Bit 20 reports `DATA_OFFSET` and the USER1 DATA window (set when `USER1_DATA_EN=1`). Bit 21 reports `CAPTURE_GEN`; current cores always set it, independently of bit 20, so bit 21 without bit 20 means a core built with `USER1_DATA_EN=0`, which has no DATA window, and hosts refuse window reads of it. Cores older than bit 21 cannot say. Bit 22 is always set: `SQ_MODE` holds the compare mode plus one. Bit 23 reports continuous capture (the `STREAM_*` registers; set when `NUM_SEGMENTS > 1`). |
 | `0x00E4` | WIDE_SEL | RW | `WIDE_TRIG` only. Selects the target for the next `WIDE_DATA` write: `[0]` = mask (1) vs value (0), `[7:4]` = 32-bit word index. |
 | `0x00F0` | WIDE_DATA | WO | `WIDE_TRIG` only. Loads the 32-bit word selected by `WIDE_SEL` into comparator A's value/mask, letting the host program the comparator across the full `SAMPLE_W` (word 0 also aliases `TRIG_VALUE`/`TRIG_MASK`). |
 | `0x00F4` | DATA_OFFSET | RW | `USER1_DATA_EN` only (`COMPARE_CAPS` bit 20). Word offset added to every DATA and timestamp window read, so the windows can be read past the 16-bit address space or a core manager's `0xF000`. 0 after reset, and set to 0 by every `CTRL` write with bit 0 (arm) or bit 1 (reset), so an offset a host left behind cannot shift the next capture's reads. See [DATA window readout](#regmap-data-user1). |
@@ -84,7 +95,11 @@ in that bridge’s section.
 - `[3:0]`   comparator A mode
 - `[7:4]`   comparator B mode
 - `[9:8]`   combine (0=A only, 1=B only, 2=A AND B, 3=A OR B)
+- `[11:10]` next_state: the stage to go to when this (non-final) stage's
+  count target is reached. The hardware uses the low `clog2(TRIG_STAGES)`
+  bits (bit 10 alone with 2 stages, both bits with 3 or 4).
 - `[12]`    is_final (1 = this stage fires the trigger)
+- `[15:13]` reserved
 - `[31:16]` occurrence count target
 
 <a id="regmap-compare-modes"></a>
@@ -151,11 +166,31 @@ one consistent set.
   the two writes' settings. It stays set while the sample clock is stopped.
 - [31:5] reserved
 
+<a id="regmap-features"></a>
+### FEATURES
+- [3:0]   `TRIG_STAGES` (1 = simple trigger, 2-4 = sequencer)
+- [4]     `STOR_QUAL`
+- [5]     `DECIM_EN`
+- [6]     `EXT_TRIG_EN`
+- [7]     timestamps present (`TIMESTAMP_W > 0`)
+- [15:8]  `NUM_CHANNELS`
+- [23:16] `NUM_SEGMENTS`
+- [31:24] `TIMESTAMP_W`
+
+Other build options are reported elsewhere: `COMPARE_CAPS` (compare modes,
+comparator B, `WIDE_TRIG`, DATA window, continuous capture), `RLE_W`,
+`PROBE_MUX_W`, `NUM_CHAN`, `NUM_SEGMENTS` and `TIMESTAMP_W`.
+
 <a id="regmap-trig-mode"></a>
 ### TRIG_MODE
-- [0] `value_match` (1 = compare TRIG_VALUE with mask)
-- [1] `edge_detect` (1 = detect rising edge)
-- [31:2] reserved
+The simple trigger's comparator A mode. Used only when `TRIG_STAGES=1`; a
+sequencer core ignores `TRIG_MODE`, `TRIG_VALUE` and `TRIG_MASK`. Resets to 1.
+- [1:0] mode, compared with `TRIG_VALUE` under `TRIG_MASK`:
+  - 0 or 1 = `value_match`: `(probe & mask) == (value & mask)` (EQ)
+  - 2 = `edge_detect`: any masked bit changed from the previous sample
+    (CHANGED; not a rising-edge detector)
+  - 3 = both: EQ or CHANGED, with the same value and mask
+- [31:2] reserved (read back as written)
 
 [↑ Top](#regmap-top)
 
@@ -298,11 +333,18 @@ since a Test-Logic-Reset there cancels a burst after its header was checked.
 - Legacy two-chain AMD/Xilinx builds switch IR to USER2 (0x03) and perform 256-bit DR scans.
   Default `SINGLE_CHAIN_BURST=1` builds keep the 256-bit scans on the active ELA control chain.
 - **Sample mode** (`bit[31]=0`): each scan returns `256 / SAMPLE_W` packed samples
-  (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan is a priming scan;
-  read `N` scans to get `N × (256/SAMPLE_W)` samples.
+  (e.g. 32 for 8-bit probes, 8 for 32-bit probes).  The first scan after the
+  `BURST_PTR` write is a priming scan that carries no samples, on the separate
+  burst chain and on the single-chain pipe alike: read `1 + N` scans and
+  discard the first to get `N × (256/SAMPLE_W)` samples.  The priming scan
+  holds the stale staging word, or the burst header on a manager with
+  `MGR_CAPS[4]` (below), which the host checks before discarding it.  Sample
+  payloads carry no CRC.  The USER1 DATA window has no priming scan.
 - **Timestamp mode** (`bit[31]=1`): each scan returns `256 / TIMESTAMP_W` timestamps
   packed LSB-first.  The host uses `read_timestamp_block()` to retrieve timestamps
-  via this path and discards the priming scan.
+  via this path, with the same priming scan.  Whether the host reads timestamps
+  by burst or through the DATA window depends on the transport and the core's
+  capabilities and chain routing.
 - **Run-count mode** (`bit[31:30]=2'b11`, `RLE_W` cores): same packing as timestamp
   mode. The lane is `TIMESTAMP_W` bits wide, or `RLE_W` bits on a core without
   timestamps; each count sits in the low `RLE_W` bits. The host uses
@@ -344,7 +386,8 @@ since a Test-Logic-Reset there cancels a burst after its header was checked.
 ## EIO Core Register Map (USER3 standalone, or managed slot)
 
 The EIO core uses the same 49-bit DR protocol as the ELA control interface,
-usually on a separate JTAG USER chain (CHAIN=3, IR=`0x04`) so it coexists
+usually on a separate JTAG USER chain (CHAIN=3: IR `0x22` on AMD/Xilinx
+7-series and single-die UltraScale) so it coexists
 with ELA USER1 and USER2. In mixed-manager designs, select the EIO slot via
 `MGR_ACTIVE` on USER1 first; the EIO still sees this same native address map.
 
@@ -353,7 +396,7 @@ with ELA USER1 and USER2. In mixed-manager designs, select the EIO slot via
 
 | Address | Name | Access | Description |
 |---------|------|--------|-------------|
-| `0x0000` | VERSION | RO | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"IO"` (`0x494F`). Same encoding scheme as ELA VERSION. Hosts verify `VERSION[15:0]`. Current v0.4 value: `0x0004_494F`. |
+| `0x0000` | VERSION | RO | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"IO"` (`0x494F`). Same encoding scheme as ELA VERSION. Hosts verify `VERSION[15:0]`. The 0.5.x releases report `0x0005_494F`. |
 | `0x0004` | EIO_IN_W | RO | Input probe width in bits. |
 | `0x0008` | EIO_OUT_W | RO | Output probe width in bits. |
 | `0x0010 + i*4` | IN[i] | RO | `probe_in` bits `[(i+1)*32-1 : i*32]`, synchronized to `jtag_clk` through a 2-FF synchronizer. |
@@ -373,11 +416,21 @@ On `jtag_rst`: all OUT registers are cleared to zero. IN registers are not affec
 [↑ Top](#regmap-top)
 
 <a id="regmap-ejtag-axi"></a>
-## EJTAG-AXI Bridge DR Format (USER4, CHAIN=4)
+## EJTAG-AXI Bridge DR Format (default USER4, CHAIN=4)
 
-The EJTAG-AXI bridge uses a 72-bit pipelined streaming DR. Each scan shifts
-in a new command and shifts out the result of the **previous** command — zero
-polling required.
+The EJTAG-AXI bridge uses a 72-bit DR. Each scan shifts in one command; on
+Update-DR the bridge queues AXI work into an asynchronous command FIFO, and
+every queued command produces exactly one response, pushed into a response
+FIFO when the AXI side completes it. Completions are asynchronous to the
+scans: a scan's Capture-DR shows the oldest queued response with
+`prev_valid=1`, or no result (`prev_valid=0`, usually with `busy`) while it
+is still owed. The host therefore submits commands and then drains
+responses with wait scans (`NOP`, or `BURST_RDATA` during a burst read),
+batched where the transport allows, until it has seen `prev_valid` once
+per queued command. `CONFIG` is a separate case: its value appears on the
+next scan with `prev_valid=1` and leaves any queued AXI response for a
+later scan. See [chapter 07](../07_ejtag_axi_bridge.md) for the host
+sequences.
 
 <a id="regmap-ejtag-axi-in"></a>
 ### Shift-in (host → FPGA), 72 bits LSB-first
@@ -394,8 +447,8 @@ polling required.
 
 | Bits | Field | Description |
 |------|-------|-------------|
-| `[31:0]` | rdata | Read data from previous command |
-| `[63:32]` | info | Additional info (address echo, burst count) |
+| `[31:0]` | rdata | Read data of the response or burst word this scan shows, or the `CONFIG` value |
+| `[63:32]` | info | `[47:32]` = low 16 bits of the auto-increment address, `[55:48]` = burst-read FIFO occupancy, `[63:56]` = 0 |
 | `[65:64]` | resp | AXI response code (OKAY=0, SLVERR=2, DECERR=3) |
 | `[67:66]` | rsvd | Reserved |
 | `[71:68]` | status | Status bits (see below) |
@@ -405,35 +458,38 @@ polling required.
 
 | Code | Mnemonic | Description |
 |-----:|----------|-------------|
-| 0x0 | NOP | No operation; retrieves previous result |
-| 0x1 | WRITE | Single AXI write at addr |
+| 0x0 | NOP | No operation; the scan still shows the oldest queued response, so NOPs are the wait scans |
+| 0x1 | WRITE | Single AXI write: addr, payload = data, wstrb (a zero `wstrb` is ignored) |
 | 0x2 | READ | Single AXI read at addr |
-| 0x3 | WRITE_INC | Write at auto-increment address |
-| 0x4 | READ_INC | Read at auto-increment address |
-| 0x5 | SET_ADDR | Set auto-increment base address |
-| 0x6 | BURST_SETUP | Configure burst (len, size, type in payload) |
-| 0x7 | BURST_WDATA | Push one word into burst write buffer |
-| 0x8 | BURST_RDATA | Pop one word from burst read FIFO |
-| 0x9 | BURST_RSTART | Initiate burst read (addr channel) |
+| 0x3 | WRITE_INC | Write at the auto-increment address, then add 4 |
+| 0x4 | READ_INC | Read at the auto-increment address, then add 4 |
+| 0x5 | SET_ADDR | Set auto-increment base address (no response) |
+| 0x6 | BURST_SETUP | No response. addr = burst start address; payload `[7:0]` = AxLEN (beats − 1), `[10:8]` = AxSIZE, `[13:12]` = AxBURST |
+| 0x7 | BURST_WDATA | Queue one beat (payload, wstrb) of the burst write set up by `BURST_SETUP`. The bridge collects all AxLEN+1 beats before raising AW; each beat gets a response (OKAY when stored, the last one the write's B) |
+| 0x8 | BURST_RDATA | Request burst-read data: the next scan's Capture-DR shows the next burst FIFO word. The word a scan shows is popped at that scan's Update-DR whatever command it shifts in (`RESET` flushes the FIFO instead), so the first `BURST_RDATA` after `BURST_RSTART` is a priming scan |
+| 0x9 | BURST_RSTART | Queue the burst read set up by `BURST_SETUP` (its own addr field is not used). AR goes out only when all beats fit in the burst FIFO; the burst's one response can arrive after its last data word |
 | 0xA | STREAM_RSTART | Start a streaming read: addr = start (word aligned), payload = word count. Only with `STREAM_EN=1` (`FEATURES[24]`); otherwise a NOP (nothing is queued, no response). |
-| 0xE | CONFIG | Read bridge config register (addr selects register) |
-| 0xF | RESET | Reset bridge state machines |
+| 0xE | CONFIG | Latch config register `addr[15:0]` at Update-DR; the next scan shows it with `prev_valid=1`, and a queued AXI response stays queued for a later scan |
+| 0xF | RESET | Reset the bridge: clears `error`, flushes the queues and the burst FIFO, and abandons AXI work safely (`CFG_AXI_STATUS`). Until the AXI side acknowledges it, scans show `busy` and no result, and new AXI commands are refused (setting `error`); poll with NOPs until `busy` clears |
 
 <a id="regmap-ejtag-axi-status"></a>
 ### Status bits `[71:68]`
 
 | Bit | Meaning |
 |----:|---------|
-| 0 | `prev_valid` — rdata/resp are from a completed operation |
+| 0 | `prev_valid` — this scan carries a result: a queued AXI response, a burst word, or a `CONFIG` value |
 | 1 | `busy` — work still pending: a RESET in flight, a full command queue, or AXI responses still owed. A scan that shows a result does not count owed responses; use `CFG_AXI_STATUS[5]` to know the bus is idle |
-| 2 | `error` — sticky, last operation got non-OKAY AXI response |
+| 2 | `error` — sticky until `RESET`: an AXI response was not OKAY, or a command was refused (queue full, `RESET` in flight) |
 | 3 | `fifo_notempty` — burst read FIFO has data available |
 
 > [!NOTE]
-> Timeout applies only to AXI handshake waits (wready, bvalid,
-> arready, rvalid). Inter-beat timing in burst writes is host-paced via
-> JTAG scans and has no timeout. Burst reads have a 1-scan FIFO pipeline
-> delay — the host sends a priming `BURST_RDATA` before reading N words.
+> `TIMEOUT` is a no-progress timeout on the AXI bus: a write's wait
+> restarts on every AW, W or B handshake (so it can expire between W
+> beats), a burst read's on every accepted R beat. Collecting burst-write
+> beats from JTAG is host-paced and has no timeout. A timed-out write
+> still runs to its B and a timed-out AR stays up until accepted. Burst
+> reads have a 1-scan FIFO pipeline delay — the host sends a priming
+> `BURST_RDATA` before reading N words.
 > A read that times out on `rvalid`, or that RESET cuts off after the
 > slave accepted its address, is drained: the bridge holds `rready` high
 > and discards the beats up to `rlast`, however late. Commands wait for
@@ -469,12 +525,12 @@ FIFO has room for the whole burst.
 | `0x0000` | VERSION | varies | `{major[7:0], minor[7:0], core_id[15:0]}` where `core_id` is ASCII `"JX"` (`0x4A58`). Hosts verify `VERSION[15:0]` before trusting the core. Legacy bitstreams that still return `"EJAX"` (`0x454A4158`) at this address are accepted with a warning. |
 | `0x0004` | VERSION_ALIAS | same as `0x0000` | Mirror of VERSION for explorer-friendly reads at the old VERSION slot. |
 | `0x002C` | FEATURES | varies | `[7:0]`=ADDR_W, `[15:8]`=DATA_W, `[23:16]`=`FIFO_DEPTH-1` (AXI4 awlen convention; host adds 1 to recover the true depth, so FIFO_DEPTH=256 fits as 0xFF). `[24]`=STREAM_ON (streaming read built in, `STREAM_EN=1`). `[25]`=bus-safe writes: whole bursts buffered before AW, VALIDs held to READY, B always taken, illegal bursts (4 KB crossing, bad FIXED/WRAP, size, type, write longer than `FIFO_DEPTH`) refused with SLVERR before the bus, and `CFG_AXI_STATUS`. The bridge cannot buffer bursts longer than `FIFO_DEPTH`; the host rejects oversized `burst_read`/`burst_write` requests. |
-| `0x0030` | AXI_STATUS | varies | What the bridge still owes the slave (FEATURES[25]): `[0]` write engine busy, `[1]` it is finishing a write nobody waits for (timed out or RESET), `[2]` ARVALID held after a timeout or RESET, `[3]` beats of an abandoned read being drained, `[4]` burst write being collected, `[5]` anything owed (`[0]`, `[2]` or `[3]`) as one AXI-side flop. Each bit is 2-FF synchronized on its own, so `[0]`-`[4]` may all read 0 for a moment while an obligation passes between them; test `[5]` for idle. |
+| `0x0030` | AXI_STATUS | varies | What the bridge still owes the slave (FEATURES[25]): `[0]` write engine busy, `[1]` it is finishing a write nobody waits for (timed out or RESET), `[2]` ARVALID held after a timeout or RESET, `[3]` beats of an abandoned read being drained, `[4]` burst write being collected, `[5]` anything on or owed to the bus as one AXI-side flop: `[0]`, `[2]`, `[3]`, or any read in flight (an ordinary single or burst read too, from ARVALID to its last beat). Each bit is 2-FF synchronized on its own, so `[0]`-`[4]` may all read 0 for a moment while an obligation passes between them; test `[5]` for idle. |
 
 [↑ Top](#regmap-top)
 
 <a id="regmap-ejtag-uart"></a>
-## EJTAG-UART bridge — 32-bit DR (USER4, CHAIN=4)
+## EJTAG-UART bridge — 32-bit DR (own USER chain)
 
 Unlike the **ELA** and **EIO** cores, the UART bridge has **no memory-mapped
 32-bit register file** addressed like `0x0004`, `0x0008`, ….  The host talks
@@ -488,6 +544,11 @@ The implementation is **pipelined** (like EJTAG-AXI): the byte returned on a
 CONFIG scan is the result of the **previous** CONFIG address; the host issues
 four CONFIG scans plus a trailing **NOP** to assemble one 32-bit value (see
 `EjtagUartController._config_read_u32` in `host/fcapz/ejtaguart.py`).
+
+The bridge sits on its own USER chain: `JTAG_CHAIN` on the AMD/Xilinx
+wrappers (default 4), `CHAIN` on Intel (default instance 5). It conflicts
+with EJTAG-AXI only when both are assigned the same chain; the KV260
+example runs it on USER3 next to the AXI bridge on USER4.
 
 See [chapter 08 — EJTAG-UART bridge](../08_ejtag_uart_bridge.md) for wiring,
 FIFO behaviour, and the Python API.

@@ -34,7 +34,8 @@ of the `CaptureConfig` that produced the capture: `sample_clock_hz`,
 `sample_width`, `depth`, `pretrigger`, `posttrigger`, `channel`,
 `decimation`, `stor_qual_mode`, `ext_trigger_mode`, the simple
 `trigger` (`mode`, `value`, `mask`) and the probe map.  It also holds
-`overflow`, `segment`, the sample array, and timestamps if present.
+`overflow`, `segment`, the sample array, and timestamps, run lengths and
+continuous-capture window info (`stream`) when the capture has them.
 It does **not** record the sequencer stages (`sequence`),
 `trigger_delay`, `trigger_holdoff`, `stor_qual_value` / `stor_qual_mask`,
 `probe_sel`, `startup_arm`, `rle` or `post_clocks`.
@@ -79,6 +80,8 @@ the bitstream was built with `TIMESTAMP_W > 0`.  `run_lengths` (same
 `{"index", "value"}` form, clocks per entry) is present only for a
 [run-length capture](05_ela_core.md#run-length-capture).  `probes` is present
 only when the capture had a probe map, and lists `{name, width, lsb}` per lane.
+`stream` (`{seq, after_gap, lost}`) is present only for a window read by
+[continuous capture](05_ela_core.md#continuous-capture).
 
 `decimation` and `stor_qual_mode` record how the capture was sampled, which
 is what tells a later reader whether consecutive samples are consecutive
@@ -117,8 +120,8 @@ read it directly with the `json` module.
 
 ## CSV
 
-The CSV format is the **simplest** — one row per sample, two or
-three columns.
+The CSV format is the **simplest** — one row per sample, two to
+four columns (`index,value[,timestamp][,run_length]`).
 
 Without timestamps:
 
@@ -264,18 +267,21 @@ fcapz capture --pretrigger 8 --posttrigger 16 \
 In GTKWave you see two rows with meaningful names.  Much
 nicer.
 
-### Auto-generated `.gtkw` layout file (GUI only)
+### Auto-generated `.gtkw` layout file
 
-The desktop GUI's "Open in viewer (GTKWave)" button writes a
-**`.gtkw` layout file** alongside the `.vcd` so GTKWave opens with
+The desktop GUI's "Open in viewer (GTKWave)" button, and the CLI's
+`fcapz capture --format vcd --out cap.vcd --open-in gtkwave`, write a
+**`.gtkw` layout file** alongside the `.vcd` (the CLI names it
+`cap.gtkw`) so GTKWave opens with
 the signals already added to the waveform pane, in the order you
 defined them in your `ProbeSpec` list, with sensible radixes (hex
 for wide buses, binary for 1-bit signals).
 
 The generator is at
 [`host/fcapz/gui/gtkw_writer.py`](../host/fcapz/gui/gtkw_writer.py)
-— ~75 lines.  It's invoked automatically when you click "Open in
-viewer (GTKWave)" but you can also use it from your own scripts:
+— ~75 lines.  It's invoked automatically by "Open in viewer
+(GTKWave)" and by `--open-in gtkwave`, but you can also use it from your
+own scripts:
 
 ```python
 from pathlib import Path
@@ -296,7 +302,9 @@ Surfer command file
 ([`host/fcapz/gui/surfer_command_writer.py`](../host/fcapz/gui/surfer_command_writer.py),
 `write_surfer_command_file_for_capture(result, Path(...))`) that adds the
 signals and places a marker on the trigger sample, and launches
-`surfer --command-file <file> <vcd>`.  When the GUI reuses a running Surfer
+`surfer --command-file <file> <vcd>`.  From the CLI,
+`fcapz capture --format vcd --out cap.vcd --open-in surfer` does the same,
+writing the command file as `cap.surfer.txt`.  When the GUI reuses a running Surfer
 for repeated captures, it reloads the new wave through Surfer's WCP
 connection where available.
 
@@ -437,8 +445,9 @@ it to the waveform pane.  Right-click → "Data Format" → "Hex" if
 you want hex display.
 
 If you launch via the desktop GUI ("Open in viewer (GTKWave)"
-button), the auto-generated `.gtkw` layout takes care of the
-add-and-format step automatically.
+button), or add `--open-in gtkwave` to the capture command, the
+auto-generated `.gtkw` layout takes care of the add-and-format step
+automatically.
 
 ## Worked example: CSV into pandas
 

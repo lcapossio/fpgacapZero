@@ -137,10 +137,15 @@ Counts travel on the timestamp lane, so no new burst format exists.
   `0x10000` alias on older cores, paging). The host restores the bit after
   the read; arm and soft reset clear it.
 - The host reads counts through the same code as timestamps.
-- Wrappers: the standalone ELA wrappers that hold the burst reader (Xilinx
-  7-series, Intel, ECP5, PolarFire) take `RLE_W` and size the lane. The core
-  manager, `debug_multi` and the AXI monitor keep `RLE_W = 0` in v1.
-- Both HDLs.
+- Wrappers: every standalone ELA wrapper takes `RLE_W`. Those with a burst
+  reader size its lane for the counts: Xilinx 7-series and UltraScale (a shim
+  over the 7-series wrapper), Intel, ECP5, PolarFire, Efinix (burst on its
+  second JTAG User TAP) and the UART/TAP-bridge ELA (`fcapz_ela_uart`). The
+  Gowin wrapper has no burst engine, so its counts are read only through the
+  USER1 timestamp window. The core manager, `debug_multi` and the AXI monitor
+  keep `RLE_W = 0` in v1.
+- Both HDLs (the VHDL wrappers cover every vendor wrapper above except the
+  UART/TAP-bridge ELA, which is Verilog only).
 
 ## Host
 
@@ -151,8 +156,10 @@ Counts travel on the timestamp lane, so no new burst format exists.
   `run_lengths` (clocks per entry, empty when RLE is off). The trigger
   index stays an entry index. A helper expands entries to one sample per
   clock, with a size limit.
-- VCD and the other exporters place each entry at its start clock, from the
-  run lengths.
+- VCD places each entry at its start clock, from the run lengths (at its
+  timestamp instead when the capture also has timestamps). CSV and JSON keep
+  entry indices and carry the run lengths in their own `run_length` column /
+  `run_lengths` array.
 - GUI and web: a checkbox on RLE cores; previews and the trigger marker use
   clock time, not entry index. A post-trigger clock limit field while it is
   checked.
