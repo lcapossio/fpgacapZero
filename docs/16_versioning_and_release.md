@@ -52,14 +52,15 @@ Bumping the version is now a **two-step procedure**:
 1. Edit `VERSION` (one line, one number).
 2. Run `python tools/sync_version.py`.
 
-That's it.  The script regenerates `rtl/fcapz_version.vh` from the
-canonical `VERSION` value.  `pyproject.toml` already reads `VERSION`
+That's it.  The script regenerates `rtl/fcapz_version.vh` and the
+VHDL package `rtl/vhdl/pkg/fcapz_pkg.vhd` from the canonical
+`VERSION` value.  `pyproject.toml` already reads `VERSION`
 via setuptools' `dynamic` mechanism, so the next `pip install -e .`
 picks up the new version automatically.  Tests use
 `fcapz._version_tuple()` instead of hardcoded numbers, so they
 follow the canonical value too.
 
-CI fails the build if the generated header has drifted from
+CI fails the build if either generated file has drifted from
 `VERSION` — see "CI guard" below.
 
 ## The canonical files
@@ -67,7 +68,7 @@ CI fails the build if the generated header has drifted from
 ### `VERSION`
 
 ```
-0.5.1
+0.5.2
 ```
 
 One line, semver `MAJOR.MINOR.PATCH`.  Each component must fit in
@@ -191,8 +192,12 @@ metadata can lag an edited `VERSION` until the next install, but
 
 ## Per-core identity registers (the "core_id magic")
 
-The `VERSION` register at address `0x0000` of each core is split
-into three fields:
+Each core's identity word is split into three fields.  ELA, EIO and
+the AXI monitor's ELA return it from the `VERSION` register at
+`0x0000` of their register space; the EJTAG bridges return it at
+CONFIG offset `0x0000` of their native CONFIG path; a core manager
+returns its own at `MGR_VERSION` (`0xF000`) on its chain, while
+`0x0000` there reads the active slot's core:
 
 ```
 [31:24] = MAJOR  (8-bit, from FCAPZ_VERSION_MAJOR)
@@ -200,15 +205,17 @@ into three fields:
 [15:0]  = CORE_ID  (16-bit ASCII, constant per-core)
 ```
 
-| Core | `core_id` ASCII | Value | Full v0.5.0 register |
-|---|---|---|---|
-| ELA | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0005_4C41` |
-| EIO | `"IO"` (Embedded I/O) | `0x494F` | `0x0005_494F` |
-| EJTAG-AXI | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0005_4A58` |
-| EJTAG-UART | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0005_4A55` |
-| AXI monitor | `"AM"` (AXI Monitor) | `0x414D` | `0x0005_414D` |
+| Core | Where | `core_id` ASCII | Value | Full register, any 0.5.x release |
+|---|---|---|---|---|
+| ELA | `VERSION`, `0x0000` | `"LA"` (Logic Analyzer) | `0x4C41` | `0x0005_4C41` |
+| EIO | `VERSION`, `0x0000` | `"IO"` (Embedded I/O) | `0x494F` | `0x0005_494F` |
+| EJTAG-AXI | CONFIG offset `0x0000` | `"JX"` (EJTAG-AXI bridge) | `0x4A58` | `0x0005_4A58` |
+| EJTAG-UART | CONFIG offset `0x0000` | `"JU"` (EJTAG-UART bridge) | `0x4A55` | `0x0005_4A55` |
+| AXI monitor | `AXI_MON_ID`, `0x00E8` (its ELA reports `"LA"` at `0x0000`) | `"AM"` (AXI Monitor) | `0x414D` | Not the packed layout: `[31:16]` `"AM"`, `[15:8]` protocol, `[7:0]` capability flags ([chapter 19](19_axi_monitor.md#detecting-it)) |
+| Core manager | `MGR_VERSION`, `0xF000` | `"CM"` (Core Manager) | `0x434D` | `0x0005_434D` |
 
-All cores use the unified `{major, minor, core_id}` identity word. ELA
+All cores use the unified `{major, minor, core_id}` identity word (the
+AXI monitor's extra `AXI_MON_ID` register is the one exception). ELA
 and EIO expose it through their 49-bit register interface; EJTAG-AXI and
 EJTAG-UART expose the same layout through their native CONFIG paths.
 The host stack still accepts the pre-v0.4.0 EJTAG bridge IDs (`"EJAX"` and
@@ -258,26 +265,31 @@ output" into a clear error with a remediation hint.
 
 ## CI guard
 
-`.github/workflows/ci.yml` has a `version-sync` job that runs
-**before** any other check:
+`.github/workflows/ci.yml` has a `version-sync` job, listed first:
 
 ```yaml
 version-sync:
-  name: VERSION ↔ rtl/fcapz_version.vh in sync
+  name: VERSION and HDL constants in sync
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
       with:
         python-version: "3.11"
-    - name: Verify fcapz_version.vh is regenerated from VERSION
+    - name: Verify HDL version constants are regenerated from VERSION
       run: python tools/sync_version.py --check
 ```
 
-If you bump `VERSION` and forget to commit the regenerated
-header, CI fails this job in <10 seconds with the actionable
-message above.  No other CI job runs until this passes, so you
-can't waste runner minutes on stale state.
+It checks both generated files, `rtl/fcapz_version.vh` and
+`rtl/vhdl/pkg/fcapz_pkg.vhd`.  If you bump `VERSION` and forget to
+commit them, CI fails this job in <10 seconds with the actionable
+message above.  It runs in parallel with the other jobs, which do not
+wait for it, so other jobs can still pass or fail on the same push.
+
+Both workflows (`ci.yml` and `release.yml`) give their jobs a
+read-only token by default (`permissions: contents: read`); only the
+release workflow's PyPI and TestPyPI publishing jobs add
+`id-token: write`, for Trusted Publishing.
 
 ## Release procedure
 

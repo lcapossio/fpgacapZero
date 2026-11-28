@@ -10,7 +10,8 @@
 
 Open-source FPGA debug cores — in **native Verilog and VHDL** — that you drop
 into any design to **see and control what's happening inside your FPGA over
-JTAG**: no extra board pins, no soft CPU, no vendor lock-in.
+JTAG**: no extra board pins on a supported vendor TAP, no soft CPU, no vendor
+lock-in.
 
 Think of it as an open, vendor-neutral alternative to ChipScope / SignalTap /
 Reveal that works the same way across **AMD/Xilinx, Intel/Altera, Lattice, Gowin,
@@ -119,23 +120,29 @@ use the same controls through the
 
 ## Will it work on my board?
 
-Any board with JTAG access works. You drive it through **OpenOCD** (any
+A board works over JTAG when its FPGA has a supported TAP wrapper (AMD/Xilinx
+Versal, for one, does not yet; some wrappers also take the TAP pads as explicit
+ports) and you can reach it through a supported transport. You drive it
+through **OpenOCD** (any
 OpenOCD-supported adapter — FTDI, WCH CH347, CMSIS-DAP, J-Link, …), the
-**AMD/Xilinx hw_server** (Vivado — hardware-validated on the Arty A7 and on the
-Kria KV260, a Zynq UltraScale+ MPSoC), or **Quartus `quartus_stp`**
-(Intel/Altera USB-Blaster — hardware-validated on the DE25-Nano / Agilex 5), or
+**AMD/Xilinx hw_server** (Vivado — hardware-validated on the Arty A7, the
+Arty S7-25 and the Kria KV260, a Zynq UltraScale+ MPSoC), or **Quartus
+`quartus_stp`** (Intel/Altera USB-Blaster — hardware-validated on the
+DE25-Nano / Agilex 5 and the DE0-Nano / Cyclone IV E with Quartus II 13.1), or
 **directly over an FTDI cable** (`--backend ftdi`: the FlashPro5 on Microchip
 boards, a Digilent cable, or any FT2232H/FT4232H, with no OpenOCD or vendor
 server — hardware-validated through FTDI's D2XX driver on the PolarFire SoC
 Discovery Kit, the Arty A7, where it also programs the bitstream, and the
-Kria KV260, where it reaches the FPGA past the ARM DAP on the JTAG chain;
-the libusb driver and multi-device chains are on `main`, not yet in a
-release, and libusb is validated for raw JTAG scans only). A board with **no JTAG to the fabric** can
+Kria KV260, where it reaches the FPGA past the ARM DAP on the JTAG chain; the
+libusb driver (`pip install "fpgacapzero[usb]"`) and multi-device chains are
+in 0.5.2, and libusb is validated for raw JTAG scans only, not yet a full
+session; loading a Gowin GW1NR-9C `.fs` into SRAM over FTDI is on `main`,
+unreleased). A board with **no JTAG to the fabric** can
 use the **serial TAP bridge** instead: two spare pins and a UART
 (`--backend serial`; hardware-validated on the Forgix board's Efinix Trion). On
-Zynq UltraScale+ MPSoC parts (`xck*`, `xczu*`) the host picks the PS TAP's
-chain mode from the tap name, so all four USER chains work with no extra
-setup. The
+Zynq UltraScale+ MPSoC parts (Kria `xck24` / `xck26`, `xczu*`) the host picks
+the PS TAP's chain mode from the tap name, so all four USER chains work with no
+extra setup. The
 full per-vendor matrix and JTAG-chain rules are in the manual's
 [RTL integration chapter](https://github.com/lcapossio/fpgacapZero/blob/main/docs/04_rtl_integration.md); see also
 [Support status](#support-status) below.
@@ -154,11 +161,19 @@ pip install -e ".[web]"      # core host stack + web interface
 fcapz-web                    # the easiest way to take your first capture
 ```
 
+The web interface never programs the FPGA, so load a bitstream with
+fpgacapZero cores first: with Vivado's Hardware Manager, or once from the CLI
+(`fcapz --backend hw_server --program examples/arty_a7/arty_a7_vex_top.bit probe`
+for the Arty A7 reference design, see [Build from source](#build-from-source)).
 Then open **http://127.0.0.1:7373** in your browser: connect to the board, arm
 an ELA capture with the run controls, set triggers, and inspect the result in
 the embedded **Surfer** waveform viewer — EIO and JTAG-AXI live there too. It
-runs over the same JSON-RPC API as the rest of the stack and can be exposed
-across the network with a bearer token. See
+runs over the same JSON-RPC commands as the rest of the stack and can be exposed
+across the network with a bearer token. On `main` (unreleased) the web server
+also refuses request fields that name a server-side file or program
+(`program`, `quartus_stp`, `probe_file`: send probes inline and start the
+server with `--quartus-stp`), checks the browser `Origin` on every RPC route,
+and opens only serial ports the machine lists. See
 **[Web interface](https://github.com/lcapossio/fpgacapZero/blob/main/docs/18_web_interface.md)**.
 
 <p align="center">
@@ -211,7 +226,7 @@ The canonical register / shift maps live in
 | AMD/Xilinx `hw_server` backend | ✅ Hardware-validated on Arty A7, Arty S7-25 and Kria KV260 (Zynq UltraScale+ MPSoC) |
 | OpenOCD backend | ✅ Hardware-validated on Gowin BRS-100 and the PolarFire SoC Discovery Kit; AMD/Xilinx/OpenOCD path still less exercised than `hw_server` |
 | Quartus USB-Blaster (`quartus_stp`) backend | ✅ Hardware-validated on DE25-Nano (Agilex 5) and DE0-Nano (Cyclone IV E, Quartus II 13.1) |
-| Direct FTDI backend (`--backend ftdi`, D2XX or libusb) | ✅ Hardware-validated over D2XX on the PolarFire SoC Discovery Kit's embedded FlashPro5, the Arty A7 (including 7-series programming) and the Kria KV260 (multi-device JTAG chain, on `main`); libusb (on `main`, unreleased) validated for raw JTAG scans only, full sessions not yet |
+| Direct FTDI backend (`--backend ftdi`, D2XX or libusb) | ✅ Hardware-validated over D2XX on the PolarFire SoC Discovery Kit's embedded FlashPro5, the Arty A7 (including 7-series programming) and the Kria KV260 (multi-device JTAG chain); libusb (`fpgacapzero[usb]`) validated for raw JTAG scans only, full sessions not yet; Gowin GW1NR-9C `.fs` SRAM programming on the BRS-100 (on `main`, unreleased) |
 | Serial TAP bridge (`--backend serial`, `fcapz_ela_uart`) | ✅ Hardware-validated on Forgix (Efinix Trion T8F49, over its configuration pins) |
 | AMD/Xilinx 7-series wrappers | ✅ Hardware-validated on Arty A7-100T and Arty S7-25 (Spartan-7; ELA + EIO) |
 | Gowin wrapper | ✅ Hardware-validated on BRS-100-GW1NR9 |

@@ -12,9 +12,9 @@ drive, and debug bus access available from normal RTL and normal host
 software, without tying the workflow to one FPGA family, one GUI, or
 one closed project database.
 
-## The four cores
+## The five cores
 
-Every fpgacapZero design uses one or more of these four cores.  They
+Every fpgacapZero design uses one or more of these five cores.  They
 all live under [`../rtl/`](../rtl/), and they all speak to the host
 PC through the FPGA's JTAG TAP via the BSCANE2 (or vendor-equivalent)
 primitive.
@@ -50,6 +50,9 @@ configuration uses zero overhead for unused features):
   time in the same buffer.
 - **Segmented memory** — auto-rearm after each segment fills, so a
   single capture run can record 4, 8, or 16 separate trigger events.
+- **Continuous capture** (new in v0.5.2) — a segmented ELA can run as a
+  ring that wraps and refills each segment once the host has read it,
+  so the host streams window after window.
 - **Runtime probe mux** — observe a wide bus and runtime-select which
   `SAMPLE_W` slice gets captured, without resynthesising.
 - **External trigger I/O** — `trigger_in` / `trigger_out` ports with
@@ -68,7 +71,7 @@ signals**.  You define an input bus (fabric → host) and an output
 bus (host → fabric); the host can poll the inputs and drive the
 outputs over JTAG, without resynthesising the bitstream.
 
-It is the simplest of the four cores — just a register file with
+It is the simplest of the five cores — just a register file with
 clock-domain-crossing synchronisers — but it is enormously useful for
 runtime configuration, manual reset/enable bits, on-the-fly tuning,
 and quick "is this signal stuck high?" checks.  See
@@ -84,11 +87,17 @@ load DDR memory, read back BRAM contents, drive AXI peripherals
 without booting a CPU, and keep the debug path under your own source
 control.
 
-A single 72-bit pipelined DR scan is one AXI transaction; the host
-side caches the bridge's `FIFO_DEPTH` from the FEATURES register and
-rejects oversized bursts at the API boundary so a buggy host can
-never overflow the on-chip read FIFO.  Hardware-validated on Arty
-A7-100T with the batched-scan transport.  Full chapter:
+Each 72-bit pipelined DR scan carries one AXI command; its response
+comes back on a later scan, so even a single read polls until the
+bridge reports the transaction complete.  The host side caches the
+bridge's `FIFO_DEPTH` from the FEATURES register and rejects oversized
+bursts at the API boundary so a buggy host can never overflow the
+on-chip read FIFO.  Since 0.5.2 the bridge also keeps the AXI bus legal
+when a transfer times out or is reset (VALIDs held to READY, every
+write burst completed, a timed-out read drained), advertised as
+`safe_writes` (the `has_safe_writes` property), with `axi_status()` reporting what
+is still outstanding.  Hardware-validated on Arty A7-100T with the
+batched-scan transport.  Full chapter:
 [chapter 07](07_ejtag_axi_bridge.md).
 
 ### 4. EJTAG-UART — JTAG-to-UART Bridge
@@ -106,14 +115,28 @@ Use cases that just work:
   `fcapz uart-recv`.
 - The host uploads a small firmware image into BRAM via the bridge,
   then resets the CPU and watches the debug output stream back.
-- Two FPGAs talk over JTAG via two `fcapz-uart` instances on the
-  host, no UART wires.
+- Two FPGAs talk over JTAG through the host (`fcapz uart-recv` /
+  `fcapz uart-monitor` on one, `fcapz uart-send` on the other), no
+  UART wires.
 
 Full chapter: [chapter 08](08_ejtag_uart_bridge.md).  The bytes once
 dropped on back-to-back internal-loopback traffic at 115200 baud
 (BUG-002) were a host-side bug, fixed without a bitstream change; the
 Arty A7 loopback stress test has not been re-run since the fix.  See
 chapter 08 for details.
+
+### 5. AXI monitor — passive AXI4-Lite tap
+
+The AXI monitor (`fcapz_axi_mon`) watches an AXI4-Lite interface
+without driving it: the five AXI channels are flattened into one sample
+vector and fed to an embedded ELA, so arming, triggering, readout and
+the host `Analyzer` are the ELA's.  An optional decode layer adds
+transaction events (handshakes, error responses) to trigger on, and the
+host decodes the capture into named AXI fields and transactions.
+Wrappers exist for AMD/Xilinx, Intel, ECP5, PolarFire, Efinix and Gowin;
+the AMD/Xilinx wrapper defaults to USER1 (`CTRL_CHAIN=1`), and the Arty
+A7 reference design places it on USER2.  Full chapter:
+[chapter 19](19_axi_monitor.md).
 
 ## How the cores fit together
 
@@ -133,6 +156,7 @@ the TAP adapter.
 | ELA burst data | USER1 by default; USER2 for legacy dual-chain burst | `0x02` / `0x03` |
 | EIO | USER3 | `0x22` |
 | EJTAG-AXI / EJTAG-UART | USER4 | `0x23` |
+| AXI monitor | USER1 (`CTRL_CHAIN`; USER2 on the Arty A7 reference) | `0x02` / `0x03` |
 
 Multi-die UltraScale(+) parts (KU085, KU115, most Virtex UltraScale+) and
 Zynq UltraScale+ have a longer IR with other codes.  You don't have to look
@@ -146,7 +170,8 @@ separate chains or in managed slots on one chain.  The two bridges (AXI
 and UART) can share USER4 by being instantiated at the same time only if
 you arbitrate them externally; in practice you pick one bridge per
 bitstream.  The reference Arty A7 design includes a USER1 manager with
-2x ELA and 2x EIO plus AXI on USER4, and a separate "uart loopback"
+2x ELA and 2x EIO, an AXI monitor on USER2 and the AXI bridge on USER4,
+and a separate "uart loopback"
 bitstream includes ELA + EIO + UART.
 
 ## The host stack
@@ -156,7 +181,9 @@ Everything talks to a Python package called `fcapz`.  After
 
 - **`fcapz` console command** — the CLI for one-shot operations:
   probe, capture, configure, AXI read/write/dump, UART send/recv,
-  EIO read/write.  Documented in [chapter 10](10_cli_reference.md).
+  EIO read/write, continuous capture (`fcapz stream`) and saved
+  capture profiles (`--capture-profile`, `fcapz capture-profile`).
+  Documented in [chapter 10](10_cli_reference.md).
 - **`fcapz` Python package** — programmatic API.  `Analyzer`,
   `EioController`, `EjtagAxiController`, `EjtagUartController`,
   plus transports and a small `events` module for LLM-friendly
@@ -165,6 +192,21 @@ Everything talks to a Python package called `fcapz`.  After
   JSON over stdin/stdout for integration with other languages or
   long-running test harnesses.  Documented in
   [chapter 11](11_rpc_server.md).
+- **`fcapz-web` web interface** (install with
+  `pip install "fpgacapzero[web]"`) — the recommended graphical
+  front-end: a browser UI with an embedded Surfer waveform viewer,
+  reachable locally or across the network with a bearer token.
+  Documented in [chapter 18](18_web_interface.md).
+- **`fcapz-mcp` MCP server** (install with
+  `pip install "fpgacapzero[mcp]"`) — gives coding agents the lab
+  controls (capture, paging and search, AXI transaction decode, EIO,
+  AXI and UART access) behind opt-in safety flags.  Documented in
+  [chapter 20](20_mcp_server.md).
+- **Broker** (opt-in, `fcapz --broker` or `FCAPZ_BROKER=1`) — lets
+  several CLI or Python (`fcapz.broker.BrokerSession`) programs share
+  one board, one job per core at a time.  The RPC server, GUIs and MCP
+  server do not use it yet.
+  Documented in [chapter 21](21_broker.md).
 - **`fcapz-gui` desktop app** (optional, install with
   `pip install fpgacapzero[gui]`; not actively maintained, so prefer the
   web interface, `fcapz-web`) — PySide6 control panel that wraps
@@ -213,10 +255,12 @@ TAP bridge for boards with no JTAG to the fabric:
   chain of several devices (the KV260's ARM DAP and FPGA) it picks the
   one device whose family it recognises, provided every IR length can be
   worked out, and keeps the others in BYPASS; anything ambiguous needs the Python API's `tap=` / `ir_lengths=`, which the CLI, RPC, MCP, GUI and web interface do not expose.  Programs AMD/Xilinx 7-series
-  FPGAs.  Hardware-validated over D2XX on the PolarFire SoC Discovery Kit,
-  the Arty A7 and the Kria KV260; libusb and multi-device chains are on
-  `main`, not yet released, and libusb is validated for raw JTAG scans
-  only.
+  FPGAs, and (on `main`, unreleased) loads a Gowin `.fs` into the SRAM
+  of a GW1NR-9C that is alone on its chain.  Hardware-validated over D2XX
+  on the PolarFire SoC Discovery Kit, the Arty A7 and the Kria KV260.
+  libusb (`pip install "fpgacapzero[usb]"`) and multi-device chains
+  shipped in 0.5.2; libusb is validated for raw JTAG scans only, not
+  yet a full session.
 - **Serial TAP bridge (`serial`)** — for boards with no JTAG to the
   fabric.  The design instantiates `fcapz_ela_uart`, which rebuilds the
   TAP contract from a byte stream on two pins, and the host talks to it
@@ -226,8 +270,10 @@ TAP bridge for boards with no JTAG to the fabric:
 All transports implement the same `Transport` abstract base class,
 so the rest of the host stack does not care which one you use.  To
 add another backend (e.g. raw TCF for lower per-scan overhead or a
-direct USB stack), implement the ABC and you are done — no other code
-changes needed.  See [chapter 14](14_transports.md) and
+direct USB stack), implement the ABC and the Python API (`Analyzer`
+and the controllers) works with it unchanged; exposing it in the CLI,
+RPC server and the front-ends built on them also takes registering it
+as a backend in their transport factories.  See [chapter 14](14_transports.md) and
 [`specs/transport_api.md`](specs/transport_api.md).
 
 ## Vendor support matrix
