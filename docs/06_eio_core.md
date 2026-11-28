@@ -139,7 +139,7 @@ from fcapz.eio import EioController
 eio = EioController(transport, chain=3)
 eio.connect()
 print(eio.version_major, eio.version_minor, hex(eio.core_id))
-# 0 3 0x494f
+# 0 5 0x494f        (a 0.5.x core: the word carries major.minor, not patch)
 ```
 
 ## Host API: `EioController`
@@ -241,9 +241,10 @@ control plane, so this is fine.
 eio.close()
 ```
 
-Releases the transport.  After `close()`, all the `EioController`
-methods raise `RuntimeError`.  You can construct a new
-`EioController` against the same transport later.
+Closes the transport (`Transport.close()`); on a transport shared with
+other controllers that closes it for them too.  What a later call does
+depends on the transport, so `connect()` again (or construct a new
+`EioController`) before using the EIO after `close()`.
 
 ## Worked example: a runtime control register
 
@@ -387,6 +388,14 @@ exercise EIO end-to-end:
 | `test_set_clear_bit` | `set_bit()` modifies one bit without disturbing others |
 | `test_output_roundtrip_all_bits` | every bit position works |
 | `test_write_zero_outputs` | clears all bits |
+
+Two newer board examples on `main` (unreleased, added after 0.5.2) also
+cover EIO in their hardware tests, as reported in their READMEs: the
+Terasic DE0-Nano ([`examples/de0_nano`](../examples/de0_nano/), Cyclone IV E
+over USB-Blaster) and the Digilent Arty S7-25
+([`examples/arty_s7`](../examples/arty_s7/), Spartan-7 over `hw_server`).
+Each `test_hw_integration.py` passed its three tests (probe, an ELA
+capture, and an EIO write/read) on the contributor's board.
 
 The same Arty reference EIO outputs are also used by the ELA hardware
 tests as deterministic control hooks:
